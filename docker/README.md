@@ -31,6 +31,46 @@ and `DYNAMIC_CONFIG` is off, so the entrypoint never rewrites it; restart the co
 
 The first account created on the login page becomes the site administrator.
 
+### Custom agent builds
+
+MeshCentral can serve your own agent binaries instead of the default ones. A release manifest lists each
+file with its exact size and SHA384; it is laid over the shipped `agents/agent-defaults.json`, so files it does
+not list keep the default agents. See `docker/agent-overrides.example.json`.
+
+Files are looked up in `meshcentral-data/agentbuilds/<tag>/<filename>`. When the release repository is public,
+MeshCentral downloads missing files itself. For a private repository or a local build, copy the files in yourself.
+`meshcentral-data` is a Docker volume, so copy them through the container:
+
+```bash
+# on the build machine: size and hash for the manifest
+stat -c %s MeshService64.exe
+sha384sum MeshService64.exe
+
+# on the Docker host
+D=/opt/meshcentral/meshcentral-data
+docker exec meshcentral mkdir -p $D/agentbuilds/my-build-1
+docker exec -i meshcentral sh -c "cat > $D/agent-overrides.json" < agent-overrides.json
+docker exec -i meshcentral sh -c "cat > $D/agentbuilds/my-build-1/MeshService64.exe" < MeshService64.exe
+```
+
+Then point `config.json` at the manifest and restart the container:
+
+```json
+"settings": {
+  "agentDownloads": { "manifest": "agent-overrides.json" }
+}
+```
+
+After the restart a `SHA256SUMS` file appears next to the agent and `https://<server>/meshagents` shows the new
+hash (Windows x64 is id 4). A file whose size or SHA384 does not match is not served. The Alpine image has no
+`sha384sum`; to check a file inside the container use
+`docker exec meshcentral node -e "console.log(require('crypto').createHash('sha384').update(require('fs').readFileSync('$D/agentbuilds/my-build-1/MeshService64.exe')).digest('hex'))"`.
+
+The files and the manifest live in the `meshcentral-data` volume, so image rebuilds keep them; `down -v` removes them.
+For a new build, copy it to a new `<tag>` folder, update `tag`, `size` and `sha384` in the manifest and restart.
+With a private release repository the scheduled release check reports a 404 in the server status; serving the
+copied files is not affected. Set `"checkIntervalHours": 0` in `agentDownloads` to turn the check off.
+
 ## Overview
 This document provides a comprehensive guide to setting up and configuring MeshCentral in a Docker environment.<br>
 It includes available options, security measures, and deployment instructions.

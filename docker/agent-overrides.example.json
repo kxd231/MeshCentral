@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "releases": [
+    {
+      "repository": "your-account/MeshAgent",
+      "tag": "my-build-1",
+      "files": [
+        {
+          "filename": "MeshService64.exe",
+          "asset": "MeshService64.exe",
+          "size": 4061696,
+          "sha384": "replace with the output of: sha384sum MeshService64.exe"
+        }
+      ]
+    }
+  ]
+}
