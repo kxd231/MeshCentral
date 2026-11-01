@@ -802,8 +802,11 @@ module.exports.CreateMstscRelay = function (parent, db, ws, req, args, domain) {
         if ((obj.startTime) && (obj.meshid != null)) {
             // Collect how many raw bytes where received and sent.
             // We sum both the websocket and TCP client in this case.
-            var inTraffc = obj.ws._socket.bytesRead, outTraffc = obj.ws._socket.bytesWritten;
-            if (obj.wsClient != null) { inTraffc += obj.wsClient._socket.bytesRead; outTraffc += obj.wsClient._socket.bytesWritten; }
+            var inTraffc = 0, outTraffc = 0;
+            try { // The sockets can already be gone when the websocket was closed by the peer
+                inTraffc = obj.ws._socket.bytesRead; outTraffc = obj.ws._socket.bytesWritten;
+                if (obj.wsClient != null) { inTraffc += obj.wsClient._socket.bytesRead; outTraffc += obj.wsClient._socket.bytesWritten; }
+            } catch (ex) { }
             const sessionSeconds = Math.round((Date.now() - obj.startTime) / 1000);
             const user = parent.users[obj.userid];
             const username = (user != null) ? user.name : null;
@@ -815,6 +818,9 @@ module.exports.CreateMstscRelay = function (parent, db, ws, req, args, domain) {
 
         if (obj.wsClient) { obj.wsClient.close(); delete obj.wsClient; }
         if (obj.tcpServer) { obj.tcpServer.close(); delete obj.tcpServer; }
+        if (obj.utypetimer != null) { clearInterval(obj.utypetimer); } // Stop typing, rdpClient is about to go away
+        obj.utypetimer = null;
+        obj.utype = null;
         if (rdpClient) { rdpClient.close(); rdpClient = null; }
         if ((arg == 1) || (arg == null)) { try { ws.close(); } catch (ex) { console.log(ex); } } // Soft close, close the websocket
         if (arg == 2) { try { ws._socket._parent.end(); } catch (ex) { console.log(ex); } } // Hard close, close the TCP socket
@@ -833,7 +839,7 @@ module.exports.CreateMstscRelay = function (parent, db, ws, req, args, domain) {
         obj.tcpServer.listen(0, '127.0.0.1', function () { obj.tcpServerPort = obj.tcpServer.address().port; startRdp(obj.tcpServerPort); });
         obj.tcpServer.on('connection', function (socket) {
             if (obj.relaySocket != null) {
-                socket.close();
+                socket.destroy();
             } else {
                 obj.relaySocket = socket;
                 obj.relaySocket.pause();
@@ -868,8 +874,8 @@ module.exports.CreateMstscRelay = function (parent, db, ws, req, args, domain) {
                             }
                             return;
                         } catch (ex) { // You are not JSON data so just send over relaySocket
-                            obj.wsClient._socket.pause();
                             try {
+                                obj.wsClient._socket.pause();
                                 obj.relaySocket.write(data, function () {
                                     if (obj.wsClient && obj.wsClient._socket) { try { obj.wsClient._socket.resume(); } catch (ex) { console.log(ex); } }
                                 });
@@ -894,6 +900,7 @@ module.exports.CreateMstscRelay = function (parent, db, ws, req, args, domain) {
 
     // Start the RDP client
     function startRdp(port) {
+        if (obj.ws == null) return; // obj has been cleaned up, just exit.
         parent.parent.debug('relay', 'RDP: Starting RDP client on loopback port ' + port);
         try {
             const args = {
@@ -1071,7 +1078,7 @@ module.exports.CreateMstscRelay = function (parent, db, ws, req, args, domain) {
                 }
                 case 'mouse': { if (rdpClient && (obj.viewonly != true)) { rdpClient.sendPointerEvent(msg[1], msg[2], msg[3], msg[4]); } break; }
                 case 'wheel': { if (rdpClient && (obj.viewonly != true)) { rdpClient.sendWheelEvent(msg[1], msg[2], msg[3], msg[4], msg[5]); } break; }
-                case 'clipboard': { if (rdpClient) { rdpClient.setClipboardData(msg[1]); } break; }
+                case 'clipboard': { if (rdpClient && (obj.viewonly != true) && (typeof msg[1] == 'string')) { rdpClient.setClipboardData(msg[1]); } break; }
                 case 'scancode': {
                     if (obj.limitedinput == true) { // Limit keyboard input
                         var ok = false, k = msg[1];
@@ -1088,18 +1095,20 @@ module.exports.CreateMstscRelay = function (parent, db, ws, req, args, domain) {
                     if (extendedkeys.includes(msg[1])) extended=true;
                     if (rdpClient && (obj.viewonly != true)) { rdpClient.sendKeyEventScancode(msg[1], msg[2], extended); } break;
                 }
-                case 'unicode': { if (rdpClient && (obj.viewonly != true)) { rdpClient.sendKeyEventUnicode(msg[1], msg[2]); } break; }
+                case 'unicode': { if (rdpClient && (obj.viewonly != true) && (obj.limitedinput != true)) { rdpClient.sendKeyEventUnicode(msg[1], msg[2]); } break; }
                 case 'utype': {
-                    if (!rdpClient) return;
-                    obj.utype = msg[1];
+                    if (!rdpClient || (obj.viewonly == true) || (obj.limitedinput == true) || (typeof msg[1] != 'string')) return;
+                    obj.utype = msg[1].substring(0, 65536); // Limit how much text can be queued
                     if (obj.utypetimer == null) {
                         obj.utypetimer = setInterval(function () {
-                            if ((obj.utype == null) || (obj.utype.length == 0)) { clearInterval(obj.utypetimer); obj.utypetimer = null; return; }
-                            var c = obj.utype.charCodeAt(0);
-                            obj.utype = obj.utype.substring(1);
-                            if (c == 13) return;
-                            if (c == 10) { rdpClient.sendKeyEventScancode(28, true); rdpClient.sendKeyEventScancode(28, false); }
-                            else { rdpClient.sendKeyEventUnicode(c, true); rdpClient.sendKeyEventUnicode(c, false); }
+                            try {
+                                if ((rdpClient == null) || (typeof obj.utype != 'string') || (obj.utype.length == 0)) { clearInterval(obj.utypetimer); obj.utypetimer = null; return; }
+                                var c = obj.utype.charCodeAt(0);
+                                obj.utype = obj.utype.substring(1);
+                                if (c == 13) return;
+                                if (c == 10) { rdpClient.sendKeyEventScancode(28, true); rdpClient.sendKeyEventScancode(28, false); }
+                                else { rdpClient.sendKeyEventUnicode(c, true); rdpClient.sendKeyEventUnicode(c, false); }
+                            } catch (ex) { clearInterval(obj.utypetimer); obj.utypetimer = null; obj.utype = null; } // Never let an exception escape a timer
                         }, 5);
                     }
                     break;
