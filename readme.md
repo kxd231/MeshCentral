@@ -1,5 +1,16 @@
 # MeshCentral
 
+> [!NOTE]
+> **This fork replaces the built-in JavaScript RDP client (node-rdpjs) with a native FreeRDP 3 helper.**
+> Web-RDP sessions are handled by `meshfreerdp` (`freerdp/`), a small headless FreeRDP client started by the
+> server for each session. This adds NLA/CredSSP, the RDP graphics pipeline (GFX, optional H.264), working
+> performance options, clipboard and better compatibility with current Windows versions. The browser side is
+> unchanged apart from JPEG tiles. Without the helper, Web-RDP is disabled and the rest of MeshCentral works as usual.
+>
+> * Quick start with Docker: [docker/README.md](docker/README.md#web-rdp-with-freerdp-built-from-source)
+> * Building and configuring the helper: [docs/docs/meshcentral/webrdp.md](docs/docs/meshcentral/webrdp.md)
+> * Helper protocol: [freerdp/PROTOCOL.md](freerdp/PROTOCOL.md)
+
 ## Table of Contents
 
 [About](#about)

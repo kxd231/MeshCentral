@@ -81,6 +81,21 @@ RUN jq '.dependencies += {"modern-syslog": "1.2.0", "telegram": "2.26.22"}' pack
     && npm ci --omit=dev \
     && npm cache clean --force
 
+### STAGE 3B BUILDING THE NATIVE WEB-RDP HELPER (FreeRDP 3)
+
+FROM debian:trixie-slim AS freerdp-compiler
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends --no-install-suggests \
+        freerdp3-dev libturbojpeg0-dev zlib1g-dev cmake build-essential pkg-config && \
+    rm -rf /var/lib/apt/lists/*
+
+COPY --from=mesh-compiler /opt/meshcentral/meshcentral/freerdp /src/freerdp
+RUN rm -rf /src/freerdp/build \
+    && cmake -B /src/freerdp/build -S /src/freerdp -DCMAKE_BUILD_TYPE=Release \
+    && cmake --build /src/freerdp/build \
+    && test -x /src/freerdp/build/meshfreerdp
+
 ### STAGE 4 COMPILING MONGODB TOOLS AND DEPENDENCIES
 
 FROM golang:trixie AS mongo-compiler
@@ -112,6 +127,9 @@ FROM node-base AS finalizer
 # Copy files from previous layers
 COPY --from=dep-compiler /opt/meshcentral/meshcentral /opt/meshcentral/meshcentral
 COPY --from=mongo-compiler /mongo-tools/bin/ /tmp/bin/
+
+# Native Web-RDP helper, MeshCentral looks for it in freerdp/build/meshfreerdp
+COPY --from=freerdp-compiler /src/freerdp/build/meshfreerdp /opt/meshcentral/meshcentral/freerdp/build/meshfreerdp
 
 # environment variables
 ENV NODE_ENV="production" \
@@ -170,6 +188,11 @@ ENV MARIADB_HOST="" \
     MARIADB_USER="" \
     MARIADB_PASS="" \
     MARIADB_DATABASE=""
+
+# Runtime libraries for the native Web-RDP helper (meshfreerdp)
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends --no-install-suggests \
+        libfreerdp3-3 libfreerdp-client3-3 libwinpr3-3 libturbojpeg0
 
 WORKDIR /opt/meshcentral
 

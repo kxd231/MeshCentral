@@ -1,0 +1,27 @@
+{
+  "$schema": "https://raw.githubusercontent.com/Ylianst/MeshCentral/master/meshcentral-config-schema.json",
+  "settings": {
+    "cert": "meshcentral.example.com",
+    "port": 443,
+    "redirPort": 80,
+    "exactPorts": true,
+    "_sessionKey": "Remove the underscore and set a long random string, e.g. from: openssl rand -hex 32",
+    "mpsPort": 0,
+    "amtManager": false,
+    "selfUpdate": false,
+    "plugins": { "enabled": false },
+    "allowFraming": false,
+    "agentPong": 300,
+    "autoBackup": { "backupIntervalHours": 24, "keepLastDaysBackup": 14 },
+    "_debug": "relay",
+    "_freerdpPath": "/usr/local/bin/meshfreerdp"
+  },
+  "domains": {
+    "": {
+      "title": "MeshCentral",
+      "newAccounts": false,
+      "minify": false,
+      "_siteStyle": 3
+    }
+  }
+}

@@ -538,6 +538,10 @@
           "minimum": 1,
           "description": "When specified, sends data to the agent at x seconds interval."
         },
+        "freerdpPath": {
+          "type": "string",
+          "description": "Path to the meshfreerdp helper executable used by Web-RDP. When not set, MeshCentral looks for freerdp/build/meshfreerdp and then for meshfreerdp in the PATH."
+        },
         "amtManager": {
           "type": "boolean",
           "default": true,

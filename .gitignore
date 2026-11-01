@@ -314,3 +314,7 @@ __pycache__/
 docs/__pycache__/
 docs/env/
 docker-compose.yaml
+## Web-RDP helper build output and local deployment settings
+freerdp/build/
+docker/config.webrdp.json
+docker/.env

@@ -1,0 +1,35 @@
+# MeshCentral built from this source tree, including the native FreeRDP Web-RDP helper (meshfreerdp).
+#
+# 1. cp docker/config.webrdp.example.json docker/config.webrdp.json   and edit it (cert, ports, sessionKey)
+# 2. Optional: create docker/.env to override the variables below, for example MC_HTTPS_PORT=1443
+# 3. From the repository root:  docker compose -f docker/compose.webrdp.yaml up -d --build
+#
+# The ports published here must match "port" and "redirPort" in config.webrdp.json, so agents and
+# links use the same port that clients connect to.
+services:
+  meshcentral:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    image: meshcentral-freerdp:local
+    container_name: meshcentral
+    restart: unless-stopped
+    environment:
+      - DYNAMIC_CONFIG=false # config.webrdp.json is used as-is
+      - TZ=${MC_TZ:-UTC}
+      - INSTALL_STYLISHUI=${MC_STYLISHUI:-false} # Optional third-party theme, downloaded on every start
+      - STYLISHUI_FORCE_LATEST=true # Its compatibility list does not include this MeshCentral version
+    volumes:
+      - ./config.webrdp.json:/opt/meshcentral/meshcentral-data/config.json:ro
+      - meshcentral-data:/opt/meshcentral/meshcentral-data
+      - meshcentral-files:/opt/meshcentral/meshcentral-files
+      - meshcentral-web:/opt/meshcentral/meshcentral-web
+      - meshcentral-backups:/opt/meshcentral/meshcentral-backups
+    ports:
+      - "${MC_HTTPS_PORT:-443}:${MC_HTTPS_PORT:-443}"
+      - "${MC_HTTP_PORT:-80}:${MC_HTTP_PORT:-80}"
+volumes:
+  meshcentral-data:
+  meshcentral-files:
+  meshcentral-web:
+  meshcentral-backups:

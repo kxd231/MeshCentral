@@ -70,10 +70,24 @@ RUN echo -e "----------\nINSTALLING ALPINE PACKAGES...\n----------"; \
 COPY --from=mesh-compiler /opt/meshcentral/meshcentral /opt/meshcentral/meshcentral
 WORKDIR /opt/meshcentral/meshcentral
 
-RUN jq '.dependencies += {"modern-syslog": "1.2.0", "telegram": "2.26.22"}' package.json > temp.json && mv temp.json package.json \
+RUN jq '.dependencies += {"modern-syslog": "1.2.0"}' package.json > temp.json && mv temp.json package.json \
     && npm i --package-lock-only \
     && npm ci --omit=dev \
     && npm cache clean --force
+
+### STAGE 2B BUILDING THE NATIVE WEB-RDP HELPER (FreeRDP 3)
+
+FROM node-base AS freerdp-compiler
+
+RUN echo -e "----------\nINSTALLING ALPINE BUILD PACKAGES FOR MESHFREERDP...\n----------"; \
+    apk add --no-cache --update \
+        freerdp-dev libjpeg-turbo-dev cmake build-base pkgconf
+
+COPY --from=mesh-compiler /opt/meshcentral/meshcentral/freerdp /src/freerdp
+RUN rm -rf /src/freerdp/build \
+    && cmake -B /src/freerdp/build -S /src/freerdp -DCMAKE_BUILD_TYPE=Release \
+    && cmake --build /src/freerdp/build \
+    && test -x /src/freerdp/build/meshfreerdp
 
 ### STAGE 3 BUILDING.
 
@@ -81,6 +95,10 @@ FROM node-base AS finalizer
 
 # copy files from previous layer
 COPY --from=dep-compiler /opt/meshcentral/meshcentral /opt/meshcentral/meshcentral
+
+# Native Web-RDP helper, MeshCentral looks for it in freerdp/build/meshfreerdp
+RUN mkdir -p /opt/meshcentral/meshcentral/freerdp/build
+COPY --from=freerdp-compiler /src/freerdp/build/meshfreerdp /opt/meshcentral/meshcentral/freerdp/build/meshfreerdp
 
 # environment variables
 ENV NODE_ENV="production" \
@@ -143,7 +161,7 @@ ENV MARIADB_HOST="" \
 RUN echo -e "----------\nINSTALLING ALPINE PACKAGES...\n----------"; \
     mkdir -p /opt/meshcentral/meshcentral; \
     apk add --no-cache --update \
-        bash curl && \
+        bash curl freerdp-libs libturbojpeg && \
     rm -rf /var/cache/* \
         /tmp/* \
         /usr/share/man/ \

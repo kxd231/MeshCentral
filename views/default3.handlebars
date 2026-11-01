@@ -43,7 +43,6 @@
     <script type="text/javascript" src="scripts/flatpickr.js"></script>
     <script type="text/javascript" src="mstsc/mstsc.js"></script>
     <script type="text/javascript" src="mstsc/keyboard.js"></script>
-    <script type="text/javascript" src="mstsc/rle.js"></script>
     <script type="text/javascript" src="mstsc/client.js"></script>
     <script type="text/javascript" src="mstsc/canvas.js"></script>
     <script type="text/javascript" src="scripts/jquery{{{min}}}.js"></script>
@@ -2245,6 +2244,31 @@
                                         <option notransval=1 value="1920x1080">1920x1080</option>
                                     </select>
                                     <label for="d7rdpsize">Display Size</label>
+                                </div>
+                                <div class="form-floating mb-2">
+                                    <select id="d7rdpgfx" class="form-select">
+                                        <option value="h264">GFX + H.264</option>
+                                        <option value="gfx">GFX</option>
+                                        <option value="legacy">Legacy (GDI)</option>
+                                    </select>
+                                    <label for="d7rdpgfx">Graphics</label>
+                                </div>
+                                <div class="form-floating mb-2">
+                                    <select id="d7rdpquality" class="form-select">
+                                        <option value="90">High</option>
+                                        <option value="75">Medium</option>
+                                        <option value="50">Low</option>
+                                    </select>
+                                    <label for="d7rdpquality">Image Quality</label>
+                                </div>
+                                <div class="form-floating mb-2">
+                                    <select id="d7rdpbpp" class="form-select">
+                                        <option notransval=1 value="32">32 bit</option>
+                                        <option notransval=1 value="24">24 bit</option>
+                                        <option notransval=1 value="16">16 bit</option>
+                                        <option notransval=1 value="15">15 bit</option>
+                                    </select>
+                                    <label for="d7rdpbpp">Color Depth (Legacy)</label>
                                 </div>
                                 <fieldset>
                                     <legend>Options</legend>
@@ -11011,7 +11035,7 @@
         function autoConnectDesktop(e) { if (autoConnectDesktopTimer == null) { autoConnectDesktopTimer = setInterval(function () { connectDesktop(null, 1) }, 1000); } else { clearInterval(autoConnectDesktopTimer); autoConnectDesktopTimer = null; } }
 
         // Used to translate incoming agent console messages
-        var agentConsoleMessages = ['', "Waiting for user to grant access...", "Denied", "Failed to start remote terminal session, {0} ({1})", "Timeout", "Received invalid network data", "Unable to capture display", "Protocol negotiation failed ({0})", "NLA not supported", "SSL required by server", "SSL not allowed by server", "SSL certificate not on server", "Inconsistent flags", "Hybrid required by server", "SSL with user auth required by server"];
+        var agentConsoleMessages = ['', "Waiting for user to grant access...", "Denied", "Failed to start remote terminal session, {0} ({1})", "Timeout", "Received invalid network data", "Unable to capture display", "Protocol negotiation failed ({0})", "NLA not supported", "SSL required by server", "SSL not allowed by server", "SSL certificate not on server", "Inconsistent flags", "Hybrid required by server", "SSL with user auth required by server", "Authentication failed, check username and password", "Unable to connect to the RDP server", "TLS connection failed", "RDP helper (FreeRDP) is not installed on the server"];
         function formatAgentConsoleMessage(msg, msgid, msgargs) {
             var r;
             if (msgargs == null) { msgargs = []; }
@@ -11320,11 +11344,11 @@
                 height = Q('DeskParent').offsetHeight;
             }
             if ((currentNode.rdp == 1) && (Q('d2mode').value == 1)) {
-                connectDesktop(null, 4, { servercred: true, width: width, height: height, flags: (desktopsettings.rdpflags != null) ? desktopsettings.rdpflags : 0x2F, altshell: Q('d2altshell').value, workdir: Q('d2workdir').value });
+                connectDesktop(null, 4, { servercred: true, width: width, height: height, flags: (desktopsettings.rdpflags != null) ? desktopsettings.rdpflags : 0x2F, altshell: Q('d2altshell').value, workdir: Q('d2workdir').value, gfx: desktopsettings.rdpgfx, quality: desktopsettings.rdpquality, bpp: desktopsettings.rdpbpp });
             } else {
                 var savecred = false;
                 if ((features2 & 0x00400000) == 0) { savecred = Q('d2savecred').checked; }
-                connectDesktop(null, 4, { domain: Q('d2domain').value, username: Q('d2user').value, password: Q('d2pass').value, savecred: savecred, width: width, height: height, flags: (desktopsettings.rdpflags != null) ? desktopsettings.rdpflags : 0x2F, altshell: Q('d2altshell').value, workdir: Q('d2workdir').value });
+                connectDesktop(null, 4, { domain: Q('d2domain').value, username: Q('d2user').value, password: Q('d2pass').value, savecred: savecred, width: width, height: height, flags: (desktopsettings.rdpflags != null) ? desktopsettings.rdpflags : 0x2F, altshell: Q('d2altshell').value, workdir: Q('d2workdir').value, gfx: desktopsettings.rdpgfx, quality: desktopsettings.rdpquality, bpp: desktopsettings.rdpbpp });
             }
         }
 
@@ -11625,6 +11649,9 @@
             var rdpflags = 0;
             for (var i = 1; i < 10; i++) { if ((i != 5) && (Q('d7rdp' + i).checked)) { rdpflags |= (1 << (i - 1)); } }
             desktopsettings.rdpflags = rdpflags;
+            desktopsettings.rdpgfx = d7rdpgfx.value;
+            desktopsettings.rdpquality = parseInt(d7rdpquality.value);
+            desktopsettings.rdpbpp = parseInt(d7rdpbpp.value);
             putstore('desktopsettings', JSON.stringify(desktopsettings));
             applyDesktopSettings();
             updateDesktopButtons();
@@ -11673,6 +11700,9 @@
             QV('deskFocusBtn', (desktop != null) && (desktop.contype == 2) && (desktop.state != 0) && (desktopsettings.showfocus));
             if (desktopsettings.rdpsize != null) { d7rdpsize.value = desktopsettings.rdpsize; }
             if (desktopsettings.rdpflags == null) { desktopsettings.rdpflags = 0x2F; }
+            d7rdpgfx.value = (desktopsettings.rdpgfx != null) ? desktopsettings.rdpgfx : 'h264';
+            d7rdpquality.value = (desktopsettings.rdpquality != null) ? desktopsettings.rdpquality : 75;
+            d7rdpbpp.value = (desktopsettings.rdpbpp != null) ? desktopsettings.rdpbpp : 32;
             if (desktopsettings.rdpsmb != null) { d7rdpsmb.checked = desktopsettings.rdpsmb; }
             if (desktopsettings.rdprmw != null) { d7rdprmw.checked = desktopsettings.rdprmw; }
             if (desktopsettings.rdpautoclipboard != null) { d7rdpclip.checked = desktopsettings.rdpautoclipboard; }

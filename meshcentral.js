@@ -4420,7 +4420,7 @@ function mainStart() {
 
         // Check if RDP support if present
         var mstsc = true;
-        try { require('./rdp') } catch (ex) { mstsc = false; }
+        try { mstsc = (require('./freerdpclient').getBinaryPath((config.settings != null) ? config.settings.freerdppath : null) != null); } catch (ex) { mstsc = false; }
 
         // Check if Windows SSPI, LDAP, Passport and YubiKey OTP will be used
         var sspi = false;

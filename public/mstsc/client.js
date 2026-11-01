@@ -225,8 +225,8 @@
                             break;
                         }
                         case 'rdp-error': {
-                            var err = msg[1];
-                            console.log('[mstsc.js] error : ' + err.code + '(' + err.message + ')');
+                            var err = { code: msg[1], message: msg[2] }; // FreeRDP helper error name and numeric code
+                            console.log('[mstsc.js] error : ' + err.code + ' (' + err.message + ')');
                             self.activeSession = false;
                             next(err);
                             break;

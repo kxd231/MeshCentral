@@ -779,8 +779,8 @@ module.exports.CreateWebRelay = function (parent, db, args, domain, mtype) {
 
 // Construct a MSTSC Relay object, called upon connection
 // This implementation does not have TLS support
-// This is a bit of a hack as we are going to run the RDP connection thru a loopback connection.
-// If the "node-rdpjs-2" module supported passing a socket, we would do something different.
+// The RDP connection is made by the native "meshfreerdp" helper (FreeRDP), run as a child process (see freerdpclient.js).
+// The helper connects to a loopback TCP server that we relay thru the MeshCentral relay websocket to the remote device.
 module.exports.CreateMstscRelay = function (parent, db, ws, req, args, domain) {
     const Net = require('net');
     const WebSocket = require('ws');
@@ -796,6 +796,7 @@ module.exports.CreateMstscRelay = function (parent, db, ws, req, args, domain) {
     // Disconnect
     obj.close = function (arg) {
         if (obj.ws == null) return;
+        if (obj.closeAfterRdpTimer != null) { clearTimeout(obj.closeAfterRdpTimer); obj.closeAfterRdpTimer = null; }
 
         // Event the session ending
         if ((obj.startTime) && (obj.meshid != null)) {
@@ -829,7 +830,7 @@ module.exports.CreateMstscRelay = function (parent, db, ws, req, args, domain) {
     // Start the looppback server
     function startTcpServer() {
         obj.tcpServer = new Net.Server();
-        obj.tcpServer.listen(0, 'localhost', function () { obj.tcpServerPort = obj.tcpServer.address().port; startRdp(obj.tcpServerPort); });
+        obj.tcpServer.listen(0, '127.0.0.1', function () { obj.tcpServerPort = obj.tcpServer.address().port; startRdp(obj.tcpServerPort); });
         obj.tcpServer.on('connection', function (socket) {
             if (obj.relaySocket != null) {
                 socket.close();
@@ -839,8 +840,8 @@ module.exports.CreateMstscRelay = function (parent, db, ws, req, args, domain) {
                 obj.relaySocket.on('data', function (chunk) { // Make sure to handle flow control.
                     if (obj.relayActive == true) { obj.relaySocket.pause(); if (obj.wsClient != null) { obj.wsClient.send(chunk, function () { obj.relaySocket.resume(); }); } }
                 });
-                obj.relaySocket.on('end', function () { obj.close(); });
-                obj.relaySocket.on('error', function (err) { obj.close(); });
+                obj.relaySocket.on('end', function () { closeAfterRdp(); });
+                obj.relaySocket.on('error', function (err) { closeAfterRdp(); });
 
                 // Setup the correct URL with domain and use TLS only if needed.
                 const options = { rejectUnauthorized: false };
@@ -876,12 +877,19 @@ module.exports.CreateMstscRelay = function (parent, db, ws, req, args, domain) {
                         }
                     }
                 });
-                obj.wsClient.on('close', function () { parent.parent.debug('relay', 'RDP: Relay websocket closed'); obj.close(); });
-                obj.wsClient.on('error', function (err) { parent.parent.debug('relay', 'RDP: Relay websocket error: ' + err); obj.close(); });
+                obj.wsClient.on('close', function () { parent.parent.debug('relay', 'RDP: Relay websocket closed'); closeAfterRdp(); });
+                obj.wsClient.on('error', function (err) { parent.parent.debug('relay', 'RDP: Relay websocket error: ' + err); closeAfterRdp(); });
                 obj.tcpServer.close();
                 obj.tcpServer = null;
             }
         });
+    }
+
+    // The RDP transport is gone. Let the helper report its error (bad password, ...) to the browser before closing everything.
+    function closeAfterRdp() {
+        if (rdpClient == null) { obj.close(); return; }
+        try { if (obj.relaySocket) { obj.relaySocket.end(); } } catch (ex) { }
+        if (obj.closeAfterRdpTimer == null) { obj.closeAfterRdpTimer = setTimeout(function () { obj.close(); }, 5000); }
     }
 
     // Start the RDP client
@@ -900,11 +908,18 @@ module.exports.CreateMstscRelay = function (parent, db, ws, req, args, domain) {
             };
             if (obj.infos.options) {
                 if (obj.infos.options.flags != null) { args.perfFlags = obj.infos.options.flags; delete obj.infos.options.flags; }
+                if (typeof obj.infos.options.gfx == 'string') { args.gfx = (obj.infos.options.gfx != 'legacy'); args.h264 = (obj.infos.options.gfx == 'h264'); }
+                if ([50, 75, 90].indexOf(obj.infos.options.quality) >= 0) { args.jpegQuality = obj.infos.options.quality; }
+                if ([15, 16, 24, 32].indexOf(obj.infos.options.bpp) >= 0) { args.colorDepth = obj.infos.options.bpp; }
                 if ((obj.infos.options.workingDir != null) && (obj.infos.options.workingDir != '')) { args.workingDir = obj.infos.options.workingDir; }
                 if ((obj.infos.options.alternateShell != null) && (obj.infos.options.alternateShell != '')) { args.alternateShell = obj.infos.options.alternateShell; }
             }
-            rdpClient = require('./rdp').createClient(args).on('connect', function () {
-                send(['rdp-connect']);
+            const binPath = require('./freerdpclient').getBinaryPath((parent.parent.config && parent.parent.config.settings) ? parent.parent.config.settings.freerdppath : null);
+            if (binPath == null) { send(['rdp-error', 'FREERDP_HELPER_NOT_FOUND']); obj.close(); return; }
+            args.binPath = binPath;
+            args.debug = function (msg) { parent.parent.debug('relay', 'RDP: ' + msg); };
+            rdpClient = require('./freerdpclient').createClient(args).on('connect', function (size) {
+                send(['rdp-connect', size]); // Actual desktop size, the server may not use the requested one
                 if ((typeof obj.infos.options == 'object') && (obj.infos.options.savepass == true)) { saveRdpCredentials(); } // Save the credentials if needed
                 obj.sessionid = Buffer.from(parent.crypto.randomBytes(9), 'binary').toString('base64').replace(/\+/g, '@').replace(/\//g, '$');
                 obj.startTime = Date.now();
@@ -917,6 +932,7 @@ module.exports.CreateMstscRelay = function (parent, db, ws, req, args, domain) {
                     parent.parent.DispatchEvent(['*', obj.nodeid, obj.userid, obj.meshid], obj, event);
                 } catch (ex) { console.log(ex); }
             }).on('bitmap', function (bitmap) {
+                try { rdpClient.stdout.pause(); } catch (ex) { } // Flow control, resumed once the metadata is sent
                 try { ws.send(bitmap.data); } catch (ex) { } // Send the bitmap data as binary
                 delete bitmap.data;
                 send(['rdp-bitmap', bitmap]); // Send the bitmap metadata seperately, without bitmap data.
@@ -929,12 +945,15 @@ module.exports.CreateMstscRelay = function (parent, db, ws, req, args, domain) {
                     //console.log('pointer', cursorStr);
                     send(['rdp-pointer', cursorStr]); // The mouse pointer has changed
                 }
+            }).on('resize', function (size) {
+                send(['rdp-resize', size]); // The remote desktop size changed
             }).on('close', function () {
                 send(['rdp-close']); // This RDP session has closed
+                obj.close();
             }).on('error', function (err) {
                 if (typeof err == 'string') { send(['rdp-error', err]); }
-                if ((typeof err == 'object') && (err.err) && (err.code)) { send(['rdp-error', err.err, err.code]); }
-            }).connect('localhost', obj.tcpServerPort);
+                if ((typeof err == 'object') && (err != null) && (err.err)) { send(['rdp-error', err.err, err.code]); }
+            }).connect('127.0.0.1', obj.tcpServerPort);
         } catch (ex) {
             console.log('startRdpException', ex);
             obj.close();
@@ -1051,8 +1070,8 @@ module.exports.CreateMstscRelay = function (parent, db, ws, req, args, domain) {
                     break;
                 }
                 case 'mouse': { if (rdpClient && (obj.viewonly != true)) { rdpClient.sendPointerEvent(msg[1], msg[2], msg[3], msg[4]); } break; }
-                case 'wheel': { if (rdpClient && (obj.viewonly != true)) { rdpClient.sendWheelEvent(msg[1], msg[2], msg[3], msg[4]); } break; }
-                case 'clipboard': { rdpClient.setClipboardData(msg[1]); break; }
+                case 'wheel': { if (rdpClient && (obj.viewonly != true)) { rdpClient.sendWheelEvent(msg[1], msg[2], msg[3], msg[4], msg[5]); } break; }
+                case 'clipboard': { if (rdpClient) { rdpClient.setClipboardData(msg[1]); } break; }
                 case 'scancode': {
                     if (obj.limitedinput == true) { // Limit keyboard input
                         var ok = false, k = msg[1];
@@ -1103,8 +1122,8 @@ module.exports.CreateMstscRelay = function (parent, db, ws, req, args, domain) {
 
     // Send an object with flow control
     function send(obj) {
-        try { rdpClient.bufferLayer.socket.pause(); } catch (ex) { }
-        try { ws.send(JSON.stringify(obj), function () { try { rdpClient.bufferLayer.socket.resume(); } catch (ex) { } }); } catch (ex) { }
+        try { rdpClient.stdout.pause(); } catch (ex) { }
+        try { ws.send(JSON.stringify(obj), function () { try { rdpClient.stdout.resume(); } catch (ex) { } }); } catch (ex) { }
     }
 
     // We are all set, start receiving data

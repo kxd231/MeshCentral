@@ -33,7 +33,7 @@ var CreateRDPDesktop = function (canvasid, domainUrl) {
         obj.nodeid = nodeid;
         obj.port = port;
         obj.credentials = credentials;
-        var options = { savepass: credentials.savecred, useServerCreds: credentials.servercred, width: credentials.width, height: credentials.height, flags: credentials.flags, workingDir: credentials.workdir, alternateShell: credentials.altshell };
+        var options = { savepass: credentials.savecred, useServerCreds: credentials.servercred, width: credentials.width, height: credentials.height, flags: credentials.flags, workingDir: credentials.workdir, alternateShell: credentials.altshell, gfx: credentials.gfx, quality: credentials.quality, bpp: credentials.bpp };
         if (credentials.width && credentials.height) {
             options.width = obj.ScreenWidth = obj.width = credentials.width;
             options.height = obj.ScreenHeight = obj.height = credentials.height;
@@ -62,9 +62,20 @@ var CreateRDPDesktop = function (canvasid, domainUrl) {
                 var msg = JSON.parse(evt.data);
                 switch (msg[0]) {
                     case 'rdp-connect': {
+                        if ((msg[1] != null) && (msg[1].width > 0) && (msg[1].height > 0)) { obj.ScreenWidth = obj.width = msg[1].width; obj.ScreenHeight = obj.height = msg[1].height; } // Actual remote desktop size
                         changeState(3);
                         obj.rotation = 0;
                         obj.Canvas.setTransform(1, 0, 0, 1, 0, 0);
+                        obj.Canvas.canvas.width = obj.ScreenWidth;
+                        obj.Canvas.canvas.height = obj.ScreenHeight;
+                        obj.Canvas.fillRect(0, 0, obj.ScreenWidth, obj.ScreenHeight);
+                        if (obj.m.onScreenSizeChange != null) { obj.m.onScreenSizeChange(obj, obj.ScreenWidth, obj.ScreenHeight, obj.CanvasId); }
+                        break;
+                    }
+                    case 'rdp-resize': {
+                        if ((msg[1] == null) || !(msg[1].width > 0) || !(msg[1].height > 0)) break;
+                        obj.ScreenWidth = obj.width = msg[1].width;
+                        obj.ScreenHeight = obj.height = msg[1].height;
                         obj.Canvas.canvas.width = obj.ScreenWidth;
                         obj.Canvas.canvas.height = obj.ScreenHeight;
                         obj.Canvas.fillRect(0, 0, obj.ScreenWidth, obj.ScreenHeight);
@@ -94,23 +105,15 @@ var CreateRDPDesktop = function (canvasid, domainUrl) {
                         obj.consoleMessage = msg[1];
                         delete obj.consoleMessageArgs;
                         if (msg.length > 2) { obj.consoleMessageArgs = [ msg[2] ]; }
-                        switch (msg[1]) {
-                            case 'NODE_RDP_PROTOCOL_X224_NEG_FAILURE':
-                                if (msg[2] == 1) { obj.consoleMessageId = 9; } // "SSL required by server";
-                                else if (msg[2] == 2) { obj.consoleMessageId = 10; } // "SSL not allowed by server";
-                                else if (msg[2] == 3) { obj.consoleMessageId = 11; } // "SSL certificate not on server";
-                                else if (msg[2] == 4) { obj.consoleMessageId = 12; } // "Inconsistent flags";
-                                else if (msg[2] == 5) { obj.consoleMessageId = 13; } // "Hybrid required by server";
-                                else if (msg[2] == 6) { obj.consoleMessageId = 14; } // "SSL with user auth required by server";
-                                else obj.consoleMessageId = 7; // "Protocol negotiation failed";
-                                break;
-                            case 'NODE_RDP_PROTOCOL_X224_NLA_NOT_SUPPORTED':
-                                obj.consoleMessageId = 8; // "NLA not supported";
-                                break;
-                            default:
-                                obj.consoleMessageId = null;
-                                break;
-                        }
+                        // Map FreeRDP helper error names to console message ids, unknown errors show the raw name.
+                        // FreeRDP error names come as FREERDP_ERROR_X, FREERDP_ERROR_CONNECT_X or ERRCONNECT_X, compare on X only.
+                        var errName = (typeof msg[1] == 'string') ? msg[1].replace(/^(FREERDP_ERROR_|ERRCONNECT_)/, '').replace(/^CONNECT_(?!FAILED$|TRANSPORT_FAILED$|CANCELLED$)/, '') : '';
+                        if (['SECURITY_NEGO_CONNECT_FAILED'].indexOf(errName) >= 0) { obj.consoleMessageId = 7; } // "Protocol negotiation failed"
+                        else if (['TLS_CONNECT_FAILED'].indexOf(errName) >= 0) { obj.consoleMessageId = 17; } // "TLS connection failed"
+                        else if (['AUTHENTICATION_FAILED', 'NO_OR_MISSING_CREDENTIALS', 'LOGON_FAILURE', 'WRONG_PASSWORD', 'PASSWORD_EXPIRED', 'PASSWORD_MUST_CHANGE', 'PASSWORD_CERTAINLY_EXPIRED', 'CLIENT_REVOKED', 'ACCESS_DENIED', 'LOGON_TYPE_NOT_GRANTED'].indexOf(errName) >= 0 || (errName.indexOf('ACCOUNT_') == 0)) { obj.consoleMessageId = 15; } // "Authentication failed, check username and password"
+                        else if (['CONNECT_FAILED', 'CONNECT_TRANSPORT_FAILED', 'CONNECT_CANCELLED', 'DNS_NAME_NOT_FOUND', 'DNS_ERROR', 'TCP_CONNECT_FAILED'].indexOf(errName) >= 0) { obj.consoleMessageId = 16; } // "Unable to connect to the RDP server"
+                        else if (msg[1] == 'FREERDP_HELPER_NOT_FOUND') { obj.consoleMessageId = 18; } // "RDP helper (FreeRDP) is not installed on the server"
+                        else { obj.consoleMessageId = null; }
                         if (obj.onConsoleMessageChange) { obj.onConsoleMessageChange(); }
                         obj.Stop();
                         break;
