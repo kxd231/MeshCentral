@@ -9,7 +9,7 @@
 
 `docker/Dockerfile` and `docker/Dockerfile-debian` build the native Web-RDP helper (`meshfreerdp`, FreeRDP 3) into
 the image. A prebuilt image (linux/amd64 and linux/arm64) is published as `ghcr.io/kxd231/meshcentral:latest`
-by `.github/workflows/docker-freerdp.yml`. `docker/compose.new.yaml` runs it with a config file you control:
+by `.github/workflows/docker-freerdp.yml`, which runs only when started by hand or when a release is published. `docker/compose.new.yaml` runs it with a config file you control:
 
 ```bash
 cp docker/config.example.json docker/config.json

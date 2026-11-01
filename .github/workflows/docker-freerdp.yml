@@ -1,14 +1,13 @@
 name: Docker-Builder-FreeRDP
 
-# Builds the image with the native Web-RDP helper (docker/Dockerfile) and publishes it to
-# ghcr.io/<owner>/meshcentral:<branch>, plus :latest for the default branch and :sha-<commit>.
+# Builds the image with the native Web-RDP helper (docker/Dockerfile) and publishes it to ghcr.io/<owner>/meshcentral.
+# Runs only when approved: started by hand (Actions -> Docker-Builder-FreeRDP -> Run workflow) or by publishing a
+# release. Pushing commits does not build an image.
+# Tags: :<branch> and :sha-<commit> for a manual run, :<release tag> for a release, :latest for both.
 on:
   workflow_dispatch:
-  push:
-    branches: [ dev ]
-    paths-ignore:
-      - '**.md'
-      - 'docs/**'
+  release:
+    types: [ published ]
 
 permissions:
   contents: read
@@ -54,8 +53,9 @@ jobs:
           images: ghcr.io/${{ github.repository_owner }}/meshcentral
           tags: |
             type=ref,event=branch
+            type=ref,event=tag
             type=sha
-            type=raw,value=latest,enable={{is_default_branch}}
+            type=raw,value=latest
       - name: Build and push
         uses: docker/build-push-action@v7
         with:
