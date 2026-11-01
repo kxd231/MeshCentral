@@ -3,7 +3,8 @@ name: Docker-Builder-FreeRDP
 # Builds the image with the native Web-RDP helper (docker/Dockerfile) and publishes it to ghcr.io/<owner>/meshcentral.
 # Runs only when approved: started by hand (Actions -> Docker-Builder-FreeRDP -> Run workflow) or by publishing a
 # release. Pushing commits does not build an image.
-# Tags: :<branch> and :sha-<commit> for a manual run, :<release tag> for a release, :latest for both.
+# Tags: :<branch> and :sha-<commit> for a manual run; :<release tag> and :latest only for a published release.
+# Actions are pinned to commit SHAs (tag in the comment) because the job can push images.
 on:
   workflow_dispatch:
   release:
@@ -22,9 +23,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
       - name: Set up Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: "24.x"
       - name: Prepare translations and minified views
@@ -35,29 +36,29 @@ jobs:
           node translate.js minifyall
           node translate.js translateall
       - name: Set up QEMU
-        uses: docker/setup-qemu-action@v4
+        uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4
         with:
           platforms: linux/amd64,linux/arm64
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
       - name: Log in to GitHub Container Registry
-        uses: docker/login-action@v4
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4
         with:
           registry: ghcr.io
           username: ${{ github.repository_owner }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Image metadata
         id: meta
-        uses: docker/metadata-action@v6
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6
         with:
           images: ghcr.io/${{ github.repository_owner }}/meshcentral
           tags: |
             type=ref,event=branch
             type=ref,event=tag
             type=sha
-            type=raw,value=latest
+            type=raw,value=latest,enable=${{ github.event_name == 'release' }}
       - name: Build and push
-        uses: docker/build-push-action@v7
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
         with:
           context: .
           file: docker/Dockerfile
