@@ -14,5 +14,5 @@ examples
 tests
 # Web-RDP: local helper build and deployment secrets
 freerdp/build
-docker/config.webrdp.json
+docker/config.json
 docker/.env

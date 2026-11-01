@@ -11,8 +11,8 @@
 the image. `docker/compose.webrdp.yaml` builds the image from this source tree and runs it with a config file you control:
 
 ```bash
-cp docker/config.webrdp.example.json docker/config.webrdp.json
-# edit docker/config.webrdp.json: "cert" (DNS name or IP), "port"/"redirPort", and enable "sessionKey"
+cp docker/config.example.json docker/config.json
+# edit docker/config.json: "cert" (DNS name or IP), "port"/"redirPort", and enable "sessionKey"
 docker compose -f docker/compose.webrdp.yaml up -d --build
 ```
 
@@ -20,12 +20,12 @@ Optional variables, set in `docker/.env` (next to the compose file):
 
 | Variable | Default | Meaning |
 |----------|---------|---------|
-| `MC_HTTPS_PORT` | 443 | Published HTTPS port. Must equal `settings.port` in `config.webrdp.json`. |
+| `MC_HTTPS_PORT` | 443 | Published HTTPS port. Must equal `settings.port` in `config.json`. |
 | `MC_HTTP_PORT` | 80 | Published HTTP port. Must equal `settings.redirPort`. |
 | `MC_TZ` | UTC | Container time zone. |
 | `MC_STYLISHUI` | false | Install the third-party [Stylish UI](https://github.com/Melo-Professional/MeshCentral-Stylish-UI) theme on start (set `domains[""].siteStyle` to 3). |
 
-`config.webrdp.json` and `.env` are ignored by git and by the Docker build context. The config is mounted read-only
+`config.json` and `.env` are ignored by git and by the Docker build context. The config is mounted read-only
 and `DYNAMIC_CONFIG` is off, so the entrypoint never rewrites it; restart the container after editing it
 (`docker compose -f docker/compose.webrdp.yaml restart`). Code changes need `up -d --build`.
 
