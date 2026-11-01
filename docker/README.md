@@ -8,12 +8,12 @@
 ## Web-RDP with FreeRDP, built from source
 
 `docker/Dockerfile` and `docker/Dockerfile-debian` build the native Web-RDP helper (`meshfreerdp`, FreeRDP 3) into
-the image. `docker/compose.webrdp.yaml` builds the image from this source tree and runs it with a config file you control:
+the image. `docker/compose.new.yaml` builds the image from this source tree and runs it with a config file you control:
 
 ```bash
 cp docker/config.example.json docker/config.json
 # edit docker/config.json: "cert" (DNS name or IP), "port"/"redirPort", and enable "sessionKey"
-docker compose -f docker/compose.webrdp.yaml up -d --build
+docker compose -f docker/compose.new.yaml up -d --build
 ```
 
 Optional variables, set in `docker/.env` (next to the compose file):
@@ -27,7 +27,7 @@ Optional variables, set in `docker/.env` (next to the compose file):
 
 `config.json` and `.env` are ignored by git and by the Docker build context. The config is mounted read-only
 and `DYNAMIC_CONFIG` is off, so the entrypoint never rewrites it; restart the container after editing it
-(`docker compose -f docker/compose.webrdp.yaml restart`). Code changes need `up -d --build`.
+(`docker compose -f docker/compose.new.yaml restart`). Code changes need `up -d --build`.
 
 The first account created on the login page becomes the site administrator.
 

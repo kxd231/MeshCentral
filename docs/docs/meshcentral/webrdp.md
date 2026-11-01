@@ -82,4 +82,4 @@ Set `"debug": "relay"` in the `settings` section of `config.json`. FreeRDP warni
 
 The official `docker/Dockerfile` and `docker/Dockerfile-debian` build the helper in a separate build stage and install it as `freerdp/build/meshfreerdp` inside the MeshCentral directory of the image, together with the required runtime libraries. No extra configuration is needed.
 
-To build and run an image from this source tree, see `docker/compose.webrdp.yaml` and the "Web-RDP with FreeRDP" section of `docker/README.md`.
+To build and run an image from this source tree, see `docker/compose.new.yaml` and the "Web-RDP with FreeRDP" section of `docker/README.md`.
