@@ -121,8 +121,24 @@
             QV('main', false);
             canvas.width = window.innerWidth;
             canvas.height = window.innerHeight;
-            client.connect(cookie, domain, username, password, options, function (err) { QV('myCanvas', false); QV('main', true); });
+            QV('errorMessage', false);
+            client.connect(cookie, domain, username, password, options, function (err) {
+                QV('myCanvas', false);
+                QV('main', true);
+                if (err) { QH('errorMessage', EscapeHtml(rdpErrorText(err.code))); QV('errorMessage', true); }
+            });
             return false;
+        }
+
+        // Readable text for the error names sent by the server (FREERDP_ERROR_X, FREERDP_ERROR_CONNECT_X, ...)
+        function rdpErrorText(name) {
+            var n = (typeof name == 'string') ? name.replace(/^(FREERDP_ERROR_|ERRCONNECT_)/, '').replace(/^CONNECT_(?!FAILED$|TRANSPORT_FAILED$|CANCELLED$)/, '') : '';
+            if (['AUTHENTICATION_FAILED', 'NO_OR_MISSING_CREDENTIALS', 'LOGON_FAILURE', 'WRONG_PASSWORD', 'PASSWORD_EXPIRED', 'PASSWORD_MUST_CHANGE', 'PASSWORD_CERTAINLY_EXPIRED', 'CLIENT_REVOKED', 'ACCESS_DENIED', 'LOGON_TYPE_NOT_GRANTED'].indexOf(n) >= 0 || (n.indexOf('ACCOUNT_') == 0)) return "Authentication failed, check username and password";
+            if (['CONNECT_FAILED', 'CONNECT_TRANSPORT_FAILED', 'CONNECT_CANCELLED', 'DNS_NAME_NOT_FOUND', 'DNS_ERROR', 'TCP_CONNECT_FAILED'].indexOf(n) >= 0) return "Unable to connect to the RDP server";
+            if (n == 'TLS_CONNECT_FAILED') return "TLS connection failed";
+            if (n == 'SECURITY_NEGO_CONNECT_FAILED') return "Protocol negotiation failed";
+            if (name == 'FREERDP_HELPER_NOT_FOUND') return "RDP helper (FreeRDP) is not installed on the server";
+            return "RDP error: " + name;
         }
 
         function Q(x) { return document.getElementById(x); }                            // "Q"
@@ -197,6 +213,9 @@
                 <tr id="rowremember" style="display:none">
                     <td></td>
                     <td><label><input type="checkbox" id="inputSaveCredentials" style="margin-left:8px;margin-right:5px">Remember credentials</label></td>
+                </tr>
+                <tr>
+                    <td colspan="2"><div id="errorMessage" style="display:none;color:#e04040;text-align:center;margin:6px 0"></div></td>
                 </tr>
                 <tr>
                     <td colspan="2"><button class="connectButton" onclick="return connect()">Connect</button></td>

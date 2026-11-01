@@ -74,6 +74,13 @@ The RDP tab of the desktop settings dialog offers:
 * **Color Depth (Legacy)**: 15/16/24/32 bit, used only in Legacy mode. GFX always uses 32 bit.
 * The performance options (wallpaper, theming, font smoothing, ...) are sent as RDP performance flags.
 
+## Linux targets
+
+The Desktop tab offers RDP Connect for Windows agents only; for other devices use the Web-RDP link on the General tab.
+GNOME Remote Desktop accepts only clients that use the graphics pipeline, so choose `GFX` or `GFX + H.264`; with
+`Legacy` GNOME ends the connection during capability exchange. Its Remote Login mode (port 3389) uses the credentials
+configured for Remote Login in GNOME Settings, not the Linux account.
+
 ## Troubleshooting
 
 Set `"debug": "relay"` in the `settings` section of `config.json`. FreeRDP warnings and errors from the helper then show up in the server log prefixed with `RDP: meshfreerdp:`, followed by `RDP: freerdpclient: helper exited, code=..., signal=...` when the session ends.

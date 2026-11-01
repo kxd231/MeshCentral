@@ -204,9 +204,11 @@
                     // This is a JSON text string, parse it.
                     var msg = JSON.parse(evt.data);
                     switch (msg[0]) {
-                        case 'rdp-connect': {
-                            //console.log('[mstsc.js] connected');
-                            self.activeSession = true;
+                        case 'rdp-connect':
+                        case 'rdp-resize': {
+                            // The server may not use the requested size (GNOME uses its own), draw at the actual size.
+                            if ((msg[1] != null) && (msg[1].width > 0) && (msg[1].height > 0)) { self.canvas.width = msg[1].width; self.canvas.height = msg[1].height; }
+                            if (msg[0] == 'rdp-connect') { self.activeSession = true; }
                             break;
                         }
                         case 'rdp-bitmap': {

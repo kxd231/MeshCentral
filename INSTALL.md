@@ -107,6 +107,20 @@ Options are under **Settings** on the Desktop tab, in the RDP section:
 * **Image Quality**: lower it on a slow connection.
 * Checkboxes such as **Disable Wallpaper** make the session faster.
 
+### Linux computers
+
+The **RDP Connect** button on the Desktop tab is shown for Windows computers only. For Linux, use the **Web-RDP**
+link on the computer's **General** tab. The Linux computer needs an RDP server:
+
+* **GNOME** has one built in: Settings → System → Remote Desktop. It works only with **Graphics** set to `GFX` or
+  `GFX + H.264` (not `Legacy`).
+  * **Remote Login** (port 3389) shows the GNOME login screen. In the MeshCentral form enter the user name and
+    password set in *Remote Login* in GNOME Settings, not your Linux account. Then log in to Linux on the login
+    screen that appears.
+  * **Desktop Sharing** shows your already logged-in desktop. When Remote Login is also on, it moves to port 3390:
+    right-click the **Web-RDP** link, choose another port and enter 3390. Use the *Desktop Sharing* credentials.
+* Other desktops can use **xrdp** (`sudo apt install xrdp`).
+
 ## Everyday tasks
 
 **Update to the newest version:**
