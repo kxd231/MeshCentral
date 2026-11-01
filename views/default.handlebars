@@ -9623,7 +9623,7 @@
             // Show the right settings
             QV('td7amtkvm', ((currentNode.intelamt != null) && ((typeof currentNode.intelamt.sku != 'number') || ((currentNode.intelamt.sku & 16) == 0)) && ((currentNode.intelamt.ver != null) || (currentNode.agent == null))) && ((deskState == 0) || (desktop.contype == 2)));
             QV('td7meshkvm', (webRtcDesktop) || ((currentNode.agent != null) && (currentNode.agent.caps & 1) && ((deskState == 0) || (desktop.contype == 1))));
-            QV('td7rdpkvm', ((currentNode.agent != null) && ((currentNode.agent.id == 3) || (currentNode.agent.id == 4)) && ((deskState == 0) || (desktop.contype == 4))));
+            QV('td7rdpkvm', ((currentNode.agent != null) && ((deskState == 0) || (desktop.contype == 4)))); // RDP settings for every agent type, like RDP Connect
 
             // Enable buttons
             var inputAllowed = ((features2 & 0x2000) == 0) && ((currentNode.agent == null) || (currentNode.agent.id != 14)) && ((rights == 0xFFFFFFFF) || (((rights & 8) != 0) && ((rights & 256) == 0) && ((rights & 4096) == 0)));
