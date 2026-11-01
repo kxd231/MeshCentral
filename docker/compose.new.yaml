@@ -2,7 +2,10 @@
 #
 # 1. cp docker/config.example.json docker/config.json   and edit it (cert, ports, sessionKey)
 # 2. Optional: create docker/.env to override the variables below, for example MC_HTTPS_PORT=1443
-# 3. From the repository root:  docker compose -f docker/compose.new.yaml up -d --build
+# 3. From the repository root:
+#      docker compose -f docker/compose.new.yaml pull && docker compose -f docker/compose.new.yaml up -d
+#    or build the image from this source tree instead:
+#      docker compose -f docker/compose.new.yaml up -d --build
 #
 # The ports published here must match "port" and "redirPort" in config.json, so agents and
 # links use the same port that clients connect to.
@@ -11,7 +14,7 @@ services:
     build:
       context: ..
       dockerfile: docker/Dockerfile
-    image: meshcentral-freerdp:local
+    image: ${MC_IMAGE:-ghcr.io/kxd231/meshcentral:dev-test} # Prebuilt by .github/workflows/docker-freerdp.yml
     container_name: meshcentral
     restart: unless-stopped
     environment:
