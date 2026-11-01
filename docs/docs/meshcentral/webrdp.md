@@ -76,7 +76,9 @@ The RDP tab of the desktop settings dialog offers:
 
 ## Linux targets
 
-The Desktop tab offers RDP Connect for Windows agents only; for other devices use the Web-RDP link on the General tab.
+RDP Connect on the Desktop tab is offered for every agent type, so Linux devices running xrdp or GNOME Remote Desktop
+can be reached the same way as Windows. The RDP port of a device is set with *Alternate Port* in the context menu of
+its Web-RDP link.
 GNOME Remote Desktop accepts only clients that use the graphics pipeline, so choose `GFX` or `GFX + H.264`; with
 `Legacy` GNOME ends the connection during capability exchange. Its Remote Login mode (port 3389) uses the credentials
 configured for Remote Login in GNOME Settings, not the Linux account.

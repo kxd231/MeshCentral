@@ -59,6 +59,9 @@
     */
 
 	Client.prototype = {
+		// The canvas can be scaled down to fit the window, convert mouse positions to remote desktop pixels.
+		canvasX : function (e, rect) { return Math.round((e.clientX - rect.left) * this.canvas.width / (rect.width || this.canvas.width)); },
+		canvasY : function (e, rect) { return Math.round((e.clientY - rect.top) * this.canvas.height / (rect.height || this.canvas.height)); },
 		install : function () {
             var self = this;
 
@@ -66,7 +69,7 @@
 			this.canvas.addEventListener('mousemove', function (e) {
                 if (!self.socket || !self.activeSession) return;
                 var rect = e.target.getBoundingClientRect();
-                self.mouseNagleData = ['mouse', e.clientX - rect.left, e.clientY - rect.top, 0, false];
+                self.mouseNagleData = ['mouse', self.canvasX(e, rect), self.canvasY(e, rect), 0, false];
                 if (self.mouseNagleTimer == null) {
                     //console.log('sending', self.mouseNagleData);
                     self.mouseNagleTimer = setTimeout(function () { self.socket.send(JSON.stringify(self.mouseNagleData)); self.mouseNagleTimer = null; }, 50);
@@ -79,7 +82,7 @@
                 if (!self.socket || !self.activeSession) return;
                 if (self.mouseNagleTimer != null) { clearTimeout(self.mouseNagleTimer); self.mouseNagleTimer = null; }
                 var rect = e.target.getBoundingClientRect();
-                self.socket.send(JSON.stringify(['mouse', e.clientX - rect.left, e.clientY - rect.top, mouseButtonMap(e.button), true]));
+                self.socket.send(JSON.stringify(['mouse', self.canvasX(e, rect), self.canvasY(e, rect), mouseButtonMap(e.button), true]));
 				e.preventDefault();
 				return false;
 			});
@@ -87,7 +90,7 @@
 				if (!self.socket || !self.activeSession) return;
                 if (self.mouseNagleTimer != null) { clearTimeout(self.mouseNagleTimer); self.mouseNagleTimer = null; }
                 var rect = e.target.getBoundingClientRect();
-                self.socket.send(JSON.stringify(['mouse', e.clientX - rect.left, e.clientY - rect.top, mouseButtonMap(e.button), false]));
+                self.socket.send(JSON.stringify(['mouse', self.canvasX(e, rect), self.canvasY(e, rect), mouseButtonMap(e.button), false]));
 				e.preventDefault();
 				return false;
 			});
@@ -95,7 +98,7 @@
 				if (!self.socket || !self.activeSession) return;
                 if (self.mouseNagleTimer != null) { clearTimeout(self.mouseNagleTimer); self.mouseNagleTimer = null; }
                 var rect = e.target.getBoundingClientRect();
-                self.socket.send(JSON.stringify(['mouse', e.clientX - rect.left, e.clientY - rect.top, mouseButtonMap(e.button), false]));
+                self.socket.send(JSON.stringify(['mouse', self.canvasX(e, rect), self.canvasY(e, rect), mouseButtonMap(e.button), false]));
 				e.preventDefault();
 				return false;
 			});
@@ -109,7 +112,7 @@
                 var step = 128;
                 //console.log('DOMMouseScroll', delta, step, e.detail);
                 var rect = e.target.getBoundingClientRect();
-                self.socket.send(JSON.stringify(['wheel', e.clientX - rect.left, e.clientY - rect.top, step, delta > 0, isHorizontal]));
+                self.socket.send(JSON.stringify(['wheel', self.canvasX(e, rect), self.canvasY(e, rect), step, delta > 0, isHorizontal]));
 				e.preventDefault();
 				return false;
 			});
@@ -122,7 +125,7 @@
                 var step = 128;
                 //console.log('mousewheel', delta, step, e);
                 var rect = e.target.getBoundingClientRect();
-                self.socket.send(JSON.stringify(['wheel', e.clientX - rect.left, e.clientY - rect.top, step, delta > 0, isHorizontal]));
+                self.socket.send(JSON.stringify(['wheel', self.canvasX(e, rect), self.canvasY(e, rect), step, delta > 0, isHorizontal]));
 				e.preventDefault();
 				return false;
 			});
