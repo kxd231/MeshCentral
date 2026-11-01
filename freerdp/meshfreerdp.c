@@ -19,6 +19,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/resource.h>
 #include <unistd.h>
 
 #include <freerdp/client.h>
@@ -34,6 +35,8 @@
 #include <freerdp/graphics.h>
 #include <freerdp/input.h>
 #include <freerdp/settings.h>
+#include <freerdp/transport_io.h>
+#include <freerdp/update.h>
 #include <winpr/handle.h>
 #include <winpr/json.h>
 #include <winpr/string.h>
@@ -43,6 +46,13 @@
 #include <turbojpeg.h>
 
 #define MAX_FRAME (64u * 1024u * 1024u)
+#define MAX_CLIPBOARD (4u * 1024u * 1024u) /* UTF-8 bytes, both directions. */
+#define MAX_DESKTOP 8192                   /* Per dimension: 256 MiB RGBA primary buffer. */
+/* Address space cap. An 8192x8192 desktop needs about 256 MiB per full-size buffer (GDI primary,
+ * GFX surface, H.264 YUV and reference frames, progressive tiles); glibc reserves 64 MiB per
+ * malloc arena and 8 MiB per thread stack on top of that. 8 GiB keeps all of it, while a broken
+ * codec or a hostile server can no longer take down the MeshCentral host. */
+#define MAX_ADDRESS_SPACE (8ull * 1024u * 1024u * 1024u)
 #define TILE_SIZE 256
 enum { OUT_CONNECTED = 1, OUT_TILE, OUT_POINTER, OUT_CLIPBOARD, OUT_ERROR, OUT_CLOSED };
 enum { IN_CONFIG = 0x81, IN_MOUSE, IN_SCANCODE, IN_UNICODE, IN_CLIPBOARD, IN_QUIT };
@@ -64,6 +74,11 @@ typedef struct
     CRITICAL_SECTION output_lock;
     CRITICAL_SECTION clipboard_lock;
     CliprdrClientContext* clip;
+    char* host; /* CONFIG host/port: the only TCP endpoint the helper ever connects to. */
+    UINT32 port;
+    pTCPConnect tcp_connect;
+    pTransportConnectLayer connect_layer;
+    pcRdpgfxCreateSurface create_surface;
     WCHAR* clipboard;
     size_t clipboard_length;
     BYTE header[5];
@@ -84,6 +99,10 @@ static void put32(BYTE* p, UINT32 v)
     p[0] = (BYTE)v; p[1] = (BYTE)(v >> 8); p[2] = (BYTE)(v >> 16); p[3] = (BYTE)(v >> 24);
 }
 
+/* Private duplicate of the original stdout. fd 1 itself points to stderr, so a stray printf in
+ * any library can never corrupt the frame stream. */
+static int frame_fd = -1;
+
 /* Blocking writes deliberately propagate the parent's backpressure. A lost pipe
  * terminates all library threads with the process, even during PostConnect. */
 static void write_all(const void* data, size_t length)
@@ -91,7 +110,7 @@ static void write_all(const void* data, size_t length)
     const BYTE* p = data;
     while (length)
     {
-        ssize_t n = write(STDOUT_FILENO, p, length);
+        ssize_t n = write(frame_fd, p, length);
         if (n < 0 && errno == EINTR) continue;
         if (n <= 0) _exit(1);
         p += n;
@@ -140,9 +159,17 @@ static void send_error(MeshContext* m)
     if (n > 0 && (size_t)n < sizeof(json)) send_frame(m, OUT_ERROR, json, (UINT32)n);
 }
 
+/* A failed gdi_resize leaves no primary bitmap; paints that race with the shutdown skip it. */
+static GDI_WND* primary_window(rdpContext* context)
+{
+    rdpGdi* gdi = context->gdi;
+    return gdi && gdi->primary && gdi->primary->hdc ? gdi->primary->hdc->hwnd : NULL;
+}
+
 static void reset_invalid(rdpContext* context)
 {
-    GDI_WND* w = context->gdi->primary->hdc->hwnd;
+    GDI_WND* w = primary_window(context);
+    if (!w) return;
     w->invalid->null = TRUE;
     w->ninvalid = 0;
 }
@@ -207,12 +234,17 @@ static BOOL send_rectangle_locked(MeshContext* m, int left, int top, int right, 
     return TRUE;
 }
 
+static BOOL valid_desktop_size(UINT32 width, UINT32 height)
+{
+    return width && height && width <= MAX_DESKTOP && height <= MAX_DESKTOP;
+}
+
 static BOOL announce_screen(MeshContext* m)
 {
     rdpGdi* gdi = base(m)->gdi;
     char json[80];
-    if (gdi->width <= 0 || gdi->height <= 0 || gdi->width > UINT16_MAX ||
-        gdi->height > UINT16_MAX || gdi->stride > INT_MAX)
+    if (gdi->width <= 0 || gdi->height <= 0 || gdi->width > MAX_DESKTOP ||
+        gdi->height > MAX_DESKTOP || gdi->stride > INT_MAX)
         return fail(m, "unsupported desktop dimensions");
     int n = snprintf(json, sizeof(json), "{\"width\":%d,\"height\":%d}", gdi->width, gdi->height);
     send_frame(m, OUT_CONNECTED, json, (UINT32)n);
@@ -229,8 +261,9 @@ static BOOL begin_paint(rdpContext* context)
 static BOOL end_paint(rdpContext* context)
 {
     MeshContext* m = (MeshContext*)context;
-    GDI_WND* w = context->gdi->primary->hdc->hwnd;
+    GDI_WND* w = primary_window(context);
     BOOL ok = TRUE;
+    if (!w) return TRUE;
     /* GDI's aggregate invalid region merges all cinvalid rectangles. */
     if (m->announced && !w->invalid->null)
     {
@@ -246,15 +279,31 @@ static BOOL end_paint(rdpContext* context)
     return ok;
 }
 
+/* Called on the main thread (Deactivation-Reactivation) and on the GFX channel thread
+ * (ResetGraphics), while the other thread may paint. Lock order everywhere is
+ * update lock -> output_lock: GFX/legacy paints hold the update lock from BeginPaint to EndPaint,
+ * and end_paint takes output_lock inside it. gdi_resize takes the update lock itself; both locks
+ * are recursive. Holding both keeps primary_buffer stable until the new screen is sent. */
 static BOOL desktop_resize(rdpContext* context)
 {
     MeshContext* m = (MeshContext*)context;
     UINT32 w = freerdp_settings_get_uint32(context->settings, FreeRDP_DesktopWidth);
     UINT32 h = freerdp_settings_get_uint32(context->settings, FreeRDP_DesktopHeight);
-    if (!w || !h || w > UINT16_MAX || h > UINT16_MAX || !gdi_resize(context->gdi, w, h))
-        return fail(m, "desktop resize failed");
-    reset_invalid(context);
-    return announce_screen(m);
+    BOOL ok;
+    rdp_update_lock(context->update);
+    EnterCriticalSection(&m->output_lock);
+    if (!valid_desktop_size(w, h))
+        ok = fail(m, "server requested a desktop larger than 8192x8192");
+    else if (!gdi_resize(context->gdi, w, h))
+        ok = fail(m, "desktop resize failed");
+    else
+    {
+        reset_invalid(context);
+        ok = announce_screen(m);
+    }
+    LeaveCriticalSection(&m->output_lock);
+    rdp_update_unlock(context->update);
+    return ok;
 }
 
 static BOOL pointer_value(rdpContext* context, int value)
@@ -366,8 +415,13 @@ static UINT clip_data_response(CliprdrClientContext* clip, const CLIPRDR_FORMAT_
     m->clip_pending = FALSE;
     if (!(data->common.msgFlags & CB_RESPONSE_OK)) return CHANNEL_RC_OK;
     size_t bytes = data->common.dataLen;
-    if (bytes > MAX_FRAME || (bytes & 1) || (bytes && !data->requestedFormatData))
-        return ERROR_INVALID_DATA;
+    if ((bytes & 1) || (bytes && !data->requestedFormatData)) return ERROR_INVALID_DATA;
+    /* UTF-16 needs at least 2 bytes per UTF-8 byte of ASCII, so this bounds the work. */
+    if (bytes > 2 * (size_t)MAX_CLIPBOARD + 2)
+    {
+        fprintf(stderr, "meshfreerdp: remote clipboard text exceeds 4 MiB, ignored\n");
+        return CHANNEL_RC_OK;
+    }
     /* Decode explicitly from LE, including on non-little-endian machines. */
     WCHAR* wide = calloc(bytes / 2 + 1, sizeof(WCHAR));
     if (!wide) return ERROR_NOT_ENOUGH_MEMORY;
@@ -376,7 +430,12 @@ static UINT clip_data_response(CliprdrClientContext* clip, const CLIPRDR_FORMAT_
     char* utf8 = ConvertWCharNToUtf8Alloc(wide, bytes / 2 + 1, &length);
     free(wide);
     if (!utf8) return ERROR_INVALID_DATA;
-    if (length > MAX_FRAME) { free(utf8); return ERROR_INVALID_DATA; }
+    if (length > MAX_CLIPBOARD)
+    {
+        free(utf8);
+        fprintf(stderr, "meshfreerdp: remote clipboard text exceeds 4 MiB, ignored\n");
+        return CHANNEL_RC_OK;
+    }
     if (m->announced) send_frame(m, OUT_CLIPBOARD, utf8, (UINT32)length);
     free(utf8);
     return CHANNEL_RC_OK;
@@ -410,14 +469,33 @@ static UINT clip_data_request(CliprdrClientContext* clip, const CLIPRDR_FORMAT_D
     return rc;
 }
 
+/* Each surface is a full RGBA buffer; the PDU allows up to 65535x65535 (16 GiB). */
+static UINT gfx_create_surface(RdpgfxClientContext* gfx, const RDPGFX_CREATE_SURFACE_PDU* pdu)
+{
+    rdpGdi* gdi = gfx->custom;
+    MeshContext* m = (MeshContext*)gdi->context;
+    if (!valid_desktop_size(pdu->width, pdu->height))
+    {
+        fail(m, "server created a GFX surface larger than 8192x8192");
+        return ERROR_INVALID_DATA;
+    }
+    return m->create_surface(gfx, pdu);
+}
+
 static void channel_connected(void* context, const ChannelConnectedEventArgs* event)
 {
     MeshContext* m = context;
     if (strcmp(event->name, RDPGFX_DVC_CHANNEL_NAME) == 0)
     {
+        RdpgfxClientContext* gfx = event->pInterface;
         /* GFX surfaces are composed into the GDI primary buffer, so end_paint keeps working. */
-        if (!gdi_graphics_pipeline_init(base(m)->gdi, (RdpgfxClientContext*)event->pInterface))
+        if (!gdi_graphics_pipeline_init(base(m)->gdi, gfx))
             fprintf(stderr, "meshfreerdp: graphics pipeline initialization failed\n");
+        else if (gfx->CreateSurface && gfx->CreateSurface != gfx_create_surface)
+        {
+            m->create_surface = gfx->CreateSurface;
+            gfx->CreateSurface = gfx_create_surface;
+        }
         return;
     }
     if (strcmp(event->name, CLIPRDR_SVC_CHANNEL_NAME) != 0) return;
@@ -451,10 +529,66 @@ static void channel_disconnected(void* context, const ChannelDisconnectedEventAr
     }
 }
 
+/* A hostile RDP server can send a Server Redirection PDU naming any host. FreeRDP would then
+ * connect from the MeshCentral host itself, bypassing the agent tunnel, and log on there.
+ * Every TCP connection is therefore pinned to the CONFIG endpoint (the MeshCentral loopback
+ * relay); the requested target is only logged. A redirect to the same machine (GNOME Remote Login
+ * handover) still goes through the relay. */
+static const char* pinned_target(MeshContext* m, const char* hostname, int port)
+{
+    if (!hostname || strcmp(hostname, m->host) != 0 || port != (int)m->port)
+        fprintf(stderr, "meshfreerdp: ignoring server-supplied connection target, "
+                        "connecting to the configured relay\n");
+    return m->host;
+}
+
+static int pinned_tcp_connect(rdpContext* context, rdpSettings* settings, const char* hostname,
+                              int port, DWORD timeout)
+{
+    MeshContext* m = (MeshContext*)context;
+    const char* host = pinned_target(m, hostname, port);
+    return m->tcp_connect(context, settings, host, (int)m->port, timeout);
+}
+
+static rdpTransportLayer* pinned_connect_layer(rdpTransport* transport, const char* hostname,
+                                               int port, DWORD timeout)
+{
+    MeshContext* m = (MeshContext*)transport_get_context(transport);
+    const char* host = pinned_target(m, hostname, port);
+    return m->connect_layer(transport, host, (int)m->port, timeout);
+}
+
+static BOOL pin_transport(MeshContext* m)
+{
+    const rdpTransportIo* current = freerdp_get_io_callbacks(base(m));
+    if (!current || !current->TCPConnect || !current->ConnectLayer) return FALSE;
+    if (current->ConnectLayer == pinned_connect_layer) return TRUE;
+    rdpTransportIo io = *current;
+    m->tcp_connect = io.TCPConnect;
+    m->connect_layer = io.ConnectLayer;
+    io.TCPConnect = pinned_tcp_connect;
+    io.ConnectLayer = pinned_connect_layer;
+    /* FreeRDP keeps a copy and reapplies it to the transport it recreates for a redirect. */
+    return freerdp_set_io_callbacks(base(m), &io);
+}
+
+/* Runs after the redirection settings were applied, before the reconnect. */
+static BOOL redirect(freerdp* instance)
+{
+    MeshContext* m = (MeshContext*)instance->context;
+    rdpSettings* s = instance->context->settings;
+    fprintf(stderr, "meshfreerdp: server redirection, reconnecting through the relay\n");
+    return freerdp_settings_set_string(s, FreeRDP_ServerHostname, m->host) &&
+           freerdp_settings_set_uint32(s, FreeRDP_ServerPort, m->port) &&
+           freerdp_settings_set_bool(s, FreeRDP_GatewayEnabled, FALSE) &&
+           freerdp_settings_set_uint32(s, FreeRDP_ProxyType, PROXY_TYPE_IGNORE);
+}
+
 static BOOL pre_connect(freerdp* instance)
 {
     MeshContext* m = (MeshContext*)instance->context;
     rdpContext* context = instance->context;
+    if (!pin_transport(m)) return fail(m, "cannot install the transport connect hook");
     if (PubSub_SubscribeChannelConnected(context->pubSub, channel_connected) < 0) return FALSE;
     m->subscribed_connected = TRUE;
     if (PubSub_SubscribeChannelDisconnected(context->pubSub, channel_disconnected) < 0) return FALSE;
@@ -468,13 +602,21 @@ static BOOL post_connect(freerdp* instance)
     MeshContext* m = (MeshContext*)context;
     rdpPointer pointer = { .size = sizeof(rdpPointer), .New = pointer_new, .Free = pointer_free,
         .Set = pointer_set, .SetNull = pointer_null, .SetDefault = pointer_default };
+    if (!valid_desktop_size(freerdp_settings_get_uint32(context->settings, FreeRDP_DesktopWidth),
+                            freerdp_settings_get_uint32(context->settings, FreeRDP_DesktopHeight)))
+        return fail(m, "server requested a desktop larger than 8192x8192");
     if (!gdi_init(instance, PIXEL_FORMAT_RGBA32)) return fail(m, "GDI initialization failed");
     graphics_register_pointer(context->graphics, &pointer);
+    rdp_update_lock(context->update);
+    EnterCriticalSection(&m->output_lock);
     context->update->BeginPaint = begin_paint;
     context->update->EndPaint = end_paint;
     context->update->DesktopResize = desktop_resize;
     reset_invalid(context);
-    return announce_screen(m);
+    BOOL ok = announce_screen(m);
+    LeaveCriticalSection(&m->output_lock);
+    rdp_update_unlock(context->update);
+    return ok;
 }
 
 static BOOL authenticate(freerdp* instance, char** username, char** password, char** domain,
@@ -517,6 +659,7 @@ static BOOL client_new(freerdp* instance, rdpContext* context)
     instance->AuthenticateEx = authenticate;
     instance->VerifyCertificateEx = verify_certificate;
     instance->VerifyChangedCertificateEx = verify_changed_certificate;
+    instance->Redirect = redirect;
     return TRUE;
 }
 
@@ -531,6 +674,7 @@ static void client_free(freerdp* instance, rdpContext* context)
     if (m->jpeg) tjDestroy(m->jpeg);
     tjFree(m->jpeg_buffer);
     free(m->clipboard);
+    free(m->host);
     if (m->payload) memset(m->payload, 0, m->payload_length);
     free(m->payload);
     DeleteCriticalSection(&m->output_lock);
@@ -624,8 +768,8 @@ static BOOL configure(MeshContext* m, const BYTE* data, UINT32 length)
     json = WINPR_JSON_ParseWithLength((const char*)data, (size_t)length + 1);
     if (!json || !WINPR_JSON_IsObject(json)) goto out;
     if (!json_number(json, "port", &port, 0, 1, 65535, TRUE) ||
-        !json_number(json, "width", &width, 1024, 1, 65535, FALSE) ||
-        !json_number(json, "height", &height, 768, 1, 65535, FALSE) ||
+        !json_number(json, "width", &width, 1024, 1, MAX_DESKTOP, FALSE) ||
+        !json_number(json, "height", &height, 768, 1, MAX_DESKTOP, FALSE) ||
         !json_number(json, "perfFlags", &perf, 0, 0, UINT32_MAX, FALSE) ||
         !json_number(json, "keyboardLayout", &layout, 0, 0, UINT32_MAX, FALSE) ||
         !json_number(json, "jpegQuality", &quality, 75, 1, 100, FALSE) ||
@@ -646,6 +790,9 @@ static BOOL configure(MeshContext* m, const BYTE* data, UINT32 length)
         !json_string(s, json, "password", FreeRDP_Password, "") ||
         !json_string(s, json, "workingDir", FreeRDP_ShellWorkingDirectory, "") ||
         !json_string(s, json, "alternateShell", FreeRDP_AlternateShell, "")) goto out;
+    m->host = _strdup(freerdp_settings_get_string(s, FreeRDP_ServerHostname));
+    m->port = port;
+    if (!m->host) goto out;
     if (!freerdp_settings_set_uint32(s, FreeRDP_ServerPort, port) ||
         !freerdp_settings_set_uint32(s, FreeRDP_DesktopWidth, width) ||
         !freerdp_settings_set_uint32(s, FreeRDP_DesktopHeight, height) ||
@@ -662,7 +809,12 @@ static BOOL configure(MeshContext* m, const BYTE* data, UINT32 length)
         !freerdp_settings_set_bool(s, FreeRDP_RemoteFxCodec, gfx) ||
         !freerdp_settings_set_bool(s, FreeRDP_RedirectClipboard, TRUE) ||
         !freerdp_settings_set_bool(s, FreeRDP_AutoLogonEnabled, TRUE) ||
-        !freerdp_settings_set_bool(s, FreeRDP_AutoReconnectionEnabled, FALSE)) goto out;
+        !freerdp_settings_set_bool(s, FreeRDP_AutoReconnectionEnabled, FALSE) ||
+        /* Only direct TCP to the relay: no RD Gateway, no https_proxy from the environment,
+         * no Azure AD logon (it would contact login.microsoftonline.com from this host). */
+        !freerdp_settings_set_bool(s, FreeRDP_GatewayEnabled, FALSE) ||
+        !freerdp_settings_set_uint32(s, FreeRDP_ProxyType, PROXY_TYPE_IGNORE) ||
+        !freerdp_settings_set_bool(s, FreeRDP_AadSecurity, FALSE)) goto out;
     /* With CONNECTION_TYPE_AUTODETECT (the FreeRDP default) Windows picks the visual experience itself
      * and ignores PerformanceFlags, so the wallpaper/theming/font smoothing options would have no effect.
      * Network auto-detect support stays on: with GFX Windows sends RTT measure requests anyway, and
@@ -724,9 +876,13 @@ static BOOL dispatch(MeshContext* m)
         case IN_CLIPBOARD:
         {
             size_t length = 0;
+            if (n > MAX_CLIPBOARD)
+            {
+                fprintf(stderr, "meshfreerdp: clipboard text exceeds 4 MiB, ignored\n");
+                return TRUE;
+            }
             WCHAR* text = ConvertUtf8NToWCharAlloc((const char*)p, (size_t)n + 1, &length);
             if (!text) return fail(m, "invalid clipboard UTF-8");
-            if (length > (MAX_FRAME / 2 - 1)) { free(text); return fail(m, "clipboard too large"); }
             EnterCriticalSection(&m->clipboard_lock);
             free(m->clipboard);
             m->clipboard = text;
@@ -821,7 +977,19 @@ static BOOL normal_disconnect(UINT32 code)
 int main(int argc, char** argv)
 {
     (void)argv;
+    /* Frames go to a private copy of stdout; fd 1 becomes stderr for everything else. */
+    frame_fd = fcntl(STDOUT_FILENO, F_DUPFD_CLOEXEC, 3);
+    if (frame_fd < 0 || dup2(STDERR_FILENO, STDOUT_FILENO) < 0) return 1;
     signal(SIGPIPE, SIG_IGN);
+    struct rlimit as;
+    if (getrlimit(RLIMIT_AS, &as) == 0)
+    {
+        if (as.rlim_max == RLIM_INFINITY || as.rlim_max > MAX_ADDRESS_SPACE)
+            as.rlim_max = MAX_ADDRESS_SPACE;
+        if (as.rlim_cur == RLIM_INFINITY || as.rlim_cur > as.rlim_max) as.rlim_cur = as.rlim_max;
+        if (setrlimit(RLIMIT_AS, &as) != 0)
+            fprintf(stderr, "meshfreerdp: cannot limit the address space\n");
+    }
     /* Force OFF before any FreeRDP/WinPR initialization. Environment overrides
      * must never allow a console appender to contaminate the framed stdout. */
     if (setenv("WLOG_LEVEL", "OFF", 1) != 0 || setenv("WLOG_APPENDER", "CONSOLE", 1) != 0 ||
@@ -848,12 +1016,12 @@ int main(int argc, char** argv)
         return 1;
     }
     int in_flags = fcntl(STDIN_FILENO, F_GETFL);
-    int out_flags = fcntl(STDOUT_FILENO, F_GETFL);
+    int out_flags = fcntl(frame_fd, F_GETFL);
     HANDLE stdin_event = NULL;
     if (argc != 1) fail(m, "arguments are not supported; send CONFIG on stdin");
     if (in_flags < 0 || out_flags < 0 ||
         fcntl(STDIN_FILENO, F_SETFL, in_flags | O_NONBLOCK) < 0 ||
-        fcntl(STDOUT_FILENO, F_SETFL, out_flags & ~O_NONBLOCK) < 0)
+        fcntl(frame_fd, F_SETFL, out_flags & ~O_NONBLOCK) < 0)
         fail(m, "cannot configure stdio descriptors");
     if (!m->failed)
     {

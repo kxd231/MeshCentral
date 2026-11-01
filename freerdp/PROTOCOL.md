@@ -22,7 +22,7 @@ is 64 MiB; a larger value is a protocol error and ends the session (ERROR/CLOSED
 | 0x82 | MOUSE | `u16 flags, u16 x, u16 y` (6 bytes). `flags` are FreeRDP `PTR_FLAGS_*`, computed by MeshCentral, including WHEEL/HWHEEL. Sent with `freerdp_input_send_mouse_event`. |
 | 0x83 | KEY_SCANCODE | `u8 code, u8 down (0/1), u8 extended (0/1)` (3 bytes). Sent with `freerdp_input_send_keyboard_event_ex(input, down, FALSE, MAKE_RDP_SCANCODE(code, extended))`. |
 | 0x84 | KEY_UNICODE | `u16 code, u8 down (0/1)` (3 bytes). Sent with `freerdp_input_send_unicode_keyboard_event`. |
-| 0x85 | CLIPBOARD | UTF-8 text for the remote clipboard (cliprdr, CF_UNICODETEXT). |
+| 0x85 | CLIPBOARD | UTF-8 text for the remote clipboard (cliprdr, CF_UNICODETEXT). Text over 4 MiB is ignored (logged to stderr); the session continues. |
 | 0x86 | QUIT | Empty. The helper disconnects, sends CLOSED and exits with code 0. |
 
 EOF on stdin behaves like QUIT, so the helper never outlives MeshCentral.
@@ -35,7 +35,7 @@ Input frames received before CONNECTED are ignored.
   "host": "127.0.0.1",      // always the MeshCentral loopback relay
   "port": 51234,
   "domain": "", "username": "", "password": "",
-  "width": 1024, "height": 768,
+  "width": 1024, "height": 768, // 1..8192 each
   "perfFlags": 0,           // optional, RDP PERF_* flags (MS-RDPBCGR 2.2.1.11.1.1.1)
   "workingDir": "",         // optional, FreeRDP_ShellWorkingDirectory
   "alternateShell": "",     // optional, FreeRDP_AlternateShell
@@ -46,6 +46,12 @@ Input frames received before CONNECTED are ignored.
   "colorDepth": 32          // optional, 15/16/24/32, only without GFX (GFX is always 32)
 }
 ```
+
+Every TCP connection the helper makes goes to `host:port` from CONFIG. A Server Redirection PDU
+from the RDP server is followed only through that endpoint: the server-supplied target address/FQDN
+is ignored (logged to stderr), so redirection can never make the helper connect from the MeshCentral
+host to another machine or send credentials there. RD Gateway, `https_proxy` from the environment and
+Azure AD logon are disabled.
 
 The helper connects with `ConnectionType=LAN` so that Windows honours `perfFlags`, and keeps network
 auto-detect support enabled (Windows sends RTT requests with GFX).
@@ -83,13 +89,18 @@ The browser sends `['scancode', code, down]` with extended keys as `0xE000 | sca
 | 0x01 | CONNECTED | JSON `{"width":W,"height":H}`, the actual desktop size. Sent again after a server-side resize. |
 | 0x02 | TILE | 9-byte header `u16 x, u16 y, u16 w, u16 h, u8 fmt`, then the image. `fmt=0`: raw RGBA, top-down, `w*h*4` bytes. `fmt=1`: baseline JPEG, 4:2:0. Tiles are at most 256×256; tiles with `w*h < 1024` are always raw. |
 | 0x03 | POINTER | UTF-8 CSS `cursor` value: `"default"` or `"none"`. |
-| 0x04 | CLIPBOARD | UTF-8, new remote clipboard text. |
+| 0x04 | CLIPBOARD | UTF-8, new remote clipboard text. Remote text over 4 MiB is not forwarded. |
 | 0x05 | ERROR | JSON `{"code":<freerdp_get_last_error>,"name":"FREERDP_ERROR_..."}`. The name is FreeRDP's `ERRCONNECT_X`/`ERRINFO_X` label with the prefix replaced, e.g. `FREERDP_ERROR_LOGON_FAILURE`. |
 | 0x06 | CLOSED | Empty. Always the last frame before the process exits, also after ERROR. |
 | 0x07 | LOG | UTF-8, optional diagnostics. |
 
 Order: CONNECTED → (TILE | POINTER | CLIPBOARD | CONNECTED)* → [ERROR] → CLOSED.
 After each CONNECTED the helper sends the whole screen as tiles.
+
+The desktop (and each GFX surface) is limited to 8192×8192; a larger size from the server ends the
+session with ERROR/CLOSED. The helper caps its own address space (`RLIMIT_AS`, 8 GiB).
+Frames are written to a private duplicate of the original stdout; fd 1 is redirected to stderr, so
+library output can never corrupt the frame stream.
 
 ## MeshCentral → browser
 
