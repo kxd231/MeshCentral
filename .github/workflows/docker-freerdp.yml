@@ -5,7 +5,7 @@ name: Docker-Builder-FreeRDP
 on:
   workflow_dispatch:
   push:
-    branches: [ dev-test ]
+    branches: [ dev ]
     paths-ignore:
       - '**.md'
       - 'docs/**'

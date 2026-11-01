@@ -14,7 +14,7 @@ services:
     build:
       context: ..
       dockerfile: docker/Dockerfile
-    image: ${MC_IMAGE:-ghcr.io/kxd231/meshcentral:dev-test} # Prebuilt by .github/workflows/docker-freerdp.yml
+    image: ${MC_IMAGE:-ghcr.io/kxd231/meshcentral:latest} # Prebuilt by .github/workflows/docker-freerdp.yml
     container_name: meshcentral
     restart: unless-stopped
     environment:

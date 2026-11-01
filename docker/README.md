@@ -8,7 +8,7 @@
 ## Web-RDP with FreeRDP, built from source
 
 `docker/Dockerfile` and `docker/Dockerfile-debian` build the native Web-RDP helper (`meshfreerdp`, FreeRDP 3) into
-the image. A prebuilt image (linux/amd64 and linux/arm64) is published as `ghcr.io/kxd231/meshcentral:dev-test`
+the image. A prebuilt image (linux/amd64 and linux/arm64) is published as `ghcr.io/kxd231/meshcentral:latest`
 by `.github/workflows/docker-freerdp.yml`. `docker/compose.new.yaml` runs it with a config file you control:
 
 ```bash
@@ -28,7 +28,7 @@ Optional variables, set in `docker/.env` (next to the compose file):
 | `MC_HTTPS_PORT` | 443 | Published HTTPS port. Must equal `settings.port` in `config.json`. |
 | `MC_HTTP_PORT` | 80 | Published HTTP port. Must equal `settings.redirPort`. |
 | `MC_TZ` | UTC | Container time zone. |
-| `MC_IMAGE` | ghcr.io/kxd231/meshcentral:dev-test | Image to pull or to tag a local build with. |
+| `MC_IMAGE` | ghcr.io/kxd231/meshcentral:latest | Image to pull or to tag a local build with. |
 | `MC_STYLISHUI` | false | Install the third-party [Stylish UI](https://github.com/Melo-Professional/MeshCentral-Stylish-UI) theme on start (set `domains[""].siteStyle` to 3). |
 
 `config.json` and `.env` are ignored by git and by the Docker build context. The config is mounted read-only
