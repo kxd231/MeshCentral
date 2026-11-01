@@ -7,7 +7,8 @@
 > performance options, clipboard and better compatibility with current Windows versions. The browser side is
 > unchanged apart from JPEG tiles. Without the helper, Web-RDP is disabled and the rest of MeshCentral works as usual.
 >
-> * Quick start with Docker: [docker/README.md](docker/README.md#web-rdp-with-freerdp-built-from-source)
+> * **Installation guide (start here):** [INSTALL.md](INSTALL.md)
+> * Docker details: [docker/README.md](docker/README.md#web-rdp-with-freerdp-built-from-source)
 > * Building and configuring the helper: [docs/docs/meshcentral/webrdp.md](docs/docs/meshcentral/webrdp.md)
 > * Helper protocol: [freerdp/PROTOCOL.md](freerdp/PROTOCOL.md)
 
