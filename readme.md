@@ -1,7 +1,7 @@
 # MeshCentral (kxd231 fork)
 
-A fork of [MeshCentral](https://github.com/Ylianst/MeshCentral) by Ylian Saint-Hilaire and contributors, based on
-upstream **1.3.1**. MeshCentral is a self-hosted web site for remote management of computers: install the server,
+A fork of [MeshCentral](https://github.com/Ylianst/MeshCentral) by Ylian Saint-Hilaire and contributors.
+MeshCentral is a self-hosted web site for remote management of computers: install the server,
 create a device group, install the agent on each computer and control it from the browser (remote desktop,
 terminal, files). This fork keeps all of that and changes the parts below.
 
@@ -10,7 +10,7 @@ This is not the official MeshCentral. Report problems of this fork in
 
 ## What is different
 
-- **Web-RDP in JavaScript.** The RDP client (RDP tab and `mstsc.html`) is a new engine written in JavaScript,
+- **Web-RDP in JavaScript.** The RDP client is a new engine written in JavaScript,
   isolated per session, with NLA (CredSSP/NTLMv2), clipboard, resize and the graphics pipeline (RDPGFX):
   Progressive, RemoteFX, ClearCodec and H.264 (AVC420 / AVC444, decoded with WebCodecs and WebAssembly SIMD in a
   worker). It replaces node-rdpjs. See [docs/webrdp.md](docs/webrdp.md).
@@ -24,11 +24,6 @@ This is not the official MeshCentral. Report problems of this fork in
 - **Updates from this repository.** The server's Update button installs releases of this fork from GitHub
   (verified by digest), not the upstream npm package. See [docs/fork-updates.md](docs/fork-updates.md).
 
-## Versions
-
-Releases are numbered `<upstream version>-custom.<n>`, for example `1.3.1-custom.1`: based on upstream 1.3.1, first
-release of the fork. The next release of the fork on the same base is `1.3.1-custom.2`; after moving to a newer
-upstream it becomes for example `1.3.5-custom.1`.
 
 ## Installing and updating
 
