@@ -777,6 +777,19 @@
           "default": false,
           "description": "When true, enabled a server modules that efficiently splits a remote desktop stream to multiple browsers. Also allows slow browsers to not slow down the session for fast ones, this comes at the cost of extra server memory and processing for all remote desktop sessions."
         },
+        "desktopMultiplexAck": {
+          "type": [ "boolean", "object" ],
+          "default": true,
+          "description": "Viewer ACK flow control in the desktop multiplexor (only used when desktopMultiplex is on). Browsers that support it acknowledge painted frames, so the server keeps only a bounded window of unacknowledged image data per browser. false disables the offer; malformed agent frames are dropped either way. An object enables it with tuning values.",
+          "properties": {
+            "minWindow": { "type": "integer", "minimum": 16384, "maximum": 16777216, "default": 131072, "description": "Smallest window of unacknowledged bytes per browser." },
+            "maxWindow": { "type": "integer", "minimum": 16384, "maximum": 16777216, "default": 4194304, "description": "Largest window of unacknowledged bytes per browser. Equal to minWindow gives a fixed window." },
+            "queueDelay": { "type": "integer", "minimum": 50, "maximum": 2000, "default": 200, "description": "Queueing delay in milliseconds the adaptive window aims for." },
+            "tiles": { "type": "integer", "minimum": 16, "maximum": 2048, "default": 512, "description": "Largest number of unacknowledged frames per browser." },
+            "timeout": { "type": "integer", "minimum": 3, "maximum": 60, "default": 10, "description": "Seconds without acknowledgement progress before a browser falls back to the normal flow control." }
+          },
+          "additionalProperties": false
+        },
         "ipBlockedUserRedirect": {
           "type": "string",
           "default": null,

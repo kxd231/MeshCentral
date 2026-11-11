@@ -53,9 +53,65 @@ var CreateAgentRemoteDesktop = function (canvasid, scrolldiv) {
     obj.CompressionLevel = 50;
     obj.ScalingLevel = 1024;
     obj.FrameRateTimer = 100;
+    obj.BandwidthBudget = null;                 // bandwidth limit for the agent in units of 100 kbit/s (0 = no limit); null = never set, the command then has no budget field
     obj.SwapMouse = false;
     obj.UseExtendedKeyFlag = true;
     obj.FirstDraw = false;
+    obj.KeepPictureOnResize = false;            // set by a screen size message, used by the next onResize
+    obj.kcanvas = null;
+
+    // Ordered draw queue. Every operation that draws on the canvas for the remote stream (tiles, CopyRect) is queued in arrival order,
+    // decoded asynchronously and applied strictly in that order. A screen size change drops everything that is queued.
+    obj.UseImageBitmap = true;                  // false forces the old data-URL + Image decoder
+    obj.MaxQueuedOps = 8192;                    // queued operations (decoding, ready or waiting behind the head)
+    obj.MaxQueuedBytes = 64 * 1024 * 1024;      // compressed tile bytes of the queued operations
+    obj.MaxDecodedPixels = 32 * 1024 * 1024;    // decoded pixels held by the queue (behind a head that is still decoding, or deferred by the draw slice)
+    obj.DrawBudgetMs = 8;                       // time slice for applying operations in one task, 0 = unlimited
+    obj.Epoch = 0;                              // incremented by every drop of the queue
+    obj.QueuedBytes = 0;
+    obj.DecodedPixels = 0;
+    obj.QueueOverflows = 0;
+    obj.bitmapFailures = 0;
+
+    // Viewer ACK. A multiplexing server that offers it ("kvmAck":1 in its metadata) gets a request; after its confirmation the
+    // client tags every tile and screen frame received from the websocket with (epoch, seq) and acknowledges, cumulatively and at most every
+    // 20 ms, the last tag whose queue position has been consumed (drawn, failed or dropped). The server uses this to keep a bounded window.
+    // All of this is bound to one connection: nothing is sent on a later socket without a fresh offer and confirmation.
+    obj.KvmAckSupported = true;
+    obj.KvmAckEnabled = true;                   // false: never ask
+    obj.KvmAckStats = { requests: 0, acks: 0, offs: 0, ons: 0, desyncs: 0 };
+    var ka = { transport: null, socket: null, requested: false, active: false, permanent: false, activation: 0, epoch: 0, seq: 0, done: null,
+        sentE: 0, sentS: 0, lastSend: 0, paceTimer: null, retryTimer: null, retryAt: 0, rerequests: 0, visListener: null };
+
+    // Optional statistics for the page (the "FPS / bandwidth" option of the Tools panel). Nothing runs until StatsEnable(true), except the
+    // counter DrawSeq that the draw path increments. A frame is a display refresh (requestAnimationFrame) in which at least one tile or CopyRect
+    // was drawn: the protocol has no end-of-frame marker. Bandwidth is the data received by the transport (parent.BytesIn).
+    obj.DrawSeq = 0;
+    var st = { on: false, raf: null, seq: 0, frames: 0, samples: [] };
+    function statsNow() { return ((typeof performance == 'object') && performance.now) ? performance.now() : Date.now(); }
+    function statsTick() {
+        if (!st.on) return;
+        if (obj.DrawSeq !== st.seq) { st.seq = obj.DrawSeq; st.frames++; }
+        st.raf = requestAnimationFrame(statsTick);
+    }
+    obj.StatsEnable = function (on) {
+        on = !!on;
+        if (on === st.on) return;
+        st.on = on; st.samples = [];
+        if (st.raf != null) { try { cancelAnimationFrame(st.raf); } catch (ex) { } st.raf = null; }
+        if (on && (typeof requestAnimationFrame == 'function')) { st.seq = obj.DrawSeq; st.frames = 0; st.raf = requestAnimationFrame(statsTick); }
+    }
+    // Take a sample and return the rates over the last ~2 seconds, or null while there is only one sample. Call it about once a second.
+    obj.StatsSample = function () {
+        if (!st.on) return null;
+        var now = statsNow(), s = st.samples;
+        s.push({ t: now, frames: st.frames, bytes: ((obj.parent != null) && obj.parent.BytesIn) || 0 });
+        while ((s.length > 2) && ((now - s[1].t) >= 2000)) { s.shift(); }
+        if (s.length < 2) return null;
+        var a = s[0], b = s[s.length - 1], dt = (b.t - a.t) / 1000;
+        if (dt <= 0) return null;
+        return { fps: (b.frames - a.frames) / dt, bytesPerSec: (b.bytes - a.bytes) / dt, seconds: dt, hidden: ((typeof document == 'object') && (document != null) && (document.visibilityState === 'hidden')) };
+    }
 
     // Remote user mouse and keyboard lock
     obj.onRemoteInputLockChanged = null;
@@ -89,9 +145,16 @@ var CreateAgentRemoteDesktop = function (canvasid, scrolldiv) {
     obj.Start = function () {
         obj.State = 0;
         obj.accumulator = null;
+        obj.KvmAckReset(); // before the drop: tags of the old connection must not produce ACKs
+        obj.DropPendingOperations();
+        clearOverflowRefresh();
     }
 
     obj.Stop = function () {
+        obj.StatsEnable(false);
+        obj.KvmAckReset();
+        obj.DropPendingOperations();
+        clearOverflowRefresh();
         obj.setRotation(0);
         obj.UnGrabKeyInput();
         obj.UnGrabMouseInput();
@@ -127,52 +190,308 @@ var CreateAgentRemoteDesktop = function (canvasid, scrolldiv) {
     // KVM Control.
     // Routines for processing incoming packets from the AJAX server, and handling individual messages.
     obj.ProcessPictureMsg = function (data, X, Y) {
-        //if (obj.targetnode != null) obj.Debug("ProcessPictureMsg " + X + "," + Y + " - " + obj.targetnode.substring(0, 8));
-        var tile = new Image();
-        tile.xcount = obj.tilesReceived++;
-        var r = obj.tilesReceived, tdata = data.slice(4), ptr = 0, strs = [];
+        // data = tile payload without the command header: X (2), Y (2), then the encoded image (JPEG, PNG or WebP).
+        var bytes = data.subarray(4);
+        var op = { t: 2, st: 0, x: X, y: Y, img: null, bytes: bytes.byteLength, px: 0, dropped: false }; // st: 0 = decoding, 1 = ready, 2 = failed
+        obj.tilesReceived++;
+        if (!enqueueOperation(op)) return null;
+        decodeTile(op, bytes);
+        return op; // decoding always completes asynchronously, so the caller can still attach its ACK tag
+    }
+
+    // The image type from the first bytes of the tile, or '' when it is not recognised (the browser then sniffs the content).
+    obj.TileMimeType = function (b) {
+        if ((b.length >= 3) && (b[0] == 0xFF) && (b[1] == 0xD8)) return 'image/jpeg';
+        if ((b.length >= 8) && (b[0] == 0x89) && (b[1] == 0x50) && (b[2] == 0x4E) && (b[3] == 0x47)) return 'image/png';
+        if ((b.length >= 12) && (b[0] == 0x52) && (b[1] == 0x49) && (b[2] == 0x46) && (b[3] == 0x46) && (b[8] == 0x57) && (b[9] == 0x45) && (b[10] == 0x42) && (b[11] == 0x50)) return 'image/webp';
+        return '';
+    }
+
+    // Budgets only apply to a live session: without a channel to the agent (the recording player, WebM export) a dropped queue could not be
+    // refreshed, and the player feeds data faster than it decodes, so there the queue is unbounded and lossless like the old client.
+    function budgetsApply() { return (obj.parent != null); }
+
+    // Queue an operation at the tail. A queue that outgrows its budget is dropped as a whole and a full refresh is requested,
+    // which is what a viewer that cannot keep up needs; the operation that did not fit is part of the dropped stream.
+    function enqueueOperation(op) {
+        var q = obj.PendingOperations;
+        if (budgetsApply() && ((q.length >= obj.MaxQueuedOps) || ((obj.QueuedBytes + op.bytes) > obj.MaxQueuedBytes))) { queueOverflow(); return false; }
+        q.push(op);
+        obj.QueuedBytes += op.bytes;
+        return true;
+    }
+
+    // A refresh is requested at most once a second; one that falls inside that second is delayed, not skipped, because the second drop may
+    // have thrown away the tiles of the first refresh and the agent only resends what changed.
+    var lastOverflowRefresh = 0, refreshTimer = null;
+    function overflowRefresh() {
+        var wait = 1000 - (Date.now() - lastOverflowRefresh);
+        if (wait <= 0) { lastOverflowRefresh = Date.now(); obj.SendRefresh(); return; }
+        if (refreshTimer == null) { refreshTimer = setTimeout(function () { refreshTimer = null; lastOverflowRefresh = Date.now(); obj.SendRefresh(); }, wait); }
+    }
+    function clearOverflowRefresh() { if (refreshTimer != null) { clearTimeout(refreshTimer); refreshTimer = null; } }
+    function queueOverflow() {
+        obj.QueueOverflows++;
+        if (obj.debugmode > 0) { console.log('KVM draw queue overflow, dropping ' + obj.PendingOperations.length + ' operations'); }
+        obj.DropPendingOperations();
+        overflowRefresh();
+    }
+
+    function decodeTile(op, bytes) {
+        var mime = obj.TileMimeType(bytes);
+        if (obj.UseImageBitmap && (typeof createImageBitmap == 'function') && (typeof Blob == 'function')) {
+            var p = null;
+            try { p = createImageBitmap(new Blob([bytes], { type: mime })); } catch (ex) { p = null; }
+            if (p && (typeof p.then == 'function')) {
+                p.then(function (bmp) { obj.bitmapFailures = 0; tileDecoded(op, bmp); }, function () {
+                    // One tile that createImageBitmap refuses gets a second chance through Image. It counts against the bitmap decoder only when
+                    // Image then decodes the same tile (the content is fine, the decoder is not); 8 such tiles in a row switch the decoder off.
+                    if (op.dropped) return;
+                    decodeTileViaImage(op, bytes, mime, true);
+                });
+                return;
+            }
+        }
+        decodeTileViaImage(op, bytes, mime);
+    }
+
+    // The original decoder: bytes -> binary string -> base64 -> data URL -> Image.
+    function decodeTileViaImage(op, bytes, mime, afterBitmapFailure) {
+        var tile = new Image(), ptr = 0, strs = [];
         // String.fromCharCode.apply() can't handle very large argument count, so we have to split like this.
-        while ((tdata.byteLength - ptr) > 50000) { strs.push(String.fromCharCode.apply(null, tdata.slice(ptr, ptr + 50000))); ptr += 50000; }
-        if (ptr > 0) { strs.push(String.fromCharCode.apply(null, tdata.slice(ptr))); } else { strs.push(String.fromCharCode.apply(null, tdata)); }
-        tile.src = 'data:image/jpeg;base64,' + btoa(strs.join(''));
-        tile.onload = function () {
-            //console.log('DecodeTile #' + this.xcount);
-            if ((obj.Canvas != null) && (obj.KillDraw < r) && (obj.State != 0)) {
-                obj.PendingOperations.push([r, 2, tile, X, Y]);
-                while (obj.DoPendingOperations()) { }
-            } else {
-                obj.PendingOperations.push([r, 0]);
-            }
-        }
-        tile.onerror = function () { console.log('DecodeTileError'); obj.PendingOperations.push([r, 0]); if (obj.State != 0) { while (obj.DoPendingOperations()) { } } }
+        while ((bytes.byteLength - ptr) > 50000) { strs.push(String.fromCharCode.apply(null, bytes.subarray(ptr, ptr + 50000))); ptr += 50000; }
+        strs.push(String.fromCharCode.apply(null, (ptr > 0) ? bytes.subarray(ptr) : bytes));
+        tile.onload = function () { if (afterBitmapFailure && (++obj.bitmapFailures >= 8)) { obj.UseImageBitmap = false; } tileDecoded(op, tile); }
+        tile.onerror = function () { console.log('DecodeTileError'); tileFailed(op); }
+        tile.src = 'data:' + (mime || 'image/jpeg') + ';base64,' + btoa(strs.join(''));
     }
 
+    function releaseImage(img) { if (img && (typeof img.close == 'function')) { try { img.close(); } catch (ex) { } } }
+
+    function tileDecoded(op, img) {
+        if (op.dropped) { releaseImage(img); return; } // The screen was reset or the session stopped while the tile was decoding.
+        op.img = img; op.st = 1; op.px = (img.width * img.height) || 0;
+        obj.DecodedPixels += op.px;
+        drainOperations();
+        if (budgetsApply() && (obj.DecodedPixels > obj.MaxDecodedPixels)) { queueOverflow(); }
+    }
+
+    function tileFailed(op) {
+        if (op.dropped) return;
+        op.st = 2; // Stays in the queue as a no-op so that the operations behind it are not stuck.
+        drainOperations();
+    }
+
+    var drainTimer = null, draining = false;
+    function drainOperations() {
+        if (draining) return;
+        draining = true;
+        var start = ((typeof performance == 'object') && performance.now) ? performance.now() : Date.now();
+        try {
+            while (obj.DoPendingOperations()) {
+                if (obj.DrawBudgetMs > 0) {
+                    var now = ((typeof performance == 'object') && performance.now) ? performance.now() : Date.now();
+                    if (((now - start) > obj.DrawBudgetMs) && (obj.PendingOperations.length > 0) && (obj.PendingOperations[0].st != 0)) {
+                        // Give the browser a turn (input, painting) and continue with the rest.
+                        if (drainTimer == null) { drainTimer = setTimeout(function () { drainTimer = null; drainOperations(); }, 0); }
+                        break;
+                    }
+                }
+            }
+        } finally { draining = false; }
+    }
+
+    // Apply the operation at the head of the queue if it is complete. Returns true if an operation was consumed.
     obj.DoPendingOperations = function () {
-        if (obj.PendingOperations.length == 0) return false;
-        for (var i = 0; i < obj.PendingOperations.length; i++) { // && KillDraw < tilesDrawn
-            var Msg = obj.PendingOperations[i];
-            if (Msg[0] == (obj.TilesDrawn + 1)) {
-                if (obj.onPreDrawImage != null) obj.onPreDrawImage(); // Notify that we are about to draw on the canvas.
-                if (Msg[1] == 1) { obj.ProcessCopyRectMsg(Msg[2]); }
-                else if (Msg[1] == 2) { obj.Canvas.drawImage(Msg[2], obj.rotX(Msg[3], Msg[4]), obj.rotY(Msg[3], Msg[4])); delete Msg[2]; }
-                obj.PendingOperations.splice(i, 1);
-                obj.TilesDrawn++;
-                if ((obj.TilesDrawn == obj.tilesReceived) && (obj.KillDraw < obj.TilesDrawn)) { obj.KillDraw = obj.TilesDrawn = obj.tilesReceived = 0; }
-                return true;
-            }
+        var q = obj.PendingOperations;
+        if ((q.length == 0) || (q[0].st == 0)) return false;
+        var op = q.shift();
+        if (op.t == 0) { kvmAckDone(op.ackTag); return true; } // an ACK marker: nothing to draw, not a tile
+        obj.QueuedBytes -= op.bytes;
+        if (op.st == 1) { obj.DecodedPixels -= op.px; }
+        obj.TilesDrawn++;
+        if (obj.onPreDrawImage != null) { try { obj.onPreDrawImage(); } catch (ex) { console.log(ex); } } // Notify that we are about to draw on the canvas.
+        if ((op.st == 1) && (obj.Canvas != null) && (obj.State != 0)) {
+            try {
+                if (op.t == 2) { obj.Canvas.drawImage(op.img, obj.rotX(op.x, op.y), obj.rotY(op.x, op.y)); }
+                else if (op.t == 1) { drawCopyRect(op); }
+                obj.DrawSeq++;
+            } catch (ex) { console.log('KVM draw error', ex); }
         }
-        if (obj.oldie && obj.PendingOperations.length > 0) { obj.TilesDrawn++; }
-        return false;
+        releaseImage(op.img); op.img = null;
+        if (op.ackTag) { kvmAckDone(op.ackTag); }
+        return true;
     }
 
-    obj.ProcessCopyRectMsg = function (str) {
-        var SX = ((str.charCodeAt(0) & 0xFF) << 8) + (str.charCodeAt(1) & 0xFF);
-        var SY = ((str.charCodeAt(2) & 0xFF) << 8) + (str.charCodeAt(3) & 0xFF);
-        var DX = ((str.charCodeAt(4) & 0xFF) << 8) + (str.charCodeAt(5) & 0xFF);
-        var DY = ((str.charCodeAt(6) & 0xFF) << 8) + (str.charCodeAt(7) & 0xFF);
-        var WIDTH = ((str.charCodeAt(8) & 0xFF) << 8) + (str.charCodeAt(9) & 0xFF);
-        var HEIGHT = ((str.charCodeAt(10) & 0xFF) << 8) + (str.charCodeAt(11) & 0xFF);
-        obj.Canvas.drawImage(Canvas.canvas, SX, SY, WIDTH, HEIGHT, DX, DY, WIDTH, HEIGHT);
+    // Drop everything that is queued: pending decodes are ignored when they finish and decoded bitmaps are released.
+    obj.DropPendingOperations = function () {
+        var q = obj.PendingOperations, lastTag = null;
+        for (var i = 0; i < q.length; i++) { q[i].dropped = true; releaseImage(q[i].img); q[i].img = null; if (q[i].ackTag) { lastTag = q[i].ackTag; } }
+        q.length = 0;
+        if (lastTag != null) { kvmAckDone(lastTag); } // dropped operations have left the queue too
+        obj.QueuedBytes = 0;
+        obj.DecodedPixels = 0;
+        obj.tilesReceived = obj.TilesDrawn = obj.KillDraw = 0; // the counters describe the queue, which is empty now
+        obj.Epoch++;
+        if (drainTimer != null) { clearTimeout(drainTimer); drainTimer = null; }
+    }
+
+    // ---- Viewer ACK ----
+
+    function kvmAckNext(x) { return (x >= 0xFFFFFFFF) ? 1 : (x + 1); }
+    function kvmAckBound() { return (ka.socket != null) && (obj.parent != null) && (obj.parent === ka.transport) && (obj.parent.socket === ka.socket) && (ka.socket.readyState === 1); }
+    function kvmAckClearTimers() {
+        if (ka.paceTimer != null) { clearTimeout(ka.paceTimer); ka.paceTimer = null; }
+        if (ka.retryTimer != null) { clearTimeout(ka.retryTimer); ka.retryTimer = null; }
+        if ((ka.visListener != null) && (typeof document == 'object') && document.removeEventListener) { document.removeEventListener('visibilitychange', ka.visListener); }
+        ka.visListener = null;
+    }
+    function kvmAckVisible() { return (typeof document != 'object') || (document == null) || (document.visibilityState !== 'hidden'); }
+    function kvmAckSendRequest() {
+        if (!kvmAckBound()) { obj.KvmAckReset(); return; }
+        ka.requested = true;
+        obj.KvmAckStats.requests++;
+        ka.transport.sendCtrlMsg('{"ctrlChannel":"102938","type":"kvmack","op":"req","v":1}');
+    }
+
+    // Everything about ACK belongs to one connection; the transport and the module call this on every start and stop.
+    obj.KvmAckReset = function () {
+        kvmAckClearTimers();
+        ka.activation++; // tags still attached to queued operations become stale
+        ka.transport = null; ka.socket = null; ka.requested = false; ka.active = false; ka.permanent = false;
+        ka.done = null; ka.sentE = 0; ka.sentS = 0; ka.lastSend = 0; ka.rerequests = 0; ka.retryAt = 0;
+    }
+
+    // The transport saw "kvmAck":1 in the server's metadata, on socket `socket`. This binds ACK to that connection and sends the request.
+    obj.KvmAckOffered = function (transport, socket) {
+        if ((obj.KvmAckEnabled === false) || ((typeof urlargs == 'object') && (urlargs != null) && (urlargs.kvmack == '0'))) return;
+        if ((ka.socket != null) || ka.requested || ka.active || ka.permanent) return; // already bound to this connection
+        if ((transport == null) || (transport !== obj.parent) || (transport.protocol != 2) || (transport.State != 3) || transport.webRtcActive) return;
+        if ((socket == null) || (socket !== transport.socket) || (socket.readyState !== 1)) return;
+        ka.transport = transport; ka.socket = socket;
+        kvmAckSendRequest();
+    }
+
+    // A "kvmack" control message from the server, received on `socket`
+    obj.KvmAckControl = function (msg, socket) {
+        if ((msg == null) || (msg.v !== 1) || (socket == null) || (socket !== ka.socket) || !kvmAckBound()) return;
+        if (msg.op === 'on') {
+            var e = msg.epoch, q = msg.seq;
+            if (!ka.requested || ka.active) return;
+            if ((typeof e != 'number') || !Number.isInteger(e) || (e < 1) || (e > 0xFFFFFFFF)) return;
+            if ((typeof q != 'number') || !Number.isInteger(q) || (q < 0) || (q > 0xFFFFFFFF)) return;
+            ka.requested = false; ka.active = true; ka.activation++;
+            ka.epoch = e; ka.seq = q; ka.done = null; ka.sentE = 0; ka.sentS = 0;
+            obj.KvmAckStats.ons++;
+        } else if (msg.op === 'off') {
+            ka.active = false; ka.requested = false;
+            if (ka.paceTimer != null) { clearTimeout(ka.paceTimer); ka.paceTimer = null; }
+            obj.KvmAckStats.offs++;
+            if ((msg.reason === 'timeout') && !ka.permanent && (ka.rerequests < 3)) {
+                // Ask again after the server's cooldown (30 s from its "off"), when the page is visible and the connection is the same
+                if (ka.retryTimer != null) { clearTimeout(ka.retryTimer); }
+                ka.retryAt = Date.now() + 31000;
+                ka.retryTimer = setTimeout(kvmAckRetry, 31000);
+            } else {
+                ka.permanent = true;
+                kvmAckClearTimers();
+            }
+        }
+    }
+
+    function kvmAckRetry() {
+        ka.retryTimer = null;
+        if (!kvmAckBound() || ka.permanent || ka.active || ka.requested || (ka.rerequests >= 3)) return;
+        if (kvmAckVisible()) { ka.rerequests++; kvmAckSendRequest(); return; }
+        if ((ka.visListener == null) && (typeof document == 'object') && document.addEventListener) {
+            ka.visListener = function () {
+                if (!kvmAckVisible() || (Date.now() < ka.retryAt)) return;
+                document.removeEventListener('visibilitychange', ka.visListener);
+                ka.visListener = null;
+                kvmAckRetry();
+            };
+            document.addEventListener('visibilitychange', ka.visListener);
+        }
+    }
+
+    // The transport's accumulator started while ACK was on: the count may no longer match the server's, so stop acknowledging for good
+    obj.KvmAckLocalDesync = function () {
+        if (!ka.active) return;
+        ka.active = false; ka.permanent = true;
+        obj.KvmAckStats.desyncs++;
+        kvmAckClearTimers();
+        if (kvmAckBound()) { ka.transport.sendCtrlMsg('{"ctrlChannel":"102938","type":"kvmack","op":"off","v":1,"reason":"desync"}'); }
+    }
+
+    // Tag of the next counted frame, or null
+    function kvmAckTag(cmd, fromWire) {
+        if ((fromWire !== true) || !ka.active || ((cmd != 3) && (cmd != 7))) return null;
+        if (cmd == 7) { ka.epoch = kvmAckNext(ka.epoch); ka.seq = 0; } // a screen frame opens a new epoch
+        ka.seq = kvmAckNext(ka.seq);
+        return { a: ka.activation, e: ka.epoch, s: ka.seq };
+    }
+
+    // A counted frame that produced no queue operation (screen size, refused tile) still has a queue position: a marker.
+    // A marker at the tail is replaced, not added (nothing lies between them), and markers count against the operation budget.
+    function kvmAckMarker(tag) {
+        var q = obj.PendingOperations, tail = (q.length > 0) ? q[q.length - 1] : null;
+        if ((tail != null) && (tail.t === 0) && !tail.dropped) { tail.ackTag = tag; return; }
+        if (q.length >= obj.MaxQueuedOps) { queueOverflow(); }
+        q.push({ t: 0, st: 1, bytes: 0, px: 0, img: null, ackTag: tag, dropped: false });
+        drainOperations();
+    }
+
+    function kvmAckDone(tag) {
+        if ((tag == null) || !ka.active || (tag.a !== ka.activation)) return;
+        ka.done = tag;
+        kvmAckMaybeSend();
+    }
+
+    function kvmAckMaybeSend() {
+        if (!ka.active || (ka.done == null) || ((ka.done.e === ka.sentE) && (ka.done.s === ka.sentS))) return;
+        var wait = (ka.lastSend + 20) - Date.now();
+        if (wait > 0) { if (ka.paceTimer == null) { ka.paceTimer = setTimeout(function () { ka.paceTimer = null; kvmAckMaybeSend(); }, wait); } return; }
+        if (!kvmAckBound()) { obj.KvmAckReset(); return; }
+        var e = ka.done.e, s = ka.done.s, b = new Uint8Array(12);
+        b[0] = 0x4B; b[1] = 0x41; b[2] = 0; b[3] = 12;
+        b[4] = (e >>> 24) & 255; b[5] = (e >>> 16) & 255; b[6] = (e >>> 8) & 255; b[7] = e & 255;
+        b[8] = (s >>> 24) & 255; b[9] = (s >>> 16) & 255; b[10] = (s >>> 8) & 255; b[11] = s & 255;
+        ka.sentE = e; ka.sentS = s; ka.lastSend = Date.now();
+        obj.KvmAckStats.acks++;
+        ka.transport.send(b);
+    }
+
+    // CopyRect: 6 big-endian 16 bit values, SX SY DX DY WIDTH HEIGHT, in the coordinates of the remote screen. It is queued like a tile.
+    obj.ProcessCopyRectMsg = function (d) {
+        if (d.length < 12) return;
+        var v = (typeof d == 'string') ? function (i) { return ((d.charCodeAt(i) & 0xFF) << 8) + (d.charCodeAt(i + 1) & 0xFF); } : function (i) { return (d[i] << 8) + d[i + 1]; };
+        var op = { t: 1, st: 1, sx: v(0), sy: v(2), dx: v(4), dy: v(6), w: v(8), h: v(10), img: null, bytes: 0, px: 0, dropped: false };
+        obj.tilesReceived++;
+        if (!enqueueOperation(op)) return null;
+        drainOperations();
+        return op;
+    }
+
+    // The canvas rectangle (x, y, w, h) in canvas pixels of a rectangle of the remote screen, for the current rotation.
+    obj.rotRect = function (x, y, w, h) {
+        var cw = obj.Canvas.canvas.width, ch = obj.Canvas.canvas.height, ax, ay, bx, by;
+        switch (obj.rotation) {
+            case 1: ax = cw - y; ay = x; bx = cw - (y + h); by = x + w; break;
+            case 2: ax = cw - x; ay = ch - y; bx = cw - (x + w); by = ch - (y + h); break;
+            case 3: ax = y; ay = ch - x; bx = y + h; by = ch - (x + w); break;
+            default: ax = x; ay = y; bx = x + w; by = y + h; break;
+        }
+        return { x: Math.min(ax, bx), y: Math.min(ay, by), w: Math.abs(bx - ax), h: Math.abs(by - ay) };
+    }
+
+    function drawCopyRect(op) {
+        var c = obj.Canvas, cv = c.canvas;
+        if ((cv.width == 0) || (cv.height == 0) || (op.w == 0) || (op.h == 0)) return;
+        if (obj.rotation == 0) { c.drawImage(cv, op.sx, op.sy, op.w, op.h, op.dx, op.dy, op.w, op.h); return; }
+        // The canvas holds the rotated picture and the context carries the rotation, so copy in canvas pixels with an identity transform.
+        var s = obj.rotRect(op.sx, op.sy, op.w, op.h), d = obj.rotRect(op.dx, op.dy, op.w, op.h);
+        c.save();
+        try { c.setTransform(1, 0, 0, 1, 0, 0); c.drawImage(cv, s.x, s.y, s.w, s.h, d.x, d.y, s.w, s.h); } finally { c.restore(); }
     }
 
     obj.SendUnPause = function () {
@@ -187,12 +506,25 @@ var CreateAgentRemoteDesktop = function (canvasid, scrolldiv) {
         obj.send(String.fromCharCode(0x00, 0x08, 0x00, 0x05, 0x01));
     }
 
-    obj.SendCompressionLevel = function (type, level, scaling, frametimer) { // Type: 1 = JPEG, 2 = PNG, 3 = TIFF, 4 = WebP
+    // Command 5 is 10 bytes (type, level, scaling, frame interval) or, with a bandwidth budget, 12 (plus the budget as u16, units of 100 kbit/s, 0 = no limit).
+    // A budget given once is kept for later calls without one (the resend after a screen size change); a session that never gave one sends 10 bytes
+    // as before (the thumbnails of the multi desktop view). Agents that do not know the budget ignore the extra bytes.
+    obj.SendCompressionLevel = function (type, level, scaling, frametimer, budget) { // Type: 1 = JPEG, 2 = PNG, 3 = TIFF, 4 = WebP
         obj.ImageType = type;
         if (level) { obj.CompressionLevel = level; }
         if (scaling) { obj.ScalingLevel = scaling; }
         if (frametimer) { obj.FrameRateTimer = frametimer; }
-        obj.send(String.fromCharCode(0x00, 0x05, 0x00, 0x0A, type, obj.CompressionLevel) + obj.shortToStr(obj.ScalingLevel) + obj.shortToStr(obj.FrameRateTimer));
+        if ((budget != null) && (budget !== '') && !isNaN(parseInt(budget))) { obj.BandwidthBudget = Math.max(0, Math.min(65535, parseInt(budget))); }
+        var withBudget = (obj.BandwidthBudget != null);
+        function command(frameInterval) {
+            return String.fromCharCode(0x00, 0x05, 0x00, withBudget ? 0x0C : 0x0A, type, obj.CompressionLevel) + obj.shortToStr(obj.ScalingLevel) + obj.shortToStr(frameInterval) + (withBudget ? obj.shortToStr(obj.BandwidthBudget) : '');
+        }
+        // The agent ignores a frame interval below 20 ms and keeps the previous one. For a shorter interval (60 fps = 16 ms) the same message is
+        // sent twice: first with 20 ms, which every agent accepts (50 fps, what an agent that does not know shorter intervals ends up with),
+        // then with the real interval, which an agent that allows it takes over. Both carry the same budget.
+        var fr = parseInt(obj.FrameRateTimer);
+        if (fr < 20) { obj.send(command(20)); }
+        obj.send(command(obj.FrameRateTimer));
     }
 
     obj.SendRefresh = function () {
@@ -202,13 +534,20 @@ var CreateAgentRemoteDesktop = function (canvasid, scrolldiv) {
     obj.ProcessScreenMsg = function (width, height) {
         if (obj.debugmode > 0) { console.log('ScreenSize: ' + width + ' x ' + height); }
         if ((obj.ScreenWidth == width) && (obj.ScreenHeight == height)) return; // Ignore change if screen is same size.
+        // A new size with the same proportions as the picture on the canvas (2 pixels of rounding allowed) is what the agent sends when it lowers or restores
+        // its picture scale under a bandwidth limit. The canvas then takes the new size at once, with the old picture stretched to it, and the new tiles
+        // overwrite it. Only for an unrotated view that has a picture; any other size change leaves the canvas as it was until the first tile (a blank canvas).
+        var cw = obj.Canvas.canvas.width, ch = obj.Canvas.canvas.height;
+        var keepPicture = ((obj.rotation == 0) && (obj.DrawSeq > 0) && (cw > 0) && (ch > 0) && (width > 0) && (Math.abs(height - (width * ch / cw)) <= 2));
         obj.Canvas.setTransform(1, 0, 0, 1, 0, 0);
         obj.rotation = 0;
         obj.FirstDraw = true;
+        obj.KeepPictureOnResize = keepPicture;
         obj.ScreenWidth = obj.width = width;
         obj.ScreenHeight = obj.height = height;
-        obj.KillDraw = obj.tilesReceived;
-        while (obj.PendingOperations.length > 0) { obj.PendingOperations.shift(); }
+        obj.DropPendingOperations(); // Everything queued belongs to the old screen. The counters start again with the new one.
+        obj.KillDraw = obj.tilesReceived = obj.TilesDrawn = 0;
+        if (keepPicture) { obj.onResize(); } // the queue is empty, so resizing the canvas here cannot reorder drawing
         obj.SendCompressionLevel(obj.ImageType);
         obj.SendUnPause();
         obj.SendRemoteInputLock(2); // Query input lock state
@@ -216,8 +555,8 @@ var CreateAgentRemoteDesktop = function (canvasid, scrolldiv) {
         if (obj.onScreenSizeChange != null) { obj.onScreenSizeChange(obj, obj.ScreenWidth, obj.ScreenHeight, obj.CanvasId); }
     }
 
-    obj.ProcessBinaryCommand = function (cmd, cmdsize, view) {
-        var X, Y;
+    obj.ProcessBinaryCommand = function (cmd, cmdsize, view, fromWire) {
+        var X, Y, op = null, ackTag = kvmAckTag(cmd, fromWire); // fromWire: set by the transport for frames received on its websocket
         if ((cmd == 3) || (cmd == 4) || (cmd == 7)) { X = (view[4] << 8) + view[5]; Y = (view[6] << 8) + view[7]; }
         if (obj.debugmode > 2) { console.log('CMD', cmd, cmdsize, X, Y); }
 
@@ -238,7 +577,13 @@ var CreateAgentRemoteDesktop = function (canvasid, scrolldiv) {
             case 3: // Tile
                 if (obj.FirstDraw) obj.onResize();
                 //console.log('TILE', X, Y, cmdsize);
-                obj.ProcessPictureMsg(view.slice(4), X, Y);
+                op = obj.ProcessPictureMsg(view.slice(4), X, Y);
+                break;
+            case 4: // CopyRect: SX, SY, DX, DY, WIDTH, HEIGHT
+                if (cmdsize < 16) break;
+                // Only the first operation after a screen size change can see FirstDraw set, and the queue is empty then, so resizing the canvas here cannot reorder drawing.
+                if (obj.FirstDraw) obj.onResize();
+                obj.ProcessCopyRectMsg(view.slice(4));
                 break;
             case 7: // Screen size
                 obj.ProcessScreenMsg(X, Y);
@@ -319,7 +664,8 @@ var CreateAgentRemoteDesktop = function (canvasid, scrolldiv) {
                 console.log('Unknown command', cmd, cmdsize);
                 break;
         }
-
+        // The tag goes on the queue operation this frame created; a counted frame without one (screen size, refused tile) gets a marker
+        if (ackTag != null) { if (op != null) { op.ackTag = ackTag; } else { kvmAckMarker(ackTag); } }
     }
     
     // Keyboard and Mouse I/O.
@@ -644,9 +990,20 @@ var CreateAgentRemoteDesktop = function (canvasid, scrolldiv) {
         if (obj.ScreenWidth == 0 || obj.ScreenHeight == 0) return;
         if ((obj.Canvas.canvas.width == obj.ScreenWidth) && (obj.Canvas.canvas.height == obj.ScreenHeight)) return;
         if (obj.FirstDraw) {
+            var cv = obj.Canvas.canvas, keep = null;
+            if (obj.KeepPictureOnResize && (cv.width > 0) && (cv.height > 0)) { // copy the picture before the resize clears the canvas
+                try {
+                    if (obj.kcanvas == null) { obj.kcanvas = document.createElement('canvas'); }
+                    obj.kcanvas.width = cv.width; obj.kcanvas.height = cv.height;
+                    obj.kcanvas.getContext('2d').drawImage(cv, 0, 0);
+                    keep = obj.kcanvas;
+                } catch (ex) { keep = null; }
+            }
+            obj.KeepPictureOnResize = false;
             obj.Canvas.canvas.width = obj.ScreenWidth;
             obj.Canvas.canvas.height = obj.ScreenHeight;
             obj.Canvas.fillRect(0, 0, obj.ScreenWidth, obj.ScreenHeight);
+            if (keep != null) { try { obj.Canvas.drawImage(keep, 0, 0, keep.width, keep.height, 0, 0, obj.ScreenWidth, obj.ScreenHeight); } catch (ex) { } }
             if (obj.onScreenSizeChange != null) { obj.onScreenSizeChange(obj, obj.ScreenWidth, obj.ScreenHeight, obj.CanvasId); }
         }
         obj.FirstDraw = false;

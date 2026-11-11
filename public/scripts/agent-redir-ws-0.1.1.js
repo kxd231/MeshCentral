@@ -25,6 +25,7 @@ var CreateAgentRedirect = function (meshserver, module, serverPublicNamePort, au
     obj.webRtcActive = false;
     obj.webrtcconfig = null;
     obj.webSwitchOk = false;
+    obj.BytesIn = 0; // data received from the tunnel (websocket and WebRTC data channel), as the page sees it: after any websocket decompression
     obj.webchannel = null;
     obj.webrtc = null;
     obj.debugmode = 0;
@@ -63,6 +64,8 @@ var CreateAgentRedirect = function (meshserver, module, serverPublicNamePort, au
         if ((urlargs != null) && (urlargs.slowrelay != null)) { url += '&slowrelay=' + urlargs.slowrelay; }
         obj.nodeid = nodeid;
         obj.connectstate = 0;
+        resetAccumulator(); // A command left half received by an earlier connection must not absorb the frames of this one
+        if (obj.m.KvmAckReset) { obj.m.KvmAckReset(); } // viewer ACK is negotiated again on every connection
         obj.socket = new WebSocket(url);
         obj.socket.binaryType = 'arraybuffer';
         obj.socket.onopen = obj.xxOnSocketConnected;
@@ -97,7 +100,7 @@ var CreateAgentRedirect = function (meshserver, module, serverPublicNamePort, au
     }
 
     // Called to pass websocket control messages
-    obj.xxOnControlCommand = function (msg) {
+    obj.xxOnControlCommand = function (msg, src) { // src: the socket (or data channel) the message came from
         var controlMsg;
         try { controlMsg = JSON.parse(msg); } catch (e) { return; }
         if (controlMsg.ctrlChannel != '102938') { if (obj.m.ProcessData) { obj.m.ProcessData(msg); } else { console.log(msg); } return; }
@@ -107,6 +110,10 @@ var CreateAgentRedirect = function (meshserver, module, serverPublicNamePort, au
         } else if (controlMsg.type == 'metadata') {
             obj.metadata = controlMsg;
             if (obj.onMetadataChange) obj.onMetadataChange(obj.metadata);
+            // Viewer ACK offer from a multiplexing server; the module binds it to the socket it arrived on
+            if ((controlMsg.kvmAck === 1) && obj.m.KvmAckOffered) { obj.m.KvmAckOffered(obj, (src != null) ? src : obj.socket); }
+        } else if (controlMsg.type == 'kvmack') {
+            if (obj.m.KvmAckControl) { obj.m.KvmAckControl(controlMsg, (src != null) ? src : obj.socket); }
         } else if ((controlMsg.type == 'rtt') && (typeof controlMsg.time == 'number')) {
             obj.latency.current = (new Date().getTime()) - controlMsg.time;
             if (obj.latency.callback != null) { obj.latency.callback(obj.latency.current); }
@@ -150,6 +157,7 @@ var CreateAgentRedirect = function (meshserver, module, serverPublicNamePort, au
         
     obj.xxOnMessage = function (e) {
         //console.log('Recv', e.data, e.data.byteLength, obj.State);
+        obj.BytesIn += (typeof e.data == 'string') ? e.data.length : (e.data.byteLength || 0);
         if (obj.State < 3) {
             if ((e.data == 'c') || (e.data == 'cr')) {
                 if (e.data == 'cr') { obj.serverIsRecording = true; }
@@ -197,7 +205,7 @@ var CreateAgentRedirect = function (meshserver, module, serverPublicNamePort, au
         // Control messages, most likely WebRTC setup 
         //console.log('New data', e.data.byteLength);
         if (typeof e.data == 'string') {
-            if (e.data[0] == '~') { obj.m.ProcessData(e.data); } else { obj.xxOnControlCommand(e.data); }
+            if (e.data[0] == '~') { obj.m.ProcessData(e.data); } else { obj.xxOnControlCommand(e.data, e.target); }
         } else {
             // Send the data to the module
             if (obj.ProcessBinaryData) {
@@ -217,7 +225,7 @@ var CreateAgentRedirect = function (meshserver, module, serverPublicNamePort, au
                         var tmp = new Uint8Array(cmdAccLen), tmpPtr = 0;
                         for (var i in cmdAcc) { tmp.set(cmdAcc[i], tmpPtr); tmpPtr += cmdAcc[i].byteLength; }
                         //console.log('AccumulatorCompleted');
-                        obj.m.ProcessBinaryCommand(cmdAccCmd, cmdAccCmdSize, tmp);
+                        obj.m.ProcessBinaryCommand(cmdAccCmd, cmdAccCmdSize, tmp, (e.target != null) && (e.target === obj.socket));
                         cmdAccCmd = 0, cmdAccCmdSize = 0, cmdAccLen = 0, cmdAcc = [];
                     }
                 } else {
@@ -233,8 +241,9 @@ var CreateAgentRedirect = function (meshserver, module, serverPublicNamePort, au
                     if (cmdsize > view.byteLength) {
                         //console.log('AccumulatorRequired', cmd, cmdsize, view.byteLength);
                         cmdAccCmd = cmd; cmdAccCmdSize = cmdsize; cmdAccLen = view.byteLength, cmdAcc = [view];
+                        if (obj.m.KvmAckLocalDesync) { obj.m.KvmAckLocalDesync(); } // frames would no longer match the server's count
                     } else {
-                        obj.m.ProcessBinaryCommand(cmd, cmdsize, (cmdsize < view.byteLength) ? view.slice(0, cmdsize) : view);
+                        obj.m.ProcessBinaryCommand(cmd, cmdsize, (cmdsize < view.byteLength) ? view.slice(0, cmdsize) : view, (e.target != null) && (e.target === obj.socket)); // fromWire: counted for viewer ACK
                     }
                 }
             } else if (obj.m.ProcessBinaryData) {
@@ -255,6 +264,7 @@ var CreateAgentRedirect = function (meshserver, module, serverPublicNamePort, au
 
     // Command accumulator, this is used for WebRTC fragmentation
     var cmdAccCmd = 0, cmdAccCmdSize = 0, cmdAccLen = 0, cmdAcc = [];
+    function resetAccumulator() { cmdAccCmd = 0; cmdAccCmdSize = 0; cmdAccLen = 0; cmdAcc = []; }
 
     obj.sendText = function (x) {
         if (typeof x != 'string') { x = JSON.stringify(x); } // Turn into a string if needed
@@ -317,6 +327,8 @@ var CreateAgentRedirect = function (meshserver, module, serverPublicNamePort, au
 
         //obj.debug('Agent Redir Socket Stopped');
         obj.connectstate = -1;
+        resetAccumulator();
+        if (obj.m.KvmAckReset) { obj.m.KvmAckReset(); }
         if (obj.socket != null) {
             try { if (obj.socket.readyState == 1) { obj.sendCtrlMsg('{"ctrlChannel":"102938","type":"close"}'); } } catch (ex) { } // If connected, send the close command
             try { if (obj.socket.readyState <= 1) { obj.socket.close(); } } catch (ex) { } // If connecting or connected, close the websocket

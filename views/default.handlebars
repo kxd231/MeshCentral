@@ -866,6 +866,7 @@
                         <div id=DeskTools>
                             <div id=deskToolsAreaTop>
                                 <a id=DeskToolsRefreshButton style="right:2px" onclick="refreshDeskTools()">Refresh</a>
+                                <label id=DeskStatsOption style="position:absolute;right:64px;top:4px;cursor:pointer;white-space:nowrap" title="Show the frames per second and the bandwidth of the remote desktop session (agent KVM). Frames are display refreshes in which something was drawn. Bandwidth is the data received from the tunnel, as the browser sees it: a compressed WebSocket is not visible to the page, so the network traffic can be lower."><input id=DeskStatsToggle type=checkbox style="vertical-align:middle" onkeypress="return false" onkeydown="return false" onclick="toggleDeskStats()" /> FPS / bandwidth</label>
                                 <div id=deskToolsTopTabProcess class="deskToolsTopTab" onclick="changeDeskToolTab(0)" style="left:0px;bottom:0px">Processes</div>
                                 <div id=deskToolsTopTabService class="deskToolsTopTab" onclick="changeDeskToolTab(1)" style="display:none;left:90px;color:gray">Services</div>
                             </div>
@@ -891,6 +892,7 @@
                     </div>
                     <div id=deskarea4 class="areaFoot">
                         <div class="toright2">
+                            <span id="DeskStats" style="display:none;line-height:22px;white-space:nowrap;margin-right:8px" title="Frames drawn per second and data received per second (average of the last 2 seconds). The bandwidth is measured after any WebSocket decompression."></span>
                             <span id="DeskLatency" style="line-height:22px;width:50px" title="Desktop Session Latency"></span>
                             <span id="DeskTimer" style="line-height:22px" title="Session time"></span>
                             <input id=DeskToolsButton type=button value=Tools title="Toggle tools view" onkeypress="return false" onkeydown="return false" onclick="toggleDeskTools()" />
@@ -1573,20 +1575,29 @@
                         <div>
                             <div>Frame rate</div>
                             <select id="d7framelimiter" dir="rtl">
-                                <option value=20>Very fast</option>
-                                <option selected=selected value=50>Fast</option>
-                                <option value=100>Medium</option>
-                                <option value=400>Slow</option>
-                                <option value=1000>Very slow</option>
+                                <option value=16>Very fast</option>
+                                <option value=20>Fast</option>
+                                <option selected=selected value=50>Medium</option>
+                                <option value=100>Slow</option>
+                            </select>
+                        </div>
+                        <div id="d7budgetRow">
+                            <div title="Limit for the picture data the agent sends. Needs a Windows agent that supports the limit; other agents ignore it.">Bandwidth limit</div>
+                            <select id="d7budget" dir="rtl" title="Limit for the picture data the agent sends. Needs a Windows agent that supports the limit; other agents ignore it.">
+                                <option selected=selected value=0>No limit</option>
+                                <option value=200>&#x2066;20 Mbit/s&#x2069;</option>
+                                <option value=100>&#x2066;10 Mbit/s&#x2069;</option>
+                                <option value=60>&#x2066;6 Mbit/s&#x2069;</option>
+                                <option value=40>&#x2066;4 Mbit/s&#x2069;</option>
+                                <option value=20>&#x2066;2 Mbit/s&#x2069;</option>
+                                <option value=10>&#x2066;1 Mbit/s&#x2069;</option>
                             </select>
                         </div>
                         <div>
                             <div>Encoding</div>
                             <select id="d7encoding" dir="rtl">
-                                <option value=1>JPEG</option>
-                                <option value=2>PNG</option>
-                                <option value=3>TIFF</option>
-                                <option selected=selected value=4>WEBP</option>
+                                <option selected=selected value=1>JPEG</option>
+                                <option value=2 title="Lossless picture. The bandwidth limit does not apply to PNG.">&#x2066;PNG (lossless)&#x2069;</option>
                             </select>
                         </div>
                         <div id="d7desktopOtherSettings">
@@ -1720,8 +1731,8 @@
         var stars = {}; // Devices that have been "stared" by the user.
         var nodeShortIdent = 0;
         var desktop;
-        var desktopsettings = { encoding: 2, showfocus: false, showmouse: true, showcad: true, quality: 40, scaling: 1024, framerate: 50, localkeymap: false, swapmouse: false, remotekeymap: false, autoclipboard: false, autolock: false, agentencoding: 4 };
-        var multidesktopsettings = { quality: 20, scaling: 128, framerate: 1000, agentencoding: 4 };
+        var desktopsettings = { encoding: 2, showfocus: false, showmouse: true, showcad: true, quality: 40, scaling: 1024, framerate: 50, budget: 0, localkeymap: false, swapmouse: false, remotekeymap: false, autoclipboard: false, autolock: false, agentencoding: 1 };
+        var multidesktopsettings = { quality: 20, scaling: 128, framerate: 1000, agentencoding: 1 };
         var terminal;
         var files;
         var debugLevel = parseInt('{{{debuglevel}}}');
@@ -1802,15 +1813,9 @@
         mql.addEventListener('change', function() { console.log('Dark Change'); });
         */
 
-        // Check if WebP is supported
+        // Check if WebP is supported (the encoding list has JPEG and PNG only: the agents do not have a WebP encoder)
         var webpSupport = false;
-        check_webp_feature('lossy', function (f, x) {
-            webpSupport = x;
-            if (!x) {
-                d7encoding.options[1].disabled = true;
-                d7encoding.value = 1;
-            }
-        });
+        check_webp_feature('lossy', function (f, x) { webpSupport = x; });
 
         function startup() {
             if ((features & 32) == 0) {
@@ -1934,6 +1939,7 @@
             Q('DevFilterSelect').value = getstore('devFilterSelect', 0);
             Q('viewselect').value = getstore('deviceView', 1);
             Q('DeskControl').checked = (getstore('DeskControl', 1) == 1);
+            Q('DeskStatsToggle').checked = (getstore('deskStats', 0) == 1);
             QV('accountChangeEmailAddressSpan', (features & 0x200000) == 0);
 
             // Display the page devices
@@ -1969,6 +1975,7 @@
             t = null;
             try { t = localStorage.getItem('multidesktopsettings'); } catch (ex) {}
             if (t != null) { multidesktopsettings = JSON.parse(t); }
+            if ([1, 2].indexOf(parseInt(multidesktopsettings.agentencoding)) < 0) { multidesktopsettings.agentencoding = 1; } // same list as the normal session
             applyDesktopSettings();
 
             // Terminal special keys
@@ -5583,6 +5590,8 @@
             d7bitmapquality.value = multidesktopsettings.quality;
             d7bitmapscaling.value = multidesktopsettings.scaling;
             d7encoding.value = multidesktopsettings.agentencoding;
+            QV('d7budgetRow', false); // thumbnails never send a budget
+            d7FrameRateOptions(multidesktopsettings.framerate); // thumbnails keep their own (slow) rate, also through open and OK
             if (multidesktopsettings.framerate) { d7framelimiter.value = multidesktopsettings.framerate; } else { d7framelimiter.value = 100; }
             changeDesktopSettingsTab(null, 'd7meshkvm');
             setDialogMode(7, "Remote Desktop Settings", 3, showMultiDesktopSettingsChanged);
@@ -5628,7 +5637,7 @@
                     desk.webrtcconfig = webrtcconfiguration;
                     desk.onStateChanged = onMultiDesktopStateChange;
                     //desk.onConsoleMessageChange = function () { console.log('CONSOLEMSG:', desk.consoleMessage); }
-                    desk.m.ImageType = multidesktopsettings.agentencoding; // Send 4 if WebP is supported, otherwise send 1 for JPEG.
+                    desk.m.ImageType = multidesktopsettings.agentencoding; // JPEG (1) or PNG (2)
                     desk.m.CompressionLevel = multidesktopsettings.quality;
                     desk.m.ScalingLevel = multidesktopsettings.scaling;
                     if (multidesktopsettings.framerate) { desk.m.FrameRateTimer = multidesktopsettings.framerate; }
@@ -9665,7 +9674,7 @@
                     c.removeAttribute('onclick');
                     Q('DeskParent').appendChild(c);
                     desktop = xdesk;
-                    if (desktop.m.SendCompressionLevel) { desktop.m.SendCompressionLevel(desktopsettings.agentencoding, desktopsettings.quality, desktopsettings.scaling, desktopsettings.framerate); }
+                    if (desktop.m.SendCompressionLevel) { desktop.m.SendCompressionLevel(desktopsettings.agentencoding, desktopsettings.quality, desktopsettings.scaling, desktopsettings.framerate, desktopsettings.budget || 0); }
                     desktop.onStateChanged = onDesktopStateChange;
                     desktop.onMetadataChange = function(metadata) { updateMetadata(desktop, 'deskmetadata'); }
                     if ((features2 & 0x2000) != 0) desktop.m.stopInput = true;
@@ -9867,7 +9876,7 @@
                                     webRtcDesktop.softdesktop.m.UseExtendedKeyFlag = isWindowsNode(desktopNode);
                                     webRtcDesktop.softdesktop.m.setRotation(desktop.m.rotation);
                                     webRtcDesktop.softdesktop.m.onScreenSizeChange = deskAdjust;
-                                    webRtcDesktop.softdesktop.m.ImageType = webpSupport?4:1; // Send 4 if WebP is supported, otherwise send 1 for JPEG.
+                                    webRtcDesktop.softdesktop.m.ImageType = desktopsettings.agentencoding; // JPEG (1) or PNG (2), as in the settings
                                     if (desktopsettings.quality) { webRtcDesktop.softdesktop.m.CompressionLevel = desktopsettings.quality; } // Number from 1 to 100. 50 or less is best.
                                     if (desktopsettings.scaling) { webRtcDesktop.softdesktop.m.ScalingLevel = desktopsettings.scaling; }
                                     webRtcDesktop.softdesktop.Start();
@@ -9949,10 +9958,11 @@
                         }
                     }
                     desktop.onMetadataChange = function(metadata) { updateMetadata(desktop, 'deskmetadata'); }
-                    desktop.m.ImageType = desktopsettings.agentencoding; // Send 4 if WebP is supported, otherwise send 1 for JPEG.
+                    desktop.m.ImageType = desktopsettings.agentencoding; // JPEG (1) or PNG (2)
                     desktop.m.CompressionLevel = desktopsettings.quality; // Number from 1 to 100. 50 or less is best.
                     desktop.m.ScalingLevel = desktopsettings.scaling;
                     if (desktopsettings.framerate) { desktop.m.FrameRateTimer = desktopsettings.framerate; }
+                    desktop.m.BandwidthBudget = parseInt(desktopsettings.budget) || 0; // sent with the first compression command of the session
                     if (desktopsettings.swapmouse) { desktop.m.SwapMouse = desktopsettings.swapmouse; }
                     if (desktopsettings.rmw) { desktop.m.ReverseMouseWheel = desktopsettings.rmw; }
                     if (desktopsettings.remotekeymap == true) { desktop.m.remoteKeyMap = desktopsettings.remotekeymap; }
@@ -10208,6 +10218,41 @@
             deskAdjust();
             setTimeout(deskAdjust, 50);
             updateMetadata(desktop, 'deskmetadata');
+            deskStatsRefresh();
+        }
+
+        // Optional FPS / bandwidth readout of the agent KVM session (the "FPS / bandwidth" option in the Tools panel, remembered in the browser)
+        var deskStatsTimer = null, deskStatsModule = null;
+        function toggleDeskStats() {
+            Q('DeskStatsToggle').blur();
+            putstore('deskStats', Q('DeskStatsToggle').checked ? 1 : 0);
+            deskStatsRefresh();
+        }
+        function deskStatsStop() {
+            if (deskStatsTimer != null) { clearInterval(deskStatsTimer); deskStatsTimer = null; }
+            if (deskStatsModule != null) { try { deskStatsModule.StatsEnable(false); } catch (ex) { } deskStatsModule = null; }
+            QH('DeskStats', '');
+            QV('DeskStats', false);
+        }
+        // Start or stop the readout to match the option and the state of the session; safe to call at any time.
+        function deskStatsRefresh() {
+            var m = ((desktop != null) && (desktop.State == 3) && (desktop.m != null) && (typeof desktop.m.StatsEnable == 'function') && (typeof desktop.m.StatsSample == 'function')) ? desktop.m : null;
+            var on = (Q('DeskStatsToggle').checked == true);
+            if ((deskStatsModule != null) && ((m !== deskStatsModule) || !on)) { deskStatsStop(); }
+            if (!on || (m == null) || (deskStatsModule != null)) return;
+            deskStatsModule = m;
+            m.StatsEnable(true);
+            QV('DeskStats', true);
+            QH('DeskStats', '...');
+            deskStatsTimer = setInterval(deskStatsUpdate, 1000);
+        }
+        function deskStatsUpdate() {
+            if ((deskStatsModule == null) || (desktop == null) || (desktop.m !== deskStatsModule) || (desktop.State != 3)) { deskStatsStop(); return; }
+            var s = deskStatsModule.StatsSample();
+            if (s == null) return;
+            var kib = s.bytesPerSec / 1024, mbit = s.bytesPerSec * 8 / 1000000;
+            var fps = s.hidden ? '- fps' : format('{0} fps', (s.fps >= 10) ? Math.round(s.fps) : (Math.round(s.fps * 10) / 10));
+            QH('DeskStats', fps + ' \u00B7 ' + format('{0} KiB/s ({1} Mb/s)', (kib >= 10) ? Math.round(kib) : (Math.round(kib * 10) / 10), mbit.toFixed(1)));
         }
 
         function updateSessionTime() {
@@ -10302,6 +10347,7 @@
             desktopsettings.quality = d7bitmapquality.value;
             desktopsettings.scaling = d7bitmapscaling.value;
             desktopsettings.framerate = d7framelimiter.value;
+            desktopsettings.budget = parseInt(d7budget.value) || 0;
             desktopsettings.agentencoding = d7encoding.value;
             desktopsettings.swapmouse = d7deskSwapMouse.checked;
             desktopsettings.rmw = d7deskrmw.checked;
@@ -10327,7 +10373,7 @@
                     desktop.m.ReverseMouseWheel = desktopsettings.rmw;
                     desktop.m.remoteKeyMap = desktopsettings.remotekeymap;
                     if (desktop.State != 0) {
-                        desktop.m.SendCompressionLevel(desktopsettings.agentencoding, desktopsettings.quality, desktopsettings.scaling, desktopsettings.framerate);
+                        desktop.m.SendCompressionLevel(desktopsettings.agentencoding, desktopsettings.quality, desktopsettings.scaling, desktopsettings.framerate, desktopsettings.budget || 0);
                         desktop.sendCtrlMsg('{"ctrlChannel":"102938","type":"autolock","value":' + desktopsettings.autolock + '}');
                         desktop.m.SendRefresh();
                     }
@@ -10344,6 +10390,19 @@
             }
         }
 
+        // The frame rate list is shared with the multi desktop settings, whose thumbnails default to a slow rate (1000) that is not in the list any more.
+        // While that dialog is open the list also holds its current value, if it is not one of the regular ones (extra = null removes it again).
+        function d7FrameRateOptions(extra) {
+            var sel = Q('d7framelimiter'), i;
+            for (i = sel.options.length - 1; i >= 0; i--) { if (sel.options[i].getAttribute('data-extra') != null) { sel.remove(i); } }
+            extra = parseInt(extra);
+            if (isNaN(extra) || (extra <= 0)) return;
+            for (i = 0; i < sel.options.length; i++) { if (sel.options[i].value == extra) return; }
+            var o = document.createElement('option');
+            o.value = extra; o.setAttribute('data-extra', '1'); o.text = format('{0} ms', extra);
+            sel.add(o);
+        }
+
         function applyDesktopSettings() {
             var r = '', ops = (features & 512)?[100,90,80,70,60,50,40,30,20,10,5,1]:[60,50,40,30,20,10,5,1];
             for (var i in ops) { r += '<option value=' + ops[i] + '>' + ops[i] + '%</option>'; }
@@ -10351,11 +10410,20 @@
             d7desktopmode.value = desktopsettings.encoding;
             d7showfocus.checked = desktopsettings.showfocus;
             d7showcursor.checked = desktopsettings.showmouse;
-            if (desktopsettings.agentencoding) { d7encoding.value = desktopsettings.agentencoding; } else { desktopsettings.agentencoding = 4; }
+            // Only JPEG (1) and PNG (2) are offered: a saved TIFF (3), WebP (4) or anything else becomes JPEG
+            if ([1, 2].indexOf(parseInt(desktopsettings.agentencoding)) < 0) { desktopsettings.agentencoding = 1; }
+            d7encoding.value = desktopsettings.agentencoding;
             d7bitmapquality.value = 40; // Default value
             if (ops.indexOf(parseInt(desktopsettings.quality)) >= 0) { d7bitmapquality.value = desktopsettings.quality; }
             d7bitmapscaling.value = desktopsettings.scaling;
-            if (desktopsettings.framerate) { d7framelimiter.value = desktopsettings.framerate; } else { d7framelimiter.value = 100; }
+            // The slow frame rates (400, 1000) were removed from the list: a saved one becomes Medium, so that the list is never left without a selection.
+            d7FrameRateOptions(null);
+            if ([16, 20, 50, 100].indexOf(parseInt(desktopsettings.framerate)) < 0) { desktopsettings.framerate = 100; }
+            d7framelimiter.value = desktopsettings.framerate;
+            // Bandwidth limit (units of 100 kbit/s): anything that is not in the list means no limit
+            if ([0, 200, 100, 60, 40, 20, 10].indexOf(parseInt(desktopsettings.budget)) < 0) { desktopsettings.budget = 0; }
+            d7budget.value = desktopsettings.budget;
+            QV('d7budgetRow', true);
             if (desktopsettings.swapmouse != null) { d7deskSwapMouse.checked = desktopsettings.swapmouse; }
             if (desktopsettings.rmw != null) { d7deskrmw.checked = desktopsettings.rmw; }
             if (desktopsettings.remotekeymap != null) { d7deskRemoteKeyMap.checked = desktopsettings.remotekeymap; }

@@ -1291,11 +1291,26 @@
                             </td>
                             <td style="width:100px">
                                 <select id="d7framelimiter" style="float:right;width:200px" dir="rtl">
-                                    <option value=20>Very fast</option>
-                                    <option selected=selected value=50>Fast</option>
-                                    <option value=100>Medium</option>
-                                    <option value=400>Slow</option>
-                                    <option value=1000>Very slow</option>
+                                    <option value=16>Very fast</option>
+                                    <option value=20>Fast</option>
+                                    <option selected=selected value=50>Medium</option>
+                                    <option value=100>Slow</option>
+                                </select>
+                            </td>
+                        </tr>
+                        <tr>
+                            <td title="Limit for the picture data the agent sends. Needs a Windows agent that supports the limit; other agents ignore it.">
+                                Bandwidth limit
+                            </td>
+                            <td style="width:100px">
+                                <select id="d7budget" style="float:right;width:200px" dir="rtl" title="Limit for the picture data the agent sends. Needs a Windows agent that supports the limit; other agents ignore it.">
+                                    <option selected=selected value=0>No limit</option>
+                                    <option value=200>&#x2066;20 Mbit/s&#x2069;</option>
+                                    <option value=100>&#x2066;10 Mbit/s&#x2069;</option>
+                                    <option value=60>&#x2066;6 Mbit/s&#x2069;</option>
+                                    <option value=40>&#x2066;4 Mbit/s&#x2069;</option>
+                                    <option value=20>&#x2066;2 Mbit/s&#x2069;</option>
+                                    <option value=10>&#x2066;1 Mbit/s&#x2069;</option>
                                 </select>
                             </td>
                         </tr>
@@ -1305,10 +1320,8 @@
                             </td>
                             <td style="width:100px">
                                 <select id="d7encoding" style="float:right;width:200px" dir="rtl">
-                                    <option value=1>JPEG</option>
-                                    <option value=2>PNG</option>
-                                    <option value=3>TIFF</option>
-                                    <option selected=selected value=4>WEBP</option>
+                                    <option selected=selected value=1>JPEG</option>
+                                    <option value=2 title="Lossless picture. The bandwidth limit does not apply to PNG.">&#x2066;PNG (lossless)&#x2069;</option>
                                 </select>
                             </td>
                         </tr>
@@ -1436,15 +1449,9 @@
         var p13FilesConsoleMsgTimer = null;
         var p18ConsoleMsgTimer = null;
 
-        // Check if WebP is supported
+        // Check if WebP is supported (the encoding list has JPEG and PNG only: the agents do not have a WebP encoder)
         var webpSupport = false;
-        check_webp_feature('lossy', function (f, x) {
-            webpSupport = x;
-            if (!x) {
-                d7encoding.options[1].disabled = true;
-                d7encoding.value = 1;
-            }
-        });
+        check_webp_feature('lossy', function (f, x) { webpSupport = x; });
 
         function startup() {
             if ((features & 32) == 0) {
@@ -4713,7 +4720,7 @@
 
         var desktop;
         var desktopNode;
-        var desktopsettings = { encoding: 2, showfocus: false, showmouse: true, showcad: true, quality: 40, scaling: 1024, framerate: 50, autolock: false, agentencoding: 4 };
+        var desktopsettings = { encoding: 2, showfocus: false, showmouse: true, showcad: true, quality: 40, scaling: 1024, framerate: 50, budget: 0, autolock: false, agentencoding: 1 };
         function setupDesktop() {
             // Setup the remote desktop
             if ((desktopNode != currentNode) && (desktop != null)) { desktop.Stop(); desktopNode = null; desktop = null; }
@@ -4839,10 +4846,11 @@
                             p11clearConsoleMsg();
                         }
                     }
-                    desktop.m.ImageType = desktopsettings.agentencoding; // Send 4 if WebP is supported, otherwise send 1 for JPEG.
+                    desktop.m.ImageType = desktopsettings.agentencoding; // JPEG (1) or PNG (2)
                     desktop.m.CompressionLevel = desktopsettings.quality; // Number from 1 to 100. 50 or less is best.
                     desktop.m.ScalingLevel = desktopsettings.scaling;
                     desktop.m.FrameRateTimer = desktopsettings.framerate;
+                    desktop.m.BandwidthBudget = parseInt(desktopsettings.budget) || 0; // sent with the first compression command of the session
                     desktop.m.onDisplayinfo = deskDisplayInfo;
                     desktop.m.onScreenSizeChange = function (o, x, y) { if (fullscreen) { QS('deskarea3').width = (x * fullscreenzoom) + 'px'; QS('deskarea3').height = (y * fullscreenzoom) + 'px'; } deskAdjust(); }
                     desktop.Start(desktopNode._id);
@@ -4934,13 +4942,14 @@
             desktopsettings.quality = d7bitmapquality.value;
             desktopsettings.scaling = d7bitmapscaling.value;
             desktopsettings.framerate = d7framelimiter.value;
+            desktopsettings.budget = parseInt(d7budget.value) || 0;
             desktopsettings.autolock = d7deskAutoLock.checked;
             desktopsettings.agentencoding = d7encoding.value;
             localStorage.setItem('desktopsettings', JSON.stringify(desktopsettings));
             applyDesktopSettings();
             if (desktop) {
                 if (desktop.contype == 1) {
-                    if (desktop.State != 0) { desktop.m.SendCompressionLevel(desktopsettings.agentencoding, desktopsettings.quality, desktopsettings.scaling, desktopsettings.framerate); }
+                    if (desktop.State != 0) { desktop.m.SendCompressionLevel(desktopsettings.agentencoding, desktopsettings.quality, desktopsettings.scaling, desktopsettings.framerate, desktopsettings.budget || 0); }
                     desktop.sendCtrlMsg('{"ctrlChannel":"102938","type":"autolock","value":' + desktopsettings.autolock + '}');
                     desktop.m.SendRefresh();
                 }
@@ -4956,10 +4965,17 @@
             QH('d7bitmapquality', r);
             d7desktopmode.value = desktopsettings.encoding;
             d7bitmapquality.value = 40; // Default value
-            if (desktopsettings.agentencoding) { d7encoding.value = desktopsettings.agentencoding; } else { desktopsettings.agentencoding = 4; }
+            // Only JPEG (1) and PNG (2) are offered: a saved TIFF (3), WebP (4) or anything else becomes JPEG
+            if ([1, 2].indexOf(parseInt(desktopsettings.agentencoding)) < 0) { desktopsettings.agentencoding = 1; }
+            d7encoding.value = desktopsettings.agentencoding;
             if (ops.indexOf(parseInt(desktopsettings.quality)) >= 0) { d7bitmapquality.value = desktopsettings.quality; }
             d7bitmapscaling.value = desktopsettings.scaling;
-            if (desktopsettings.framerate) { d7framelimiter.value = desktopsettings.framerate; }
+            // The slow frame rates (400, 1000) were removed from the list: a saved one becomes Slow (100), as in the other interfaces
+            if ([16, 20, 50, 100].indexOf(parseInt(desktopsettings.framerate)) < 0) { desktopsettings.framerate = 100; }
+            d7framelimiter.value = desktopsettings.framerate;
+            // Bandwidth limit (units of 100 kbit/s): anything that is not in the list means no limit
+            if ([0, 200, 100, 60, 40, 20, 10].indexOf(parseInt(desktopsettings.budget)) < 0) { desktopsettings.budget = 0; }
+            d7budget.value = desktopsettings.budget;
             if (desktopsettings.autolock != null) { d7deskAutoLock.checked = desktopsettings.autolock; }
         }
 

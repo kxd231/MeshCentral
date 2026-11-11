@@ -10290,11 +10290,11 @@ module.exports.CreateWebServer = function (parent, db, args, certificates, doneF
     }
 
     // Filter the user web site and only output state that we need to keep
-    const acceptableUserWebStateStrings = ['webPageStackMenu', 'notifications', 'deviceView', 'nightMode', 'webPageFullScreen', 'search', 'showRealNames', 'sort', 'deskAspectRatio', 'viewsize', 'DeskControl', 'uiMode', 'footerBar','loctag','theme','lastThemes','uiViewMode'];
+    const acceptableUserWebStateStrings = ['webPageStackMenu', 'notifications', 'deviceView', 'nightMode', 'webPageFullScreen', 'search', 'showRealNames', 'sort', 'deskAspectRatio', 'viewsize', 'DeskControl', 'deskStats', 'uiMode', 'footerBar','loctag','theme','lastThemes','uiViewMode'];
     const acceptableUserWebStateDesktopStrings = [
         'encoding', 'showfocus', 'showmouse', 'quality', 'scaling', 'framerate', 'agentencoding', 'swapmouse',
         'rmw', 'remotekeymap', 'autoclipboard', 'autolock', 'localkeymap', 'kvmrmw', 'rdpsize', 'rdpsmb',
-        'rdprmw', 'rdpautoclipboard', 'rdpflags'
+        'rdprmw', 'rdpautoclipboard', 'rdpflags', 'budget'
     ];
     obj.filterUserWebState = function (state) {
         if (typeof state == 'string') { try { state = JSON.parse(state); } catch (ex) { return null; } }
