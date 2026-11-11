@@ -1,0 +1,11 @@
+{
+  "name": "meshcentral-release-translate-tools",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Pinned tools for translate/translate.js (minifyall, translateall), used by tools/release/build-server-tgz.sh. The versions match docker/Dockerfile.",
+  "dependencies": {
+    "esprima": "4.0.1",
+    "html-minifier-terser": "7.2.0",
+    "jsdom": "26.0.0"
+  }
+}

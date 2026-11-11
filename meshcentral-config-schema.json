@@ -732,7 +732,22 @@
         "npmProxy": {
           "type": "string",
           "format": "uri",
-          "description": "HTTP proxy to use when downloading npm packages and the default agent files."
+          "description": "HTTP proxy to use when downloading npm packages, the default agent files and server updates from GitHub."
+        },
+        "serverUpdateSource": {
+          "type": "string",
+          "enum": [
+            "github",
+            "npm"
+          ],
+          "default": "github",
+          "description": "Where the server looks for new versions and installs them from (the Update button, the version check and selfUpdate). \"github\" uses the releases of serverUpdateRepository: a release is usable when it has an asset named meshcentral-<version>.tgz, the asset is verified against the sha256 digest published by GitHub before npm installs it. \"npm\" is the previous behavior and uses the meshcentral package of the npm registry. The value is not case sensitive. Any other value is logged and disables all server updates (checks, selfUpdate and the Update button); it never falls back to npm. A failed automatic update to a version is not retried for 24 hours."
+        },
+        "serverUpdateRepository": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9-]{0,38}/[A-Za-z0-9._-]{1,100}$",
+          "default": "kxd231/MeshCentral",
+          "description": "GitHub repository (owner/repo) whose releases are used when serverUpdateSource is \"github\". The repository must be public. An invalid value is logged and disables the GitHub update checks. npmProxy, when set, is also used for the GitHub requests."
         },
         "allowHighQualityDesktop": {
           "type": "boolean",

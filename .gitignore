@@ -39,6 +39,7 @@ venv
 [Dd]ebug/
 [Dd]ebugPublic/
 [Rr]elease/
+!/tools/release/
 [Rr]eleases/
 x64/
 x86/
@@ -314,3 +315,4 @@ __pycache__/
 docs/__pycache__/
 docs/env/
 docker-compose.yaml
+/release-out/

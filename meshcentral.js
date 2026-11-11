@@ -626,21 +626,19 @@ function CreateMeshCentralServer(config, args) {
             } else if (childProcess.xrestart == 3) {
                 // Server self-update exit
                 var version = '';
-                if (typeof obj.args.selfupdate == 'string') { version = '@' + obj.args.selfupdate; }
+                const serverUpdates = require('./serverupdates.js');
+                const updateSource = obj.getServerUpdater().settings.source;
+                // A selfUpdate value that is not an exact version is ignored for the GitHub source (it would only be "latest" in disguise)
+                const configVersion = ((typeof obj.args.selfupdate == 'string') && serverUpdates.selfUpdateValid(updateSource, obj.args.selfupdate));
+                if (configVersion) { version = '@' + obj.args.selfupdate; }
                 else if (typeof obj.args.specificupdate == 'string') { version = '@' + obj.args.specificupdate; delete obj.args.specificupdate; }
                 const child_process = require('child_process');
                 const npmpath = ((typeof obj.args.npmpath == 'string') ? obj.args.npmpath : 'npm');
-                const npmproxy = ((typeof obj.args.npmproxy == 'string') ? (' --proxy ' + obj.args.npmproxy) : '');
                 const env = Object.assign({}, process.env); // Shallow clone
                 if (typeof obj.args.npmproxy == 'string') { env['HTTP_PROXY'] = env['HTTPS_PROXY'] = env['http_proxy'] = env['https_proxy'] = obj.args.npmproxy; }
-                // always use --save-exact - https://stackoverflow.com/a/64507176/1210734
-                const xxprocess = child_process.exec(npmpath + ' install --save-exact --no-audit meshcentral' + version + npmproxy, { maxBuffer: Infinity, cwd: obj.parentpath, env: env }, function (error, stdout, stderr) {
-                    if ((error != null) && (error != '')) { console.log('Update failed: ' + error); }
-                });
-                xxprocess.data = '';
-                xxprocess.stdout.on('data', function (data) { xxprocess.data += data; });
-                xxprocess.stderr.on('data', function (data) { xxprocess.data += data; });
-                xxprocess.on('close', function (code) {
+
+                // Runs after npm finished, or after the update was given up. Restarts the server in all cases.
+                function finishUpdate(code) {
                     if (code == 0) { console.log('Update completed...'); }
 
                     // Run the server updated script if present
@@ -660,7 +658,51 @@ function CreateMeshCentralServer(config, args) {
                         // Run the updated server
                         setTimeout(function () { obj.launchChildServer(startArgs); }, 1000);
                     }
-                });
+                }
+
+                if (obj.getServerUpdater().settings.source === 'npm') {
+                    // always use --save-exact - https://stackoverflow.com/a/64507176/1210734
+                    const xxprocess = child_process.exec(serverUpdates.npmCommandLine(npmpath, obj.args.npmproxy, 'install', version), { maxBuffer: Infinity, cwd: obj.parentpath, env: env }, function (error, stdout, stderr) {
+                        if ((error != null) && (error != '')) { console.log('Update failed: ' + error); }
+                    });
+                    xxprocess.data = '';
+                    xxprocess.stdout.on('data', function (data) { xxprocess.data += data; });
+                    xxprocess.stderr.on('data', function (data) { xxprocess.data += data; });
+                    xxprocess.on('close', function (code) { finishUpdate(code); });
+                } else {
+                    // GitHub release of the fork: download and verify meshcentral-<version>.tgz, then install that file with npm.
+                    // The server stays on the current version when anything fails, and the failure is remembered so that the
+                    // automatic update does not retry the same version in a loop.
+                    const updater = obj.getServerUpdater();
+                    const target = version.substring(1) || null; // The exact version the server decided on, or null for "newest release"
+                    const pinned = configVersion; // Version named in the configuration: that exact version is wanted, also if older
+                    const restart = function () { setTimeout(function () { obj.launchChildServer(startArgs); }, 5000); };
+                    const giveUp = function (v, message) { console.log('Update failed, nothing was installed: ' + message); if (v != null) { updater.recordFailure(v, message); } restart(); };
+                    var fileName = null;
+                    updater.prepare(target, { current: getCurrentVersion(), allowDowngrade: pinned, signal: AbortSignal.timeout(15 * 60 * 1000) }).then(function (pkg) {
+                        fileName = pkg.assetName;
+                        console.log('Installing MeshCentral ' + pkg.version + ' from ' + updater.settings.repository + ' (sha256 ' + pkg.sha256 + ')...');
+                        var finished = false;
+                        const finish = function (code) {
+                            if (finished) return; finished = true;
+                            if (code != 0) { updater.recordFailure(pkg.version, 'npm install exited with code ' + code + '.'); return finishUpdate(code); }
+                            // The installed package must be the version that was announced, or the next check would install it again
+                            var installed = null;
+                            try { installed = JSON.parse(obj.fs.readFileSync(obj.path.join(obj.parentpath, 'node_modules', 'meshcentral', 'package.json'), 'utf8')).version; } catch (ex) { }
+                            if (serverUpdates.compareVersions(installed, pkg.version) !== 0) {
+                                console.log('ERROR: The installed MeshCentral version is ' + installed + ', not ' + pkg.version + ' as announced by the release.');
+                                updater.recordFailure(pkg.version, 'The installed version is ' + installed + ' instead of ' + pkg.version + '.');
+                            } else { updater.clearFailure(); updater.cleanup(fileName).catch(function () { }); }
+                            finishUpdate(code);
+                        };
+                        const done = function (error, stdout, stderr) { if ((error != null) && (error != '')) { console.log('Update failed: ' + error); } };
+                        var command;
+                        try { command = serverUpdates.buildLocalInstall(npmpath, obj.args.npmproxy, pkg.path, obj.platform); } catch (ex) { return giveUp(pkg.version, ex.message); }
+                        const xxprocess = child_process.exec(command, { maxBuffer: Infinity, cwd: obj.parentpath, env: env }, done);
+                        xxprocess.on('error', function (err) { console.log('Update failed: ' + err.message); finish(1); });
+                        xxprocess.on('close', finish);
+                    }).catch(function (err) { giveUp(target, (err && err.message) ? err.message : String(err)); });
+                }
             } else {
                 if (error != null) {
                     // This is an un-expected restart
@@ -694,7 +736,7 @@ function CreateMeshCentralServer(config, args) {
                         if (currentVersion) {
                             var sVer = specificupdate.split('-')[0].split('.');
                             var cVer = currentVersion.split('-')[0].split('.');
-                            for (var i = 0; i <= 2; i++) {
+                            for (var i = 0; i <= 3; i++) { // Up to 4 parts, the fork has versions like 1.3.1.1
                                 var sVal = parseInt(sVer[i] || 0);
                                 var cVal = parseInt(cVer[i] || 0);
                                 if (sVal > cVal) { isUpgrade = true; break; }
@@ -734,17 +776,43 @@ function CreateMeshCentralServer(config, args) {
         } catch (ex) { console.log('ERROR: Unable to write to mesherrors.txt.'); }
     };
 
-    // Get current and latest MeshCentral server versions using NPM
+    // Server update source: GitHub releases of the fork (default) or npm, see serverupdates.js
+    var serverUpdater = null;
+    obj.getServerUpdater = function () {
+        if (serverUpdater == null) {
+            serverUpdater = require('./serverupdates.js').createServerUpdater({ args: obj.args, folder: obj.path.resolve(obj.datapath, 'serverupdates'), log: function (m) { console.log(m); } });
+        }
+        return serverUpdater;
+    };
+
+    // True when latestVer is a newer version than currentVer that the self-update should install
+    obj.serverUpdateNeeded = function (currentVer, latestVer) {
+        const source = obj.getServerUpdater().settings.source; // 'npm', 'github' or null when the settings are invalid (updates disabled)
+        return require('./serverupdates.js').updateNeeded(source, currentVer, latestVer) && !obj.serverUpdateBlocked(latestVer);
+    };
+
+    // True when an automatic update to this version failed recently, so it is not tried again until the retry time has passed
+    // or an administrator starts the update by hand. The server keeps running on the current version meanwhile.
+    var serverUpdateBlockedLogged = null;
+    obj.serverUpdateBlocked = function (version) {
+        if (obj.getServerUpdater().settings.source !== 'github') { return false; }
+        const marker = obj.getServerUpdater().failureBlocks(version);
+        if (marker == null) { return false; }
+        if (serverUpdateBlockedLogged !== version) { serverUpdateBlockedLogged = version; console.log('Automatic update to ' + version + ' skipped, it failed at ' + new Date(marker.time).toISOString() + ': ' + marker.reason + ' It is retried after ' + new Date(marker.time + require('./serverupdates.js').FAILURE_RETRY_MS).toISOString() + ' or when started by an administrator.'); }
+        return true;
+    };
+
+    // Get current and latest MeshCentral server versions using NPM or GitHub releases
     obj.getLatestServerVersion = function (callback) {
         if (callback == null) return;
         try {
             if (typeof obj.args.selfupdate == 'string') { callback(getCurrentVersion(), obj.args.selfupdate); return; } // If we are targetting a specific version, return that one as current.
+            if (obj.getServerUpdater().settings.source !== 'npm') { obj.getServerUpdater().getLatest(getCurrentVersion(), callback); return; }
             const child_process = require('child_process');
             const npmpath = ((typeof obj.args.npmpath == 'string') ? obj.args.npmpath : 'npm');
-            const npmproxy = ((typeof obj.args.npmproxy == 'string') ? (' --proxy ' + obj.args.npmproxy) : '');
             const env = Object.assign({}, process.env); // Shallow clone
             if (typeof obj.args.npmproxy == 'string') { env['HTTP_PROXY'] = env['HTTPS_PROXY'] = env['http_proxy'] = env['https_proxy'] = obj.args.npmproxy; }
-            const xxprocess = child_process.exec(npmpath + npmproxy + ' view meshcentral dist-tags.latest', { maxBuffer: 512000, cwd: obj.parentpath, env: env }, function (error, stdout, stderr) { });
+            const xxprocess = child_process.exec(require('./serverupdates.js').npmCommandLine(npmpath, obj.args.npmproxy, 'latest'), { maxBuffer: 512000, cwd: obj.parentpath, env: env }, function (error, stdout, stderr) { });
             xxprocess.data = '';
             xxprocess.stdout.on('data', function (data) { xxprocess.data += data; });
             xxprocess.stderr.on('data', function (data) { });
@@ -756,17 +824,17 @@ function CreateMeshCentralServer(config, args) {
         } catch (ex) { callback(getCurrentVersion(), null, ex); } // If the system is running out of memory, an exception here can easily happen.
     };
 
-    // Get current version and all MeshCentral server tags using NPM
+    // Get current version and all MeshCentral server tags using NPM or GitHub releases
     obj.getServerTags = function (callback) {
         if (callback == null) return;
         try {
             if (typeof obj.args.selfupdate == 'string') { callback({ current: getCurrentVersion(), latest: obj.args.selfupdate }); return; } // If we are targetting a specific version, return that one as current.
+            if (obj.getServerUpdater().settings.source !== 'npm') { obj.getServerUpdater().getTags(getCurrentVersion(), callback); return; }
             const child_process = require('child_process');
             const npmpath = ((typeof obj.args.npmpath == 'string') ? obj.args.npmpath : 'npm');
-            const npmproxy = ((typeof obj.args.npmproxy == 'string') ? (' --proxy ' + obj.args.npmproxy) : '');
             const env = Object.assign({}, process.env); // Shallow clone
             if (typeof obj.args.npmproxy == 'string') { env['HTTP_PROXY'] = env['HTTPS_PROXY'] = env['http_proxy'] = env['https_proxy'] = obj.args.npmproxy; }
-            const xxprocess = child_process.exec(npmpath + npmproxy + ' dist-tag ls meshcentral', { maxBuffer: 512000, cwd: obj.parentpath, env: env }, function (error, stdout, stderr) { });
+            const xxprocess = child_process.exec(require('./serverupdates.js').npmCommandLine(npmpath, obj.args.npmproxy, 'tags'), { maxBuffer: 512000, cwd: obj.parentpath, env: env }, function (error, stdout, stderr) { });
             xxprocess.data = '';
             xxprocess.stdout.on('data', function (data) { xxprocess.data += data; });
             xxprocess.stderr.on('data', function (data) { });
@@ -783,15 +851,15 @@ function CreateMeshCentralServer(config, args) {
         } catch (ex) { callback({ current: getCurrentVersion() }, ex); } // If the system is running out of memory, an exception here can easily happen.
     };
 
-    // Use NPM to get list of versions
+    // Use NPM or GitHub releases to get the list of versions
     obj.getServerVersions = function (callback) {
         try {
+            if (obj.getServerUpdater().settings.source !== 'npm') { obj.getServerUpdater().getVersions(callback); return; }
             const child_process = require('child_process');
             const npmpath = ((typeof obj.args.npmpath == 'string') ? obj.args.npmpath : 'npm');
-            const npmproxy = ((typeof obj.args.npmproxy == 'string') ? (' --proxy ' + obj.args.npmproxy) : '');
             const env = Object.assign({}, process.env); // Shallow clone
             if (typeof obj.args.npmproxy == 'string') { env['HTTP_PROXY'] = env['HTTPS_PROXY'] = env['http_proxy'] = env['https_proxy'] = obj.args.npmproxy; }
-            const xxprocess = child_process.exec(npmpath + npmproxy + ' view meshcentral versions --json', { maxBuffer: 512000, cwd: obj.parentpath, env: env }, function (error, stdout, stderr) { });
+            const xxprocess = child_process.exec(require('./serverupdates.js').npmCommandLine(npmpath, obj.args.npmproxy, 'versions'), { maxBuffer: 512000, cwd: obj.parentpath, env: env }, function (error, stdout, stderr) { });
             xxprocess.data = '';
             xxprocess.stdout.on('data', function (data) { xxprocess.data += data; });
             xxprocess.stderr.on('data', function (data) { });
@@ -804,6 +872,7 @@ function CreateMeshCentralServer(config, args) {
     // Initiate server self-update
     obj.performServerUpdate = function (version) {
         if (obj.serverSelfWriteAllowed != true) return false;
+        if (obj.getServerUpdater().settings.source === null) { console.log('Server update is disabled: ' + obj.getServerUpdater().settings.error); return false; } // Invalid serverUpdateSource or serverUpdateRepository
         if ((version == null) || (version == '') || (typeof version != 'string')) { console.log('Starting self upgrade...'); } else { console.log('Starting self upgrade to: ' + version); }
         process.exit(200);
         return true;
@@ -1498,7 +1567,14 @@ function CreateMeshCentralServer(config, args) {
         // If we are targetting a specific version, update now.
         if ((obj.serverSelfWriteAllowed == true) && (typeof obj.args.selfupdate == 'string')) {
             obj.args.selfupdate = obj.args.selfupdate.toLowerCase();
-            if (getCurrentVersion() !== obj.args.selfupdate) { obj.performServerUpdate(); return; } // We are targetting a specific version, run self update now.
+            const updateSource = obj.getServerUpdater().settings.source;
+            if (!require('./serverupdates.js').selfUpdateValid(updateSource, obj.args.selfupdate)) {
+                console.log('ERROR: selfUpdate must be true or an exact version such as "1.3.2", not "' + obj.args.selfupdate.substring(0, 40) + '". Self-update is off.');
+                obj.args.selfupdate = false;
+            } else if (!require('./serverupdates.js').selfUpdateIsCurrent(updateSource, getCurrentVersion(), obj.args.selfupdate)) { // We are targetting a specific version, run self update now.
+                if (!obj.serverUpdateBlocked(obj.args.selfupdate) && (obj.performServerUpdate() !== false)) { return; }
+                obj.args.selfupdate = false; // Update disabled or failed recently: start the server on the current version
+            }
         }
 
         // Write the server state
@@ -2383,7 +2459,7 @@ function CreateMeshCentralServer(config, args) {
         });
 
         // Check for self-update that targets a specific version
-        if ((typeof obj.args.selfupdate == 'string') && (getCurrentVersion() === obj.args.selfupdate)) { obj.args.selfupdate = false; }
+        if ((typeof obj.args.selfupdate == 'string') && require('./serverupdates.js').selfUpdateIsCurrent(obj.getServerUpdater().settings.source, getCurrentVersion(), obj.args.selfupdate)) { obj.args.selfupdate = false; }
 
         // Check if we need to perform server self-update
         if ((obj.args.selfupdate) && (obj.serverSelfWriteAllowed == true)) {
@@ -2391,7 +2467,11 @@ function CreateMeshCentralServer(config, args) {
                 if (performSelfUpdate.value > 0) {
                     performSelfUpdate.value--;
                     obj.db.Set(performSelfUpdate);
-                    obj.getLatestServerVersion(function (currentVer, latestVer) { if (currentVer != latestVer) { obj.performServerUpdate(); return; } });
+                    obj.getLatestServerVersion(function (currentVer, latestVer) {
+                        // GitHub source: hand the exact version we decided on to the parent process, it installs that version and nothing else.
+                        if (obj.serverUpdateNeeded(currentVer, latestVer)) { if (obj.performServerUpdate((obj.getServerUpdater().settings.source === 'github') ? latestVer : undefined) !== false) { return; } }
+                        checkAutobackup();
+                    });
                 } else {
                     checkAutobackup();
                 }
