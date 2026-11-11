@@ -6,6 +6,10 @@ on:
   schedule:
     - cron: '0 20 * * 4'
 
+permissions:
+  contents: read
+  security-events: write # upload the results to code scanning
+
 jobs:
   CodeQL-Build:
 
@@ -26,10 +30,11 @@ jobs:
       
     # Initializes the CodeQL tools for scanning.
     - name: Initialize CodeQL
-      uses: github/codeql-action/init@v2
-      # Override language selection by uncommenting this and choosing your languages
-      # with:
-      #   languages: go, javascript, csharp, python, cpp, java
+      uses: github/codeql-action/init@v3
+      # JavaScript only: the one C file (tools/avc444-simd, built in containers into an embedded WebAssembly module)
+      # has no build here, and automatic detection of C/C++ without a build makes the analysis fail
+      with:
+        languages: javascript-typescript
 
     # Autobuild attempts to build any compiled languages  (C/C++, C#, or Java).
     # If this step fails, then you should remove it and run the build manually (see below)
@@ -48,4 +53,4 @@ jobs:
     #   make release
 
     - name: Perform CodeQL Analysis
-      uses: github/codeql-action/analyze@v2
+      uses: github/codeql-action/analyze@v3
