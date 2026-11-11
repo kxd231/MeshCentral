@@ -1,0 +1,49 @@
+name: Server release package
+
+# Builds meshcentral-<version>.tgz (translated and minified pages, npm pack) from the release tag with
+# tools/release/build-server-tgz.sh and attaches it to the release. Servers of this fork install only releases
+# that carry this file (see docs/fork-updates.md). Runs when a release is published, or by hand for an existing tag.
+on:
+  release:
+    types: [ published ]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing release tag, for example 1.3.1-custom.1'
+        required: true
+
+permissions:
+  contents: write # upload the package to the release
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Release tag
+        id: tag
+        env:
+          TAG: ${{ github.event_name == 'release' && github.event.release.tag_name || inputs.tag }}
+        run: |
+          case "$TAG" in (*[!0-9A-Za-z.-]*|'') echo "Invalid tag: $TAG" >&2; exit 1 ;; esac
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: refs/tags/${{ steps.tag.outputs.tag }}
+          fetch-depth: 0
+
+      - name: Build the package
+        run: tools/release/build-server-tgz.sh --check-agents "${{ steps.tag.outputs.version }}" "refs/tags/${{ steps.tag.outputs.tag }}" out
+
+      - name: Attach to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FILE: meshcentral-${{ steps.tag.outputs.version }}.tgz
+        run: |
+          gh release upload "${{ steps.tag.outputs.tag }}" "out/$FILE" --clobber -R "$GITHUB_REPOSITORY"
+          echo "## $FILE" >> "$GITHUB_STEP_SUMMARY"
+          echo "- commit: $(git rev-parse HEAD)" >> "$GITHUB_STEP_SUMMARY"
+          echo "- size: $(stat -c %s "out/$FILE")" >> "$GITHUB_STEP_SUMMARY"
+          echo "- sha256: $(sha256sum "out/$FILE" | cut -d' ' -f1)" >> "$GITHUB_STEP_SUMMARY"

@@ -171,6 +171,12 @@ How to bump:
 
 ## Making a release (owner)
 
+Normally the package is built by GitHub Actions: publishing a release (tag = version, on the commit whose
+`package.json` has that version) starts `.github/workflows/server-release.yml`, which runs the release helper
+below on the tag and attaches `meshcentral-<version>.tgz` to the release; the run summary shows the commit, size
+and sha256. Servers see the release once the file is attached. The same workflow can be started by hand for an
+existing tag. Building locally, as below, is the fallback.
+
 The release helper runs everything in Docker (pinned Node image, no Node on the host) from a
 clean `git archive` of a commit or tag. It does not tag, push or publish anything. Like the
 upstream npm package, the tgz carries the generated pages that git does not hold: it runs
