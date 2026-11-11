@@ -41,11 +41,78 @@
     <script type="text/javascript" src="scripts/xterm-addon-fit{{{min}}}.js"></script>
     <script type="text/javascript" src="scripts/xterm-addon-image{{{min}}}.js"></script>
     <script type="text/javascript" src="scripts/flatpickr.js"></script>
-    <script type="text/javascript" src="mstsc/mstsc.js"></script>
-    <script type="text/javascript" src="mstsc/keyboard.js"></script>
-    <script type="text/javascript" src="mstsc/rle.js"></script>
-    <script type="text/javascript" src="mstsc/client.js"></script>
-    <script type="text/javascript" src="mstsc/canvas.js"></script>
+    <script type="text/javascript">
+        var webRdpGfx = '{{{webrdpgfx}}}'; // settings.webRdp.gfx: 'on' (default), 'off' or 'dev'
+        var webRdpH264 = '{{{webrdph264}}}'; // settings.webRdp.h264: 'on' (default) or 'off' (no H.264 / AVC capability sets)
+        var rdpjs = ['shared/limits', 'shared/constants', 'shared/errors', 'keyboard', 'flow', 'messages', 'fallback', 'rdp-client']; for (var rdpi = 0; rdpi < rdpjs.length; rdpi++) { document.write('<scr' + 'ipt type="text/javascript" src="rdp/' + rdpjs[rdpi] + '.js"></scr' + 'ipt>'); }
+        // Web-RDP texts live in the views so translate/translate.js can extract and translate them.
+        var webRdpErrors = {
+            RDP_ERROR_RELAY_FAILED: "The relay to the agent could not be established",
+            RDP_ERROR_CONNECT_FAILED: "The agent could not connect to the RDP server",
+            RDP_ERROR_CONNECTION_LOST: "The connection to the RDP server was lost",
+            RDP_ERROR_TIMEOUT: "The RDP server did not respond in time",
+            RDP_ERROR_STANDARD_SECURITY_UNSUPPORTED: "The RDP server only offers Standard RDP Security (RC4), which is not supported; enable TLS or NLA on the server",
+            RDP_ERROR_SECURITY_NEGOTIATION: "The RDP server rejected the security protocol",
+            RDP_ERROR_TLS_FAILED: "The TLS connection to the RDP server failed",
+            RDP_ERROR_CERT_CHANGED: "The certificate of the RDP server differs from the one trusted for this device, the session was refused before any credential was sent",
+            RDP_ERROR_TRUST_RACE: "Another session pinned a different certificate for this device at the same moment, the session was ended; credentials may already have reached the endpoint of this session, check the device and the network and try again",
+            RDP_ERROR_NLA_DOWNGRADE: "The RDP server no longer offers NLA, which it offered before, the session was refused before any credential was sent",
+            RDP_ERROR_NO_CREDENTIALS: "No credentials were provided",
+            RDP_ERROR_AUTHENTICATION_FAILED: "Authentication failed, check the username and password",
+            RDP_ERROR_PASSWORD_EXPIRED: "The password has expired",
+            RDP_ERROR_PASSWORD_MUST_CHANGE: "The password must be changed before logging on",
+            RDP_ERROR_ACCOUNT_LOCKED: "The account is locked",
+            RDP_ERROR_ACCOUNT_DISABLED: "The account is disabled or has expired",
+            RDP_ERROR_ACCOUNT_RESTRICTION: "Account restrictions prevent this logon (logon hours, workstation, ...)",
+            RDP_ERROR_LOGON_TYPE_NOT_GRANTED: "The user is not allowed to log on through Remote Desktop",
+            RDP_ERROR_ACCESS_DENIED: "Access denied by the RDP server",
+            RDP_ERROR_LICENSING: "The RDP server could not issue a license",
+            RDP_ERROR_CAPABILITIES_REJECTED: "The RDP server does not support the requested graphics mode, try the GFX mode",
+            RDP_ERROR_H264_REQUIRED: "The RDP server requires H.264, which this browser cannot decode",
+            RDP_ERROR_SERVER_DENIED: "The RDP server denied the connection",
+            RDP_ERROR_SERVER_DISCONNECTED: "The RDP server ended the session",
+            RDP_ERROR_PROTOCOL: "The RDP server sent invalid data",
+            RDP_ERROR_RESOURCE_LIMIT: "A resource limit was exceeded, the session was closed",
+            RDP_ERROR_TOO_MANY_SESSIONS: "Too many Web-RDP sessions are open on this server",
+            RDP_ERROR_CLIENT_STALLED: "The browser stopped processing the session, it was closed",
+            RDP_ERROR_CLIENT_DECODE: "The browser could not decode the image data",
+            RDP_ERROR_CLIENT_PROTOCOL: "The browser sent invalid data, the session was closed",
+            RDP_ERROR_INTERNAL: "Internal error in the Web-RDP engine"
+        };
+        var webRdpHints = {
+            'use-gfx': "Try the GFX graphics mode.",
+            'use-legacy': "Try classic bitmaps.",
+            'enable-tls': "Enable TLS or Network Level Authentication on the RDP server.",
+            'enable-h264': "The server needs H.264, which this browser cannot decode.",
+            'check-credentials': "Check the username, password and domain."
+        };
+        function webRdpErrorText(info) {
+            var text = info.message || info.text || '';
+            var base = RdpShared.errors.descriptions[info.code];
+            if (base && webRdpErrors[info.code] && text.indexOf(base) === 0) {
+                text = webRdpErrors[info.code] + text.substring(base.length);
+            }
+            var hints = {
+                'use-gfx': 'Try the GFX graphics mode.',
+                'use-legacy': 'Try the legacy graphics mode.',
+                'enable-tls': 'Enable TLS or Network Level Authentication on the RDP server.',
+                'enable-h264': 'The server needs H.264, which this browser cannot decode.',
+                'check-credentials': 'Check the username, password and domain.'
+            };
+            // The standalone wrapper retains text but does not retain the hint id.
+            for (var hint in hints) { text = text.replace(hints[hint], webRdpHints[hint]); }
+            var suffixes = [
+                ['If the remote desktop did not open, check the username, password, domain and Remote Desktop logon permissions for the account on the remote computer.', "If the remote desktop did not open, check the username, password, domain and Remote Desktop logon permissions for the account on the remote computer."],
+                ['Pinned certificate SHA-256: none.', "Pinned certificate SHA-256: none."],
+                ['Pinned certificate SHA-256: ', "Pinned certificate SHA-256: "],
+                ['Certificate presented now: ', "Certificate presented now: "],
+                ['Ask an administrator of the device to accept the new certificate.', "Ask an administrator of the device to accept the new certificate."]
+            ];
+            for (var i = 0; i < suffixes.length; i++) { text = text.replace(suffixes[i][0], suffixes[i][1]); }
+            return text;
+        }
+
+    </script>
     <script type="text/javascript" src="scripts/jquery{{{min}}}.js"></script>
     <script type="text/javascript" src="scripts/bootstrap{{{min}}}.js"></script>
     <script type="text/javascript" src="scripts/fontawesome/all{{{min}}}.js"></script>
@@ -2246,6 +2313,14 @@
                                     </select>
                                     <label for="d7rdpsize">Display Size</label>
                                 </div>
+                                <div id="d7rdpgfxrow" class="form-floating mb-2" style="display:none">
+                                    <select id="d7rdpgfx" class="form-select">
+                                        <option notransval=1 value="auto">Auto</option>
+                                        <option notransval=1 value="lossless">Lossless</option>
+                                        <option notransval=1 value="legacy">Classic bitmaps</option>
+                                    </select>
+                                    <label for="d7rdpgfx">Graphics</label>
+                                </div>
                                 <fieldset>
                                     <legend>Options</legend>
                                     <div id="d7rdpflags" class="p-2">
@@ -2438,6 +2513,7 @@
 
         // Console Message Display Timers
         var p11DeskConsoleMsgTimer = null;
+        var p11DeskConsoleAction = null, rdpLegacyOnce = false; // Web-RDP: one-time legacy reconnect after a GFX failure (see connectDesktop)
         var p12TermConsoleMsgTimer = null;
         var p13FilesConsoleMsgTimer = null;
         var p9ConsoleMsgTimer = null;
@@ -3479,6 +3555,7 @@
                     displayServerTrace();
                     break;
                 }
+                case 'webrdptrust': { webRdpTrustMessage(message); break; }
                 case 'intersession': {
                     if (message.subaction == 'removeNotify') { notificationDelete(message.id); }
                     break;
@@ -8914,6 +8991,7 @@
             var meshrights = GetNodeRights(node);
             var deviceSwitch = ((currentNode == null) || (currentNode._id != nodeid));
             if (!currentNode || currentNode._id != node._id || refresh == true) {
+                if ((webRdpTrustPending != null) && (webRdpTrustPending.nodeid != node._id)) { webRdpTrustClear(); } // the credentials kept for Accept belong to the device that was refused
                 currentNode = node;
 
                 // Pre defined scripts
@@ -8999,6 +9077,12 @@
                     x += addDeviceAttribute("Description", '<span onclick=showEditNodeValueDialog(2) style=cursor:pointer>' + description + ' <i class="fa-solid fa-pencil fa-xs" role="button"></i></span>');
                 } else {
                     x += addDeviceAttribute("Description", description);
+                }
+
+                // Attribute: Web-RDP trust (pinned server certificate and NLA requirement per target and RDP port)
+                if (((features & 0x40000000) == 0) && ((meshrights & 4) != 0) && (node.mtype != 1) && (node.mtype != 4)) {
+                    x += addDeviceAttribute('<span title="' + "The server certificate pinned on the first Web-RDP connection and whether NLA is required" + '">' + "Web-RDP trust" + '</span>', '<span id=p10webrdptrust><i>...</i></span>');
+                    meshserver.send({ action: 'webrdptrust', op: 'list', nodeid: node._id });
                 }
 
                 // IP-KVM / PDU information
@@ -9429,7 +9513,7 @@
                 // mesh.mtype: 1 = Intel AMT only, 2 = Mesh Agent, 3 = Local Device
                 // node.agent.caps (bitmask): 1 = Desktop, 2 = Terminal, 4 = Files, 8 = Console
                 QV('MainDevDesktop', desktopAccess && ((((node.agent == null) && (node.intelamt != null) && ((typeof node.intelamt.sku !== 'number') || ((node.intelamt.sku & 8) != 0)))
-                    || ((node.agent != null) && ((node.agent.caps == null) || ((node.agent.caps & 1) != 0) || (node.intelamt && (node.intelamt.state == 2)))) || ((node.mtype == 3) && ((node.agent.id == 3) || (node.agent.id == 4))))
+                    || ((node.agent != null) && ((node.agent.caps == null) || ((node.agent.caps & 1) != 0) || (((features & 0x40000000) == 0) && ((meshrights & 8) != 0)) || (node.intelamt && (node.intelamt.state == 2)))) || ((node.mtype == 3) && ((node.agent.id == 3) || (node.agent.id == 4))))
                     && ((meshrights & 8) || (meshrights & 256)))
                 );
                 QV('MainDevTerminal', (((node.agent == null) && (node.intelamt != null)) || ((node.agent) && (node.agent.caps == null)) || ((node.agent) && ((node.agent.caps & 2) != 0)) || (node.intelamt && (node.intelamt.state == 2))) && (meshrights & 8) && terminalAccess);
@@ -10419,6 +10503,57 @@
             return false;
         }
 
+        // Web-RDP trust (rdp/trust.js): the pinned server certificate and NLA requirement per device, target and RDP port
+        var webRdpTrustPending = null; // { nodeid, creds, timer }: the credentials of the connect that was refused, kept for the answer to Accept (30 s at most) and only for that device
+        function webRdpTrustClear() { if (webRdpTrustPending != null) { clearTimeout(webRdpTrustPending.timer); webRdpTrustPending.creds = null; webRdpTrustPending = null; } }
+        function webRdpTrustAcceptDesktop(node, port, fingerprint, creds) {
+            webRdpTrustClear();
+            webRdpTrustPending = { nodeid: node._id, creds: creds, timer: setTimeout(webRdpTrustClear, 30000) };
+            meshserver.send({ action: 'webrdptrust', op: 'accept', nodeid: node._id, key: 'self/' + port, fingerprint256: fingerprint });
+        }
+        function webRdpTrustMessage(message) {
+            if (message.op == 'accept') {
+                var p = webRdpTrustPending;
+                if (p != null && p.nodeid != message.nodeid) { p = null; } // an answer for another device never reconnects this one
+                var creds = (p != null) ? p.creds : null, pnode = (p != null) ? p.nodeid : null;
+                if (p != null) { webRdpTrustClear(); } // wipes the kept reference; creds is the only copy left, used once below
+                if (message.result != 'ok') { messagebox("Web-RDP", EscapeHtml(message.result)); }
+                else if ((creds != null) && (currentNode != null) && (currentNode._id == pnode) && (desktop == null)) { connectDesktop(null, 4, creds); } // only the device that was accepted, only if the user is still on it
+                else if ((currentNode != null) && (currentNode._id == message.nodeid)) { meshserver.send({ action: 'webrdptrust', op: 'list', nodeid: message.nodeid }); }
+            } else if (message.op == 'reset') {
+                if (message.result == 'ok') { meshserver.send({ action: 'webrdptrust', op: 'list', nodeid: message.nodeid }); } else { messagebox("Web-RDP", EscapeHtml(message.result)); }
+            } else if ((message.op == 'list') && (currentNode != null) && (currentNode._id == message.nodeid) && (Q('p10webrdptrust') != null)) {
+                var r = '';
+                if (message.result == 'ok') {
+                    if (message.corrupt) { r += '<div>' + "The stored trust record is damaged, Web-RDP sessions to this device are refused until it is reset." + ' <a href=# onclick="return webRdpTrustReset(null)">' + "Reset" + '</a></div>'; }
+                    var keys = Object.keys(message.entries || {}).sort();
+                    for (var i = 0; i < keys.length; i++) {
+                        var e = message.entries[keys[i]], host = (e.target == 'self') ? '' : e.target.substring(5);
+                        r += '<div>' + (host == '' ? format("Port {0}", e.port) : format("Port {0} of host {1}", e.port, host)) + ': <span style="font-family:monospace;font-size:11px;word-break:break-all">' + EscapeHtml(e.fingerprint256) + '</span> (' + (e.nlaSeen ? "NLA required" : "TLS only") + ') <a href=# data-key="' + EscapeHtml(keys[i]) + '" onclick="return webRdpTrustReset(this.getAttribute(\'data-key\'))">' + "Reset" + '</a>';
+                        if (e.pending) {
+                            var who = (e.pending.by != null) ? e.pending.by.split('/').pop() : '';
+                            r += '<br />' + "A different certificate was refused" + ' (' + EscapeHtml(new Date(e.pending.time).toLocaleString()) + (who != '' ? ', ' + format("session of {0}", who) : '') + '): <span style="font-family:monospace;font-size:11px;word-break:break-all">' + EscapeHtml(e.pending.fingerprint256) + '</span> <a href=# data-key="' + EscapeHtml(keys[i]) + '" data-fp="' + EscapeHtml(e.pending.fingerprint256) + '" onclick="return webRdpTrustAccept(this.getAttribute(\'data-key\'), this.getAttribute(\'data-fp\'))">' + "Accept" + '</a>';
+                        }
+                        r += '</div>';
+                    }
+                } else { r = '<i>' + EscapeHtml(message.result) + '</i>'; }
+                QH('p10webrdptrust', r);
+                Q('p10webrdptrust').parentNode.parentNode.style.display = (r == '') ? 'none' : '';
+            }
+        }
+        // key null: the whole record of the device (a damaged record)
+        function webRdpTrustReset(key) {
+            if (currentNode == null) { return false; }
+            var nodeid = currentNode._id;
+            webRdpTrustConfirm("Web-RDP trust", "Reset removes the pinned certificate and the NLA requirement. The next Web-RDP connection trusts whatever certificate the server presents and pins it.", function () {
+                meshserver.send((key == null) ? { action: 'webrdptrust', op: 'reset', nodeid: nodeid, all: true } : { action: 'webrdptrust', op: 'reset', nodeid: nodeid, key: key });
+            });
+            return false;
+        }
+        function webRdpTrustAccept(key, fp) { if (currentNode != null) { meshserver.send({ action: 'webrdptrust', op: 'accept', nodeid: currentNode._id, key: key, fingerprint256: fp }); } return false; }
+
+        function webRdpTrustConfirm(title, text, func) { setModalContent('xxAddAgent', title, '<div>' + EscapeHtml(text) + '</div>'); showModal('xxAddAgentModal', 'idx_dlgOkButton', func); }
+
         function addDeviceAttribute(name, value, classNames = []) { return `<div class="row mb-1"><div class="${classNames[0] || 'col col-md-2 col-lg-2'}"><b> ${name} </b></div><div class="${classNames[1] || 'col col-md-10 col-lg-10'}"> ${value} </div></div>`; }
 
         function editDeviceAmtSettings(nodeid, func, arg) {
@@ -10911,7 +11046,7 @@
             // Show the right buttons
             QV('disconnectbutton1span', (deskState != 0));
             QV('connectbutton1span', (deskState == 0) && ((rights & 8) || (rights & 256)) && (currentNode.agent != null) && (currentNode.agent.caps & 1));
-            QV('connectbutton1rspan', ((features & 0x40000000) == 0) && (deskState == 0) && (rights & 8) && (currentNode.agent != null) && ((currentNode.agent.id == 3) || (currentNode.agent.id == 4)));
+            QV('connectbutton1rspan', ((features & 0x40000000) == 0) && (deskState == 0) && (rights & 8) && (currentNode.agent != null)); // Any agent: Windows, and Linux with xrdp or GNOME Remote Desktop
             if (mtype == 1) {
                 QV('connectbutton1hspan',
                     (deskState == 0) &&
@@ -10938,7 +11073,7 @@
             // Show the right settings
             QV('td7amtkvm', ((currentNode.intelamt != null) && ((typeof currentNode.intelamt.sku != 'number') || ((currentNode.intelamt.sku & 16) == 0)) && ((currentNode.intelamt.ver != null) || (currentNode.agent == null))) && ((deskState == 0) || (desktop.contype == 2)));
             QV('td7meshkvm', (webRtcDesktop) || ((currentNode.agent != null) && (currentNode.agent.caps & 1) && ((deskState == 0) || (desktop.contype == 1))));
-            QV('td7rdpkvm', ((currentNode.agent != null) && ((currentNode.agent.id == 3) || (currentNode.agent.id == 4)) && ((deskState == 0) || (desktop.contype == 4))));
+            QV('td7rdpkvm', ((currentNode.agent != null) && ((deskState == 0) || (desktop.contype == 4)))); // RDP settings for every agent type, like RDP Connect
 
             // Enable buttons
             var inputAllowed = ((features2 & 0x2000) == 0) && ((currentNode.agent == null) || (currentNode.agent.id != 14)) && ((rights == 0xFFFFFFFF) || (((rights & 8) != 0) && ((rights & 256) == 0) && ((rights & 4096) == 0)));
@@ -11012,11 +11147,14 @@
 
         // Used to translate incoming agent console messages
         var agentConsoleMessages = ['', "Waiting for user to grant access...", "Denied", "Failed to start remote terminal session, {0} ({1})", "Timeout", "Received invalid network data", "Unable to capture display", "Protocol negotiation failed ({0})", "NLA not supported", "SSL required by server", "SSL not allowed by server", "SSL certificate not on server", "Inconsistent flags", "Hybrid required by server", "SSL with user auth required by server"];
+        agentConsoleMessages['legacy-fallback'] = "Simplified graphics (classic bitmaps): {0}";
+        agentConsoleMessages['reconnect-legacy'] = "Reconnect with classic bitmaps";
+        agentConsoleMessages['accept-cert'] = "Accept the new certificate and reconnect";
         function formatAgentConsoleMessage(msg, msgid, msgargs) {
             var r;
             if (msgargs == null) { msgargs = []; }
             while (msgargs.length < 3) { msgargs.push(''); } // We need to call the format function in a way that works with older browsers and minifier, can't use apply() or ...
-            if (msgid && (msgid < agentConsoleMessages.length)) { r = EscapeHtml(format(agentConsoleMessages[msgid], (msgargs[0]), (msgargs[1]), (msgargs[2]))); } else { r = EscapeHtml(msg); }
+            if (msgid && ((msgid < agentConsoleMessages.length) || (msgid == 'legacy-fallback'))) { r = EscapeHtml(format(agentConsoleMessages[msgid], (msgargs[0]), (msgargs[1]), (msgargs[2]))); } else { r = EscapeHtml(msg); }
             return r.split('\n').join('<br />') + '<br /><br />';
         }
 
@@ -11246,11 +11384,26 @@
                     desktop.m.onClipboardChanged = function (text) { if ((text != null) && (desktopsettings.rdpautoclipboard) && (navigator.clipboard != null)) { navigator.clipboard.writeText(text).then(function () { }).catch(function (err) { console.log(err); }) } } // Put remote clipboard data into our clipboard
                     if (desktopsettings.rdpsmb) { desktop.m.SwapMouse = desktopsettings.rdpsmb; }
                     if (desktopsettings.rdprmw) { desktop.m.ReverseMouseWheel = desktopsettings.rdprmw; }
+                    if (desktopsettings.rdpsize == 'browser') { desktop.m.AutoResize = true; } // Only used by the Web-RDP JavaScript client: follow the size of the page area
+                    if ((desktopsettings.rdpgfx == 'legacy') || (rdpLegacyOnce == true)) { desktop.m.Graphics = 'legacy'; } else if (desktopsettings.rdpgfx == 'lossless') { desktop.m.Graphics = 'lossless'; } // Web-RDP JavaScript client: the user's choice, or the one-time "reconnect with classic bitmaps" after a GFX failure
+                    rdpLegacyOnce = false;
                     desktop.Start(desktopNode._id, currentNode.rdpport ? currentNode.rdpport : 3389, tsid);
                     desktop.contype = 4;
                     desktop.onConsoleMessageChange = function () {
-                        if (desktop.consoleMessage) {
+                        if (desktop.consoleMessage || desktop.consoleMessageId) {
+                            if (desktop.consoleMessageId == 'legacy-fallback') { console.info('Web-RDP: GFX failed (' + desktop.consoleMessageArgs[0] + '), using legacy graphics'); }
                             Q('p11DeskConsoleMsg').innerHTML += formatAgentConsoleMessage(desktop.consoleMessage, desktop.consoleMessageId, desktop.consoleMessageArgs);
+                            if (desktop.consoleAction && (desktop.consoleAction.id == 'accept-cert')) { // Web-RDP trust: the pinned certificate changed; only a user who may edit the device can accept the new one
+                                var rdpRetryCreds2 = tsid, rdpCert = desktop.consoleAction.cert, rdpTrustNode = currentNode, rdpTrustPort = currentNode.rdpport ? currentNode.rdpport : 3389;
+                                if ((GetNodeRights(rdpTrustNode) & 4) != 0) {
+                                    p11DeskConsoleAction = function () { webRdpTrustAcceptDesktop(rdpTrustNode, rdpTrustPort, rdpCert.actual, rdpRetryCreds2); };
+                                    Q('p11DeskConsoleMsg').innerHTML += '<a href="#" id="p11DeskConsoleAction" role="button" onclick="p11DeskConsoleAction(); return false;" style="color:#ffd54a;text-decoration:underline">' + EscapeHtml(agentConsoleMessages['accept-cert']) + '</a>';
+                                }
+                            } else if (desktop.consoleAction) { // GFX failed after the picture was shown: connect again with the credentials this connect already had, with classic bitmaps
+                                var rdpRetryCreds = tsid;
+                                p11DeskConsoleAction = function () { rdpLegacyOnce = true; connectDesktop(null, 4, rdpRetryCreds); };
+                                Q('p11DeskConsoleMsg').innerHTML += '<a href="#" id="p11DeskConsoleAction" role="button" onclick="p11DeskConsoleAction(); return false;" style="color:#ffd54a;text-decoration:underline">' + EscapeHtml(agentConsoleMessages[desktop.consoleAction.id]) + '</a>';
+                            }
                             QV('p11DeskConsoleMsg', true);
                             if (p11DeskConsoleMsgTimer != null) { clearTimeout(p11DeskConsoleMsgTimer); }
                             if (desktop.consoleMessageTimeout) { p11DeskConsoleMsgTimer = setTimeout(p11clearConsoleMsg, desktop.consoleMessageTimeout * 1000); }
@@ -11358,7 +11511,7 @@
             }
         }
 
-        function p11clearConsoleMsg() { QH('p11DeskConsoleMsg', ''); QV('p11DeskConsoleMsg', false); if (p11DeskConsoleMsgTimer) { clearTimeout(p11DeskConsoleMsgTimer); p11DeskConsoleMsgTimer = null; } }
+        function p11clearConsoleMsg() { p11DeskConsoleAction = null; QH('p11DeskConsoleMsg', ''); QV('p11DeskConsoleMsg', false); if (p11DeskConsoleMsgTimer) { clearTimeout(p11DeskConsoleMsgTimer); p11DeskConsoleMsgTimer = null; } }
         function p12clearConsoleMsg() { QH('p12TermConsoleMsg', ''); QV('p12TermConsoleMsg', false); if (p12TermConsoleMsgTimer) { clearTimeout(p12TermConsoleMsgTimer); p12TermConsoleMsgTimer = null; } }
         function p13clearConsoleMsg() { QH('p13FilesConsoleMsg', ''); QV('p13FilesConsoleMsg', false); if (p13FilesConsoleMsgTimer) { clearTimeout(p13FilesConsoleMsgTimer); p13FilesConsoleMsgTimer = null; } }
         function p9clearConsoleMsg() { QH('p9ConsoleMsg', ''); QV('p9ConsoleMsg', false); if (p9ConsoleMsgTimer) { clearTimeout(p9ConsoleMsgTimer); p9ConsoleMsgTimer = null; } }
@@ -11467,7 +11620,7 @@
                     desktop.startTime = new Date();
                     deskLastClipboardReceived = null;
                     // Pre-seed sent value with current local clipboard so we don't blast it to the remote on connect
-                    if ((navigator.clipboard != null) && (navigator.clipboard.readText != null) && (Mstsc.browser() != 'firefox')) {
+                    if ((navigator.clipboard != null) && (navigator.clipboard.readText != null) && (navigator.userAgent.toLowerCase().indexOf('firefox') == -1)) {
                         try {
                             navigator.clipboard.readText().then(function (text) { deskLastClipboardSent = text; }).catch(function (err) { deskLastClipboardSent = null; });
                         } catch (ex) { deskLastClipboardSent = null; }
@@ -11530,7 +11683,7 @@
                 var autoClipEnabled = ((desktop.contype != 4) && (desktopsettings.autoclipboard === true)) || ((desktop.contype == 4) && (desktopsettings.rdpautoclipboard === true));
                 if (autoClipEnabled && (navigator.clipboard != null)) {
                     // Local -> Remote: skip on Firefox as readText triggers an annoying paste popup every second
-                    if ((Mstsc.browser() != 'firefox') && (navigator.clipboard.readText != null)) {
+                    if ((navigator.userAgent.toLowerCase().indexOf('firefox') == -1) && (navigator.clipboard.readText != null)) {
                         try {
                             navigator.clipboard.readText().then(function (text) {
                                 if (desktop == null) return;
@@ -11619,6 +11772,7 @@
             desktopsettings.localkeymap = d7localKeyMap.checked;
             desktopsettings.kvmrmw = d7kvmrmw.checked;
             desktopsettings.rdpsize = d7rdpsize.value;
+            desktopsettings.rdpgfx = ((d7rdpgfx.value == 'legacy') || (d7rdpgfx.value == 'lossless')) ? d7rdpgfx.value : 'auto'; // Web-RDP JavaScript client: Auto (H.264 when available, else lossless GFX; automatic fallback), Lossless (GFX without H.264) or Classic bitmaps
             desktopsettings.rdpsmb = d7rdpsmb.checked;
             desktopsettings.rdprmw = d7rdprmw.checked;
             desktopsettings.rdpautoclipboard = d7rdpclip.checked;
@@ -11672,6 +11826,8 @@
             if (desktopsettings.kvmrmw) { d7kvmrmw.checked = desktopsettings.kvmrmw; }
             QV('deskFocusBtn', (desktop != null) && (desktop.contype == 2) && (desktop.state != 0) && (desktopsettings.showfocus));
             if (desktopsettings.rdpsize != null) { d7rdpsize.value = desktopsettings.rdpsize; }
+            d7rdpgfx.value = ((desktopsettings.rdpgfx == 'legacy') || (desktopsettings.rdpgfx == 'lossless')) ? desktopsettings.rdpgfx : 'auto';
+            QV('d7rdpgfxrow', ((webRdpGfx == 'on') || (webRdpGfx == 'dev'))); // only when the server allows GFX
             if (desktopsettings.rdpflags == null) { desktopsettings.rdpflags = 0x2F; }
             if (desktopsettings.rdpsmb != null) { d7rdpsmb.checked = desktopsettings.rdpsmb; }
             if (desktopsettings.rdprmw != null) { d7rdprmw.checked = desktopsettings.rdprmw; }
@@ -12227,7 +12383,7 @@
             if ((features2 & 0x1000) == 0) x += '<div class="col"><input class="btn btn-secondary" id=dlgClipSet type=button value="' + "Set Clipboard" + '" onclick=showDeskClipSet()></div>';
             x += '</div>';
             x += '<div class="row"><div class="col"><div id=dlgClipStatus style="display:inline-block;margin-left:8px" ></div></div></div>';
-            x += '<div class="row"><div class="col"><textarea id=d2clipText style="width:100%;height:184px;resize:none" maxlength=65535></textarea></div></div>';
+            x += '<div class="row"><div class="col"><textarea id=d2clipText style="width:100%;height:184px;resize:none" maxlength=' + ((desktop.contype == 4) ? 2097151 : 65535) + '></textarea></div></div>';
             x += '<div class="row"><div class="col"><div style=height:26px;margin-top:3px><span id=linuxClipWarn style=display:none>' + "Remote clipboard is valid for 60 seconds." + '</span></div></div></div>';
             x += '</div>'
             xxdialogTag = 'clipboard';
@@ -12238,6 +12394,7 @@
 
         function showDeskClipGet() {
             if (desktop == null || desktop.State != 3) return;
+            if ((desktop.contype == 4) && desktop.m.getClipboard) { Q('d2clipText').value = desktop.m.getClipboard() || ''; return; } // Web-RDP: the clipboard of the remote session, not the one of the agent's own desktop
             meshserver.send({ action: 'msg', type: 'getclip', nodeid: currentNode._id, tag: 1 });
         }
 

@@ -251,12 +251,18 @@ module.exports.CreateWebRelayServer = function (parent, db, args, certificates, 
                 if ((expire != null) && (expire <= Date.now())) { parent.debug('webrelay', 'expired link'); res.sendStatus(404); return; }
             }
 
+            // Preserve the login deadline when this relay creates new authentication cookies.
+            if (typeof urlCookie.sessionExpire == 'number') {
+                if (urlCookie.sessionExpire <= Date.now()) { res.sendStatus(404); return; }
+                expire = (typeof expire == 'number') ? Math.min(expire, urlCookie.sessionExpire) : urlCookie.sessionExpire;
+            }
+
             // No session identifier was setup, exit now
             if (webSessionId == null) { res.sendStatus(404); return; }
 
             // Check to see if we already have a multi-relay session that matches exactly this device and port for this user
             const xrelaySession = relaySessions[webSessionId];
-            if ((xrelaySession != null) && (xrelaySession.domain.id == domain.id) && (xrelaySession.userid == userid) && (xrelaySession.nodeid == nodeid) && (xrelaySession.addr == addr) && (xrelaySession.port == port) && (xrelaySession.appid == appid)) {
+            if ((xrelaySession != null) && (xrelaySession.domain.id == domain.id) && (xrelaySession.userid == userid) && (xrelaySession.nodeid == nodeid) && (xrelaySession.addr == addr) && (xrelaySession.port == port) && (xrelaySession.appid == appid) && (xrelaySession.sessionExpire === expire)) {
                 // We found an exact match, we are all setup already, redirect to root
                 res.redirect('/');
                 return;

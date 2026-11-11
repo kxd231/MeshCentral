@@ -495,6 +495,76 @@
           "default": false,
           "description": "When enabled, allows use of WebRTC to allow direct network traffic between the agent and browser."
         },
+        "webRdp": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Web-RDP settings.",
+          "properties": {
+            "engine": {
+              "type": "string",
+              "deprecated": true,
+              "description": "Obsolete compatibility setting, accepted and ignored. Web-RDP always uses the JavaScript engine. A value of \"legacy\" logs one startup warning; remove this setting."
+            },
+            "displayControl": {
+              "type": "boolean",
+              "default": true,
+              "description": "Enable Display Control desktop resize when the target supports it. False disables resize requests; the browser scales the remote desktop. GFX can still use the dynamic virtual channel transport."
+            },
+            "displayControlEvenHeight": {
+              "type": "boolean",
+              "default": false,
+              "description": "Round the height down to an even value in Display Control requests only (compatibility option). MS-RDPEDISP requires only width to be even."
+            },
+            "gfx": {
+              "type": [
+                "string",
+                "boolean",
+                "null"
+              ],
+              "default": "on",
+              "description": "Graphics pipeline: \"on\" (default), \"off\" or \"dev\" (case-insensitive). Unset/null/true means \"on\"; false means \"off\"; invalid values use \"off\" with a one-time warning. \"on\" negotiates RDPGFX and available codecs, including H.264 when the browser probe passes; Auto retries once with classic bitmaps if GFX fails before the first picture and offers a manual reconnect after it. Users can select Classic bitmaps. \"off\" forces classic bitmap updates. \"dev\" adds experimental RemoteFX Surface Commands, window.__rdpStats and standalone ?gfx=/?rfx= switches and disables automatic fallback."
+            },
+            "h264": {
+              "type": "boolean",
+              "default": true,
+              "description": "Allow H.264 in Web-RDP graphics. True (default): the browser probes its H.264 decoder and, when it works, the server offers the RDPGFX capability sets with AVC420 and AVC444 / AVC444v2 (Windows then sends H.264 instead of lossless Progressive / ClearCodec). False: no AVC capability set is ever offered, whatever the browser reports; Auto then means lossless GFX (Progressive / ClearCodec). Users can also choose Lossless or Classic bitmaps in the RDP options. Only the boolean false disables H.264."
+            },
+            "maxSessions": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1000,
+              "default": 32,
+              "description": "Maximum number of simultaneous Web-RDP sessions on this server."
+            },
+            "maxSessionsPerUser": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1000,
+              "default": 8,
+              "description": "Maximum number of simultaneous Web-RDP sessions of one user, never more than maxSessions."
+            },
+            "maxEngineMemoryMb": {
+              "type": "integer",
+              "minimum": 128,
+              "maximum": 1048576,
+              "description": "Total admission budget in MiB for live Web-RDP engines. A new session reserves 128 MiB per engine or its larger measured size; exceeding the budget refuses admission. Default: half of total host memory (or of the process/cgroup memory limit when lower and reported by Node), with a minimum of 128 MiB. This does not replace container memory limits or the fixed per-engine limits."
+            },
+            "requireNla": {
+              "type": "boolean",
+              "default": false,
+              "description": "Only connect with Network Level Authentication (CredSSP); a server offering only TLS is refused before any credential is sent."
+            },
+            "isolation": {
+              "type": "string",
+              "enum": [
+                "process",
+                "thread"
+              ],
+              "default": "process",
+              "description": "Where each Web-RDP session runs: \"process\" (one Node process per session, isolates memory and crashes) or \"thread\" (a worker thread, lighter, isolates only exceptions and the event loop)."
+            }
+          }
+        },
         "nice404": {
           "type": "boolean",
           "default": true,

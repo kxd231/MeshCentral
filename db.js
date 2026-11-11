@@ -237,6 +237,7 @@ module.exports.CreateDB = function (parent, func) {
                                     obj.Remove(node._id);                                 // Remove node with that id
                                     obj.Remove('if' + node._id);                          // Remove interface information
                                     obj.Remove('nt' + node._id);                          // Remove notes
+                                    require('./rdp/trust.js').forDb(obj).removeNode(node._id); // Remove the Web-RDP trust (pinned certificates)
                                     obj.Remove('lc' + node._id);                          // Remove last connect time
                                     obj.Remove('si' + node._id);                          // Remove system information
                                     obj.Remove('al' + node._id);                          // Remove error log last time
@@ -1664,6 +1665,10 @@ module.exports.CreateDB = function (parent, func) {
     }
 
     function setupFunctions(func) {
+        // Web-RDP trust (rdp/trust.js) updates its pins with a conditional write where the backend has one (NeDB, MongoDB); the others are best effort
+        if (((obj.databaseType == DB_SQLITE) || (obj.databaseType == DB_POSTGRESQL) || (obj.databaseType == DB_MARIADB) || (obj.databaseType == DB_MYSQL) || (obj.databaseType == DB_ACEBASE)) && (parent.config != null) && (parent.config.peers != null)) {
+            console.log('WARNING: Web-RDP certificate pins are not updated atomically on this database backend; with several servers (peers) on one database a pin or an NLA flag written at the same moment on two servers can be lost.');
+        }
         if (obj.databaseType == DB_SQLITE) {
             // Database actions on the main collection. SQLite3: https://www.linode.com/docs/guides/getting-started-with-nodejs-sqlite/
             obj.Set = function (value, func) {
@@ -2787,6 +2792,12 @@ module.exports.CreateDB = function (parent, func) {
         } else if (obj.databaseType == DB_MONGODB) {
             // Database actions on the main collection (MongoDB)
 
+            // Conditional write on the version field (rdp/db-cas.js, Web-RDP trust): applied only when the stored document still has `v` == expectedV (null: insert only)
+            obj.SetIfVersion = function (data, expectedV, func) {
+                obj.dbCounters.fileSet++;
+                require('./rdp/db-cas.js').mongodb(obj.file, performTypedRecordEncrypt(common.escapeLinksFieldNameEx(data)), expectedV, func);
+            };
+
             // Bulk operations
             if (parent.config.settings.mongodbbulkoperations) {
                 obj.Set = function (data, func) { // Fast Set operation using bulkWrite(), this is much faster then using replaceOne()
@@ -3087,6 +3098,11 @@ module.exports.CreateDB = function (parent, func) {
 
         } else {
             // Database actions on the main collection (NeDB and MongoJS)
+            // Conditional write on the version field (rdp/db-cas.js, Web-RDP trust): applied only when the stored document still has `v` == expectedV (null: insert only)
+            obj.SetIfVersion = function (data, expectedV, func) {
+                obj.dbCounters.fileSet++;
+                require('./rdp/db-cas.js').embedded(obj.file, performTypedRecordEncrypt(common.escapeLinksFieldNameEx(data)), expectedV, func);
+            };
             obj.Set = function (data, func) {
                 obj.dbCounters.fileSet++;
                 data = common.escapeLinksFieldNameEx(data);

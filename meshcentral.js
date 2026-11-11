@@ -1140,6 +1140,7 @@ function CreateMeshCentralServer(config, args) {
                                         db.Remove(node._id);                                 // Remove node with that id
                                         db.Remove('if' + node._id);                          // Remove interface information
                                         db.Remove('nt' + node._id);                          // Remove notes
+                                        require('./rdp/trust.js').forDb(db).removeNode(node._id); // Remove the Web-RDP trust (pinned certificates)
                                         db.Remove('lc' + node._id);                          // Remove last connect time
                                         db.Remove('si' + node._id);                          // Remove system information
                                         if (db.RemoveSMBIOS) { db.RemoveSMBIOS(node._id); }  // Remove SMBios data
@@ -4420,7 +4421,7 @@ function mainStart() {
 
         // Check if RDP support if present
         var mstsc = true;
-        try { require('./rdp') } catch (ex) { mstsc = false; }
+        try { require('./rdp/client.js') } catch (ex) { mstsc = false; }
 
         // Check if Windows SSPI, LDAP, Passport and YubiKey OTP will be used
         var sspi = false;

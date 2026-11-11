@@ -95407,6 +95407,523 @@
         "ssh.handlebars->p11->deskarea0->deskarea3x->bigfail->0",
         "xterm.handlebars->p11->deskarea0->deskarea3x->bigfail->0"
       ]
+    },
+    {
+      "en": "The relay to the agent could not be established",
+      "pl": "Nie udało się zestawić tunelu do agenta",
+      "xloc": [
+        "default.handlebars->45->1",
+        "default3.handlebars->45->1",
+        "mstsc.handlebars->3->1"
+      ]
+    },
+    {
+      "en": "The agent could not connect to the RDP server",
+      "pl": "Agent nie mógł połączyć się z serwerem RDP",
+      "xloc": [
+        "default.handlebars->45->2",
+        "default3.handlebars->45->2",
+        "mstsc.handlebars->3->2"
+      ]
+    },
+    {
+      "en": "The connection to the RDP server was lost",
+      "pl": "Utracono połączenie z serwerem RDP",
+      "xloc": [
+        "default.handlebars->45->3",
+        "default3.handlebars->45->3",
+        "mstsc.handlebars->3->3"
+      ]
+    },
+    {
+      "en": "The RDP server did not respond in time",
+      "pl": "Serwer RDP nie odpowiedział w wymaganym czasie",
+      "xloc": [
+        "default.handlebars->45->4",
+        "default3.handlebars->45->4",
+        "mstsc.handlebars->3->4"
+      ]
+    },
+    {
+      "en": "The RDP server only offers Standard RDP Security (RC4), which is not supported; enable TLS or NLA on the server",
+      "pl": "Serwer RDP oferuje tylko standardowe zabezpieczenia RDP (RC4), które nie są obsługiwane; włącz TLS lub NLA na serwerze",
+      "xloc": [
+        "default.handlebars->45->5",
+        "default3.handlebars->45->5",
+        "mstsc.handlebars->3->5"
+      ]
+    },
+    {
+      "en": "The RDP server rejected the security protocol",
+      "pl": "Serwer RDP odrzucił protokół zabezpieczeń",
+      "xloc": [
+        "default.handlebars->45->6",
+        "default3.handlebars->45->6",
+        "mstsc.handlebars->3->6"
+      ]
+    },
+    {
+      "en": "The TLS connection to the RDP server failed",
+      "pl": "Nie udało się zestawić połączenia TLS z serwerem RDP",
+      "xloc": [
+        "default.handlebars->45->7",
+        "default3.handlebars->45->7",
+        "mstsc.handlebars->3->7"
+      ]
+    },
+    {
+      "en": "The certificate of the RDP server differs from the one trusted for this device, the session was refused before any credential was sent",
+      "pl": "Certyfikat serwera RDP różni się od zaufanego certyfikatu tego urządzenia; sesja została odrzucona przed wysłaniem danych logowania",
+      "xloc": [
+        "default.handlebars->45->8",
+        "default3.handlebars->45->8",
+        "mstsc.handlebars->3->8"
+      ]
+    },
+    {
+      "en": "Another session pinned a different certificate for this device at the same moment, the session was ended; credentials may already have reached the endpoint of this session, check the device and the network and try again",
+      "pl": "Inna sesja przypięła w tej samej chwili inny certyfikat tego urządzenia; sesja została zakończona. Dane logowania mogły już dotrzeć do jej celu; sprawdź urządzenie i sieć, a następnie spróbuj ponownie",
+      "xloc": [
+        "default.handlebars->45->9",
+        "default3.handlebars->45->9",
+        "mstsc.handlebars->3->9"
+      ]
+    },
+    {
+      "en": "The RDP server no longer offers NLA, which it offered before, the session was refused before any credential was sent",
+      "pl": "Serwer RDP nie oferuje już NLA, które oferował wcześniej; sesja została odrzucona przed wysłaniem danych logowania",
+      "xloc": [
+        "default.handlebars->45->10",
+        "default3.handlebars->45->10",
+        "mstsc.handlebars->3->10"
+      ]
+    },
+    {
+      "en": "No credentials were provided",
+      "pl": "Nie podano danych logowania",
+      "xloc": [
+        "default.handlebars->45->11",
+        "default3.handlebars->45->11",
+        "mstsc.handlebars->3->11"
+      ]
+    },
+    {
+      "en": "Authentication failed, check the username and password",
+      "pl": "Uwierzytelnianie nie powiodło się; sprawdź nazwę użytkownika i hasło",
+      "xloc": [
+        "default.handlebars->45->12",
+        "default3.handlebars->45->12",
+        "mstsc.handlebars->3->12"
+      ]
+    },
+    {
+      "en": "The password has expired",
+      "pl": "Hasło wygasło",
+      "xloc": [
+        "default.handlebars->45->13",
+        "default3.handlebars->45->13",
+        "mstsc.handlebars->3->13"
+      ]
+    },
+    {
+      "en": "The password must be changed before logging on",
+      "pl": "Przed zalogowaniem należy zmienić hasło",
+      "xloc": [
+        "default.handlebars->45->14",
+        "default3.handlebars->45->14",
+        "mstsc.handlebars->3->14"
+      ]
+    },
+    {
+      "en": "The account is locked",
+      "pl": "Konto jest zablokowane",
+      "xloc": [
+        "default.handlebars->45->15",
+        "default3.handlebars->45->15",
+        "mstsc.handlebars->3->15"
+      ]
+    },
+    {
+      "en": "The account is disabled or has expired",
+      "pl": "Konto jest wyłączone lub wygasło",
+      "xloc": [
+        "default.handlebars->45->16",
+        "default3.handlebars->45->16",
+        "mstsc.handlebars->3->16"
+      ]
+    },
+    {
+      "en": "Account restrictions prevent this logon (logon hours, workstation, ...)",
+      "pl": "Ograniczenia konta uniemożliwiają logowanie (godziny logowania, stacja robocza itp.)",
+      "xloc": [
+        "default.handlebars->45->17",
+        "default3.handlebars->45->17",
+        "mstsc.handlebars->3->17"
+      ]
+    },
+    {
+      "en": "The user is not allowed to log on through Remote Desktop",
+      "pl": "Użytkownik nie ma prawa logowania przez Pulpit zdalny",
+      "xloc": [
+        "default.handlebars->45->18",
+        "default3.handlebars->45->18",
+        "mstsc.handlebars->3->18"
+      ]
+    },
+    {
+      "en": "Access denied by the RDP server",
+      "pl": "Serwer RDP odmówił dostępu",
+      "xloc": [
+        "default.handlebars->45->19",
+        "default3.handlebars->45->19",
+        "mstsc.handlebars->3->19"
+      ]
+    },
+    {
+      "en": "The RDP server could not issue a license",
+      "pl": "Serwer RDP nie mógł przydzielić licencji",
+      "xloc": [
+        "default.handlebars->45->20",
+        "default3.handlebars->45->20",
+        "mstsc.handlebars->3->20"
+      ]
+    },
+    {
+      "en": "The RDP server does not support the requested graphics mode, try the GFX mode",
+      "pl": "Serwer RDP nie obsługuje żądanego trybu grafiki; spróbuj trybu GFX",
+      "xloc": [
+        "default.handlebars->45->21",
+        "default3.handlebars->45->21",
+        "mstsc.handlebars->3->21"
+      ]
+    },
+    {
+      "en": "The RDP server requires H.264, which this browser cannot decode",
+      "pl": "Serwer RDP wymaga H.264, którego ta przeglądarka nie może dekodować",
+      "xloc": [
+        "default.handlebars->45->22",
+        "default3.handlebars->45->22",
+        "mstsc.handlebars->3->22"
+      ]
+    },
+    {
+      "en": "The RDP server denied the connection",
+      "pl": "Serwer RDP odmówił połączenia",
+      "xloc": [
+        "default.handlebars->45->23",
+        "default3.handlebars->45->23",
+        "mstsc.handlebars->3->23"
+      ]
+    },
+    {
+      "en": "The RDP server ended the session",
+      "pl": "Serwer RDP zakończył sesję",
+      "xloc": [
+        "default.handlebars->45->24",
+        "default3.handlebars->45->24",
+        "mstsc.handlebars->3->24"
+      ]
+    },
+    {
+      "en": "The RDP server sent invalid data",
+      "pl": "Serwer RDP wysłał nieprawidłowe dane",
+      "xloc": [
+        "default.handlebars->45->25",
+        "default3.handlebars->45->25",
+        "mstsc.handlebars->3->25"
+      ]
+    },
+    {
+      "en": "A resource limit was exceeded, the session was closed",
+      "pl": "Przekroczono limit zasobów; sesja została zamknięta",
+      "xloc": [
+        "default.handlebars->45->26",
+        "default3.handlebars->45->26",
+        "mstsc.handlebars->3->26"
+      ]
+    },
+    {
+      "en": "Too many Web-RDP sessions are open on this server",
+      "pl": "Na tym serwerze otwarto zbyt wiele sesji Web-RDP",
+      "xloc": [
+        "default.handlebars->45->27",
+        "default3.handlebars->45->27",
+        "mstsc.handlebars->3->27"
+      ]
+    },
+    {
+      "en": "The browser stopped processing the session, it was closed",
+      "pl": "Przeglądarka przestała przetwarzać sesję; sesja została zamknięta",
+      "xloc": [
+        "default.handlebars->45->28",
+        "default3.handlebars->45->28",
+        "mstsc.handlebars->3->28"
+      ]
+    },
+    {
+      "en": "The browser could not decode the image data",
+      "pl": "Przeglądarka nie mogła zdekodować obrazu",
+      "xloc": [
+        "default.handlebars->45->29",
+        "default3.handlebars->45->29",
+        "mstsc.handlebars->3->29"
+      ]
+    },
+    {
+      "en": "The browser sent invalid data, the session was closed",
+      "pl": "Przeglądarka wysłała nieprawidłowe dane; sesja została zamknięta",
+      "xloc": [
+        "default.handlebars->45->30",
+        "default3.handlebars->45->30",
+        "mstsc.handlebars->3->30"
+      ]
+    },
+    {
+      "en": "Internal error in the Web-RDP engine",
+      "pl": "Wewnętrzny błąd silnika Web-RDP",
+      "xloc": [
+        "default.handlebars->45->31",
+        "default3.handlebars->45->31",
+        "mstsc.handlebars->3->31"
+      ]
+    },
+    {
+      "en": "Try the GFX graphics mode.",
+      "pl": "Spróbuj trybu grafiki GFX.",
+      "xloc": [
+        "default.handlebars->45->32",
+        "default3.handlebars->45->32",
+        "mstsc.handlebars->3->32"
+      ]
+    },
+    {
+      "en": "Try classic bitmaps.",
+      "pl": "Spróbuj klasycznych bitmap.",
+      "xloc": [
+        "default.handlebars->45->33",
+        "default3.handlebars->45->33",
+        "mstsc.handlebars->3->33"
+      ]
+    },
+    {
+      "en": "Enable TLS or Network Level Authentication on the RDP server.",
+      "pl": "Włącz TLS lub uwierzytelnianie NLA na serwerze RDP.",
+      "xloc": [
+        "default.handlebars->45->34",
+        "default3.handlebars->45->34",
+        "mstsc.handlebars->3->34"
+      ]
+    },
+    {
+      "en": "The server needs H.264, which this browser cannot decode.",
+      "pl": "Serwer wymaga H.264, którego ta przeglądarka nie może dekodować.",
+      "xloc": [
+        "default.handlebars->45->35",
+        "default3.handlebars->45->35",
+        "mstsc.handlebars->3->35"
+      ]
+    },
+    {
+      "en": "Check the username, password and domain.",
+      "pl": "Sprawdź nazwę użytkownika, hasło i domenę.",
+      "xloc": [
+        "default.handlebars->45->36",
+        "default3.handlebars->45->36",
+        "mstsc.handlebars->3->36"
+      ]
+    },
+    {
+      "en": "Lossless",
+      "pl": "Bezstratna",
+      "xloc": [
+        "default.handlebars->container->dialog->dialogBody->dialog7->d7rdpkvm->d7rdpgfxrow->d7rdpgfx->3",
+        "default3.handlebars->container->xxAddAgentModal->xxAddAgentModalConf->1->xxAddAgentBody->dialog7->d7rdpkvm->d7rdpgfxrow->d7rdpgfx->3",
+        "mstsc.handlebars->main->1->3->1->rowgraphics->3->inputGraphics->1"
+      ]
+    },
+    {
+      "en": "Classic bitmaps",
+      "pl": "Klasyczne bitmapy",
+      "xloc": [
+        "default.handlebars->container->dialog->dialogBody->dialog7->d7rdpkvm->d7rdpgfxrow->d7rdpgfx->5",
+        "default3.handlebars->container->xxAddAgentModal->xxAddAgentModalConf->1->xxAddAgentBody->dialog7->d7rdpkvm->d7rdpgfxrow->d7rdpgfx->5",
+        "mstsc.handlebars->main->1->3->1->rowgraphics->3->inputGraphics->2"
+      ]
+    },
+    {
+      "en": "Reconnect with classic bitmaps",
+      "pl": "Połącz ponownie z klasycznymi bitmapami",
+      "xloc": [
+        "default.handlebars->113->1422",
+        "default3.handlebars->115->1429",
+        "mstsc.handlebars->main->1->3->1->16->1->legacyAction"
+      ]
+    },
+    {
+      "en": "Simplified graphics (classic bitmaps)",
+      "pl": "Uproszczona grafika (klasyczne bitmapy)",
+      "xloc": [
+        "mstsc.handlebars->7->1"
+      ]
+    },
+    {
+      "en": "Simplified graphics (classic bitmaps): {0}",
+      "pl": "Uproszczona grafika (klasyczne bitmapy): {0}",
+      "xloc": [
+        "default.handlebars->113->1421",
+        "default3.handlebars->115->1428"
+      ]
+    },
+    {
+      "en": "Web-RDP trust",
+      "pl": "Zaufanie Web-RDP",
+      "xloc": [
+        "default.handlebars->113->1333",
+        "default.handlebars->113->896",
+        "default3.handlebars->115->1344",
+        "default3.handlebars->115->894"
+      ]
+    },
+    {
+      "en": "The server certificate pinned on the first Web-RDP connection and whether NLA is required",
+      "pl": "Certyfikat serwera przypięty podczas pierwszego połączenia Web-RDP oraz wymaganie NLA",
+      "xloc": [
+        "default.handlebars->113->895",
+        "default3.handlebars->115->893"
+      ]
+    },
+    {
+      "en": "The stored trust record is damaged, Web-RDP sessions to this device are refused until it is reset.",
+      "pl": "Zapisany rekord zaufania jest uszkodzony. Sesje Web-RDP do tego urządzenia będą odrzucane do chwili jego zresetowania.",
+      "xloc": [
+        "default.handlebars->113->1322",
+        "default3.handlebars->115->1333"
+      ]
+    },
+    {
+      "en": "NLA required",
+      "pl": "Wymagane NLA",
+      "xloc": [
+        "default.handlebars->113->1326",
+        "default3.handlebars->115->1337"
+      ]
+    },
+    {
+      "en": "TLS only",
+      "pl": "Tylko TLS",
+      "xloc": [
+        "default.handlebars->113->1327",
+        "default3.handlebars->115->1338"
+      ]
+    },
+    {
+      "en": "A different certificate was refused",
+      "pl": "Odrzucono inny certyfikat",
+      "xloc": [
+        "default.handlebars->113->1329",
+        "default3.handlebars->115->1340"
+      ]
+    },
+    {
+      "en": "session of {0}",
+      "pl": "sesja użytkownika {0}",
+      "xloc": [
+        "default.handlebars->113->1330",
+        "default3.handlebars->115->1341"
+      ]
+    },
+    {
+      "en": "Port {0} of host {1}",
+      "pl": "Port {0} hosta {1}",
+      "xloc": [
+        "default.handlebars->113->1325",
+        "default3.handlebars->115->1336"
+      ]
+    },
+    {
+      "en": "Accept the new certificate and reconnect",
+      "pl": "Zaakceptuj nowy certyfikat i połącz ponownie",
+      "xloc": [
+        "default.handlebars->113->1423",
+        "default3.handlebars->115->1430"
+      ]
+    },
+    {
+      "en": "Reset removes the pinned certificate and the NLA requirement. The next Web-RDP connection trusts whatever certificate the server presents and pins it.",
+      "pl": "Reset usuwa przypięty certyfikat i wymaganie NLA. Następne połączenie Web-RDP zaufa dowolnemu certyfikatowi przedstawionemu przez serwer i przypnie go.",
+      "xloc": [
+        "default.handlebars->113->1334",
+        "default3.handlebars->115->1345"
+      ]
+    },
+    {
+      "en": "If the remote desktop did not open, check the username, password, domain and Remote Desktop logon permissions for the account on the remote computer.",
+      "pl": "Jeśli pulpit zdalny się nie otworzył, sprawdź nazwę użytkownika, hasło, domenę i uprawnienia konta do logowania przez Pulpit zdalny na komputerze docelowym.",
+      "xloc": [
+        "default.handlebars->45->37",
+        "default3.handlebars->45->37",
+        "mstsc.handlebars->3->37"
+      ]
+    },
+    {
+      "en": "Pinned certificate SHA-256: ",
+      "pl": "Przypięty certyfikat SHA-256: ",
+      "xloc": [
+        "default.handlebars->45->39",
+        "default3.handlebars->45->39",
+        "mstsc.handlebars->3->39"
+      ]
+    },
+    {
+      "en": "Certificate presented now: ",
+      "pl": "Obecnie przedstawiony certyfikat: ",
+      "xloc": [
+        "default.handlebars->45->40",
+        "default3.handlebars->45->40",
+        "mstsc.handlebars->3->40"
+      ]
+    },
+    {
+      "en": "Ask an administrator of the device to accept the new certificate.",
+      "pl": "Poproś administratora urządzenia o zaakceptowanie nowego certyfikatu.",
+      "xloc": [
+        "default.handlebars->45->41",
+        "default3.handlebars->45->41",
+        "mstsc.handlebars->3->41"
+      ]
+    },
+    {
+      "en": "Pinned certificate SHA-256: none.",
+      "pl": "Przypięty certyfikat SHA-256: brak.",
+      "xloc": [
+        "default.handlebars->45->38",
+        "default3.handlebars->45->38",
+        "mstsc.handlebars->3->38"
+      ]
+    },
+    {
+      "en": "Graphics",
+      "pl": "Grafika",
+      "xloc": [
+        "default.handlebars->container->dialog->dialogBody->dialog7->d7rdpkvm->d7rdpgfxrow->1",
+        "default3.handlebars->container->xxAddAgentModal->xxAddAgentModalConf->1->xxAddAgentBody->dialog7->d7rdpkvm->d7rdpgfxrow->3",
+        "mstsc.handlebars->main->1->3->1->rowgraphics->1->0"
+      ]
+    },
+    {
+      "en": "Port {0}",
+      "pl": "Port {0}",
+      "xloc": [
+        "default.handlebars->113->1324",
+        "default3.handlebars->115->1335"
+      ]
+    },
+    {
+      "en": "RDP error: ",
+      "pl": "Błąd RDP: ",
+      "xloc": [
+        "mstsc.handlebars->7->2"
+      ]
     }
   ]
 }

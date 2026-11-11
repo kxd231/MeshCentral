@@ -114,6 +114,7 @@ module.exports.CreateMeshAgent = function (parent, db, ws, req, args, domain) {
             db.Remove(obj.dbNodeKey);                                 // Remove node with that id
             db.Remove('if' + obj.dbNodeKey);                          // Remove interface information
             db.Remove('nt' + obj.dbNodeKey);                          // Remove notes
+            require('./rdp/trust.js').forDb(db).removeNode(obj.dbNodeKey); // Remove the Web-RDP trust (pinned certificates)
             db.Remove('lc' + obj.dbNodeKey);                          // Remove last connect time
             db.Remove('si' + obj.dbNodeKey);                          // Remove system information
             db.Remove('al' + obj.dbNodeKey);                          // Remove error log last time

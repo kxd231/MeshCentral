@@ -1,70 +1,43 @@
-
-function RC4(key) {
-    this.privateKey = keySetup(key);
-    this.byteStream = byteStreamGenerator(this.privateKey.slice(0));
-}
-
 /**
- * Converts the text into an array of the characters numeric Unicode values
- * @param  {String} text, the text to convert
- * @return {Array} the array of Unicode values
- */
-function convert(text) {
-    var codes = [];
-    for (var i = 0, ii = text.length; i < ii; i++) { codes.push(text.charCodeAt(i)); }
-    return codes;
-}
+* @description Web-RDP RC4 stream cipher for NTLM sealing; OpenSSL 3 no longer provides RC4 by default
+* @license Apache-2.0
+*
+* Only used inside NTLM (MS-NLMP 3.4) as the specification requires; never for transport security.
+* The key schedule state is secret: call wipe() when the NTLM context ends.
+*/
+'use strict';
 
-/**
- * Sets up the key to use with the byte stream
- * @param  {String} key, The key that you want to use
- * @return {Array}, the key stream which with be used in the byteStreamGenerator
- */
-function keySetup(key) {
-    var K = [...Array(256).keys()], j = 0, key = convert(key);
-    for (var i = 0, ii = K.length; i < ii; i++) {
-        j = (j + K[i] + key[i % key.length]) % 256;
-        [K[i], K[j]] = [K[j], K[i]];
+const { RdpError } = require('../protocol/errors.js');
+
+class Rc4 {
+    constructor(key) {
+        if (!(key instanceof Uint8Array) || (key.length < 1) || (key.length > 256)) { throw new RdpError('RDP_ERROR_INTERNAL', { detail: 'INVALID' }); }
+        const s = new Uint8Array(256);
+        for (let i = 0; i < 256; i++) { s[i] = i; }
+        for (let i = 0, j = 0; i < 256; i++) {
+            j = (j + s[i] + key[i % key.length]) & 0xFF;
+            const t = s[i]; s[i] = s[j]; s[j] = t;
+        }
+        this.s = s; this.i = 0; this.j = 0;
     }
-    return K;
-}
-
-/**
- * byteStreamGenerator uses ES6 generators which will be 'XOR-ed' to encrypt and decrypt
- * @param {Array} K, the array generated from the keySetup
- * @yield {Integer}, the current value which will be 'XOR-ed' to encrypt or decrypt
- */
-var byteStreamGenerator = function* (K) {
-    var i = 0, j = 0;
-    while (true) {
-        i = (i + 1) % 256;
-        j = (j + K[i]) % 256;
-        [K[i], K[j]] = [K[j], K[i]];
-        yield (K[(K[i] + K[j]) % 256]);
+    // XOR the key stream into a new dedicated Uint8Array (the state advances)
+    update(input) {
+        if (!(input instanceof Uint8Array) || (this.s === null)) { throw new RdpError('RDP_ERROR_INTERNAL', { detail: 'INVALID' }); }
+        const s = this.s, out = new Uint8Array(input.length);
+        let i = this.i, j = this.j;
+        for (let k = 0; k < input.length; k++) {
+            i = (i + 1) & 0xFF;
+            j = (j + s[i]) & 0xFF;
+            const t = s[i]; s[i] = s[j]; s[j] = t;
+            out[k] = input[k] ^ s[(s[i] + s[j]) & 0xFF];
+        }
+        this.i = i; this.j = j;
+        return out;
     }
+    wipe() { if (this.s !== null) { this.s.fill(0); this.s = null; } this.i = 0; this.j = 0; }
 }
 
-/**
- * Encrypts the input text
- * @param  {String} input, the text to encrypt
- * @return {String}, the encrypted text
- */
-RC4.prototype.encrypt = function (input) {
-    var outputText = '';
-    for (var i = 0, ii = input.length; i < ii; i++) { outputText += ('00' + (input.charCodeAt(i) ^ this.byteStream.next().value).toString(16)).substr(-2); }
-    return outputText;
-}
+// RC4K(key, data) of MS-NLMP: one-shot encryption with a fresh key schedule
+function rc4k(key, data) { const c = new Rc4(key); try { return c.update(data); } finally { c.wipe(); } }
 
-/**
- * Decrypts the input text
- * @param  {String} input, the text to decrypt
- * @return {String}, the decrypted text (if the same key was used)
- */
-RC4.prototype.decrypt = function (input) {
-    var outputText = '';
-    input = input.match(/[a-z0-9]{2}/gi);
-    for (var i = 0, ii = input.length; i < ii; i++) { outputText += String.fromCharCode((parseInt(input[i], 16) ^ byteStream.next().value)); }
-    return outputText;
-}
-
-module.exports = RC4;
+module.exports = Object.freeze({ Rc4: Rc4, rc4k: rc4k });

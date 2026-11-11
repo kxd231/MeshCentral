@@ -9,11 +9,78 @@
     <link rel="apple-touch-icon" href="/favicon-303x303.png" />
     {{{customCSSTags}}}
     <title>RDP</title>
-    <script type="text/javascript" src="mstsc/mstsc.js"></script>
-    <script type="text/javascript" src="mstsc/keyboard.js"></script>
-    <script type="text/javascript" src="mstsc/rle.js"></script>
-    <script type="text/javascript" src="mstsc/client.js"></script>
-    <script type="text/javascript" src="mstsc/canvas.js"></script>
+    <script type="text/javascript">
+        var webRdpGfx = '{{{webrdpgfx}}}'; // settings.webRdp.gfx: 'on' (default), 'off' or 'dev'
+        var webRdpH264 = '{{{webrdph264}}}'; // settings.webRdp.h264: 'on' (default) or 'off' (no H.264 / AVC capability sets)
+        var rdpjs = ['shared/limits', 'shared/constants', 'shared/errors', 'keyboard', 'flow', 'messages', 'fallback', 'rdp-client']; for (var rdpi = 0; rdpi < rdpjs.length; rdpi++) { document.write('<scr' + 'ipt type="text/javascript" src="rdp/' + rdpjs[rdpi] + '.js"></scr' + 'ipt>'); }
+        // Web-RDP texts live in the views so translate/translate.js can extract and translate them.
+        var webRdpErrors = {
+            RDP_ERROR_RELAY_FAILED: "The relay to the agent could not be established",
+            RDP_ERROR_CONNECT_FAILED: "The agent could not connect to the RDP server",
+            RDP_ERROR_CONNECTION_LOST: "The connection to the RDP server was lost",
+            RDP_ERROR_TIMEOUT: "The RDP server did not respond in time",
+            RDP_ERROR_STANDARD_SECURITY_UNSUPPORTED: "The RDP server only offers Standard RDP Security (RC4), which is not supported; enable TLS or NLA on the server",
+            RDP_ERROR_SECURITY_NEGOTIATION: "The RDP server rejected the security protocol",
+            RDP_ERROR_TLS_FAILED: "The TLS connection to the RDP server failed",
+            RDP_ERROR_CERT_CHANGED: "The certificate of the RDP server differs from the one trusted for this device, the session was refused before any credential was sent",
+            RDP_ERROR_TRUST_RACE: "Another session pinned a different certificate for this device at the same moment, the session was ended; credentials may already have reached the endpoint of this session, check the device and the network and try again",
+            RDP_ERROR_NLA_DOWNGRADE: "The RDP server no longer offers NLA, which it offered before, the session was refused before any credential was sent",
+            RDP_ERROR_NO_CREDENTIALS: "No credentials were provided",
+            RDP_ERROR_AUTHENTICATION_FAILED: "Authentication failed, check the username and password",
+            RDP_ERROR_PASSWORD_EXPIRED: "The password has expired",
+            RDP_ERROR_PASSWORD_MUST_CHANGE: "The password must be changed before logging on",
+            RDP_ERROR_ACCOUNT_LOCKED: "The account is locked",
+            RDP_ERROR_ACCOUNT_DISABLED: "The account is disabled or has expired",
+            RDP_ERROR_ACCOUNT_RESTRICTION: "Account restrictions prevent this logon (logon hours, workstation, ...)",
+            RDP_ERROR_LOGON_TYPE_NOT_GRANTED: "The user is not allowed to log on through Remote Desktop",
+            RDP_ERROR_ACCESS_DENIED: "Access denied by the RDP server",
+            RDP_ERROR_LICENSING: "The RDP server could not issue a license",
+            RDP_ERROR_CAPABILITIES_REJECTED: "The RDP server does not support the requested graphics mode, try the GFX mode",
+            RDP_ERROR_H264_REQUIRED: "The RDP server requires H.264, which this browser cannot decode",
+            RDP_ERROR_SERVER_DENIED: "The RDP server denied the connection",
+            RDP_ERROR_SERVER_DISCONNECTED: "The RDP server ended the session",
+            RDP_ERROR_PROTOCOL: "The RDP server sent invalid data",
+            RDP_ERROR_RESOURCE_LIMIT: "A resource limit was exceeded, the session was closed",
+            RDP_ERROR_TOO_MANY_SESSIONS: "Too many Web-RDP sessions are open on this server",
+            RDP_ERROR_CLIENT_STALLED: "The browser stopped processing the session, it was closed",
+            RDP_ERROR_CLIENT_DECODE: "The browser could not decode the image data",
+            RDP_ERROR_CLIENT_PROTOCOL: "The browser sent invalid data, the session was closed",
+            RDP_ERROR_INTERNAL: "Internal error in the Web-RDP engine"
+        };
+        var webRdpHints = {
+            'use-gfx': "Try the GFX graphics mode.",
+            'use-legacy': "Try classic bitmaps.",
+            'enable-tls': "Enable TLS or Network Level Authentication on the RDP server.",
+            'enable-h264': "The server needs H.264, which this browser cannot decode.",
+            'check-credentials': "Check the username, password and domain."
+        };
+        function webRdpErrorText(info) {
+            var text = info.message || info.text || '';
+            var base = RdpShared.errors.descriptions[info.code];
+            if (base && webRdpErrors[info.code] && text.indexOf(base) === 0) {
+                text = webRdpErrors[info.code] + text.substring(base.length);
+            }
+            var hints = {
+                'use-gfx': 'Try the GFX graphics mode.',
+                'use-legacy': 'Try the legacy graphics mode.',
+                'enable-tls': 'Enable TLS or Network Level Authentication on the RDP server.',
+                'enable-h264': 'The server needs H.264, which this browser cannot decode.',
+                'check-credentials': 'Check the username, password and domain.'
+            };
+            // The standalone wrapper retains text but does not retain the hint id.
+            for (var hint in hints) { text = text.replace(hints[hint], webRdpHints[hint]); }
+            var suffixes = [
+                ['If the remote desktop did not open, check the username, password, domain and Remote Desktop logon permissions for the account on the remote computer.', "If the remote desktop did not open, check the username, password, domain and Remote Desktop logon permissions for the account on the remote computer."],
+                ['Pinned certificate SHA-256: none.', "Pinned certificate SHA-256: none."],
+                ['Pinned certificate SHA-256: ', "Pinned certificate SHA-256: "],
+                ['Certificate presented now: ', "Certificate presented now: "],
+                ['Ask an administrator of the device to accept the new certificate.', "Ask an administrator of the device to accept the new certificate."]
+            ];
+            for (var i = 0; i < suffixes.length; i++) { text = text.replace(suffixes[i][0], suffixes[i][1]); }
+            return text;
+        }
+
+    </script>
     {{{customJSTags}}}
     <style>
         :focus {
@@ -58,7 +125,7 @@
             border-radius: 5px;
         }
 
-        .connectButton {
+        .connectButton, .legacyButton {
             margin-top: 6px;
             width: 100%;
             padding: 6px;
@@ -67,7 +134,22 @@
             cursor:pointer;
         }
 
+        .graphicsNote {
+            position: fixed;
+            top: 6px;
+            right: 8px;
+            z-index: 10;
+            padding: 3px 8px;
+            font-size: 12px;
+            color: #ffd54a;
+            background-color: rgba(0,0,0,0.6);
+            border-radius: 4px;
+            pointer-events: none;
+        }
+
         .mainCanvas {
+            max-width: 100vw; /* Scale a larger remote desktop down to the window, keeping its aspect ratio */
+            max-height: 100vh;
             position: absolute;
             top: 50%;
             left: 50%;
@@ -90,7 +172,12 @@
 
         function load() {
             if (name != '') { QH('computerName', EscapeHtml(name)); }
-            client = MstscClient.create(Q('myCanvas'));
+            client = RdpClient.createStandalone(Q('myCanvas'), { onNotice: function (n) { if (n.id == 'legacy-fallback') { QH('graphicsNote', EscapeHtml(rdpErrorText(n))); QV('graphicsNote', true); console.info('Web-RDP: GFX failed (' + n.code + '), using legacy graphics'); } } });
+            // Graphics (Auto / Lossless / Classic bitmaps) only where the server allows GFX; the choice is remembered in this browser like the other RDP options
+            if (((webRdpGfx == 'on') || (webRdpGfx == 'dev'))) {
+                QV('rowgraphics', true);
+                try { var g = localStorage.getItem('webrdpGraphics'); if ((g == 'legacy') || (g == 'lossless')) { Q('inputGraphics').value = g; } } catch (ex) { }
+            }
             Q('inputDomain').focus();
             canvas = Q('myCanvas');
             if (cookie == '') {
@@ -110,7 +197,7 @@
             dropDownChange();
         }
 
-        function connect(domain, username, password) {
+        function connect(domain, username, password, legacyOnce) {
             if (cookie == '') return;
             var domain = Q('inputDomain').value;
             var username = Q('inputUsername').value;
@@ -118,12 +205,34 @@
             var savepass = Q('inputSaveCredentials').checked;
             var options = { savepass: savepass, useServerCreds: (Q('d3coreMode').value == 1) };
             if (typeof urlargs.flags == 'number') { options.flags = urlargs.flags; }
+            if (((webRdpGfx == 'on') || (webRdpGfx == 'dev'))) {
+                var graphics = ((Q('inputGraphics').value == 'legacy') || (Q('inputGraphics').value == 'lossless')) ? Q('inputGraphics').value : 'auto';
+                try { localStorage.setItem('webrdpGraphics', graphics); } catch (ex) { }
+                options.graphics = (legacyOnce === true) ? 'legacy' : graphics; // the reconnect after a GFX failure is not remembered
+            }
+            QV('graphicsNote', false);
+            QV('legacyAction', false);
             QV('myCanvas', true);
             QV('main', false);
-            canvas.width = window.innerWidth;
-            canvas.height = window.innerHeight;
-            client.connect(cookie, domain, username, password, options, function (err) { QV('myCanvas', false); QV('main', true); });
+            QV('errorMessage', false);
+            client.connect(cookie, domain, username, password, options, function (err) {
+                QV('myCanvas', false);
+                QV('main', true);
+                QV('graphicsNote', false);
+                if (err) { QH('errorMessage', EscapeHtml(rdpErrorText(err))); QV('errorMessage', true); }
+                // GFX failed after the picture was shown: the form still holds the values of this connect; connect again with classic bitmaps
+                if (err && (err.offerLegacy === true)) { QV('legacyAction', true); }
+            });
             return false;
+        }
+
+        // Readable text for errors from the JavaScript Web-RDP client.
+        function rdpErrorText(err) {
+            if (err && (err.id == 'legacy-fallback')) return "Simplified graphics (classic bitmaps)" + ': ' + err.code;
+            if ((err != null) && (typeof err == 'object') && (typeof err.text == 'string')) return webRdpErrorText(err);
+            var name = ((err != null) && (typeof err == 'object')) ? err.code : err;
+            var detail = ((err != null) && (typeof err == 'object')) ? err.detail : null;
+            return "RDP error: " + name + ((typeof detail == 'number') ? (' (' + detail + ')') : '');
         }
 
         function Q(x) { return document.getElementById(x); }                            // "Q"
@@ -199,12 +308,23 @@
                     <td></td>
                     <td><label><input type="checkbox" id="inputSaveCredentials" style="margin-left:8px;margin-right:5px">Remember credentials</label></td>
                 </tr>
+                <tr id="rowgraphics" style="display:none">
+                    <td><label for="inputGraphics" class="formLabel">Graphics</label></td>
+                    <td style="text-align:right"><select id="inputGraphics" class="formDropdown" style="width:calc(100% - 16px)"><option value="auto" notransval="1">Auto</option><option value="lossless" notransval="1">Lossless</option><option value="legacy" notransval="1">Classic bitmaps</option></select></td>
+                </tr>
+                <tr>
+                    <td colspan="2"><div id="errorMessage" style="display:none;color:#e04040;text-align:center;margin:6px 0"></div></td>
+                </tr>
+                <tr>
+                    <td colspan="2"><button id="legacyAction" class="legacyButton" style="display:none" onclick="return connect(null, null, null, true)">Reconnect with classic bitmaps</button></td>
+                </tr>
                 <tr>
                     <td colspan="2"><button class="connectButton" onclick="return connect()">Connect</button></td>
                 </tr>
             </table>
         </div>
     </div>
+    <div id="graphicsNote" class="graphicsNote" style="display:none"></div>
     <canvas id="myCanvas" class="mainCanvas" style="display:none" />
 </body>
 </html>

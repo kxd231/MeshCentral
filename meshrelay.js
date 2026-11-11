@@ -907,7 +907,7 @@ function CreateMeshRelayEx(parent, ws, req, domain, user, cookie) {
                 obj.meshid = node.meshid;
 
                 // Send connection request to agent
-                const rcookieData = {};
+                const rcookieData = { sessionExpire: req.session && req.session.expire };
                 if (user != null) { rcookieData.ruserid = user._id; } else if (obj.nouser === true) { rcookieData.nouser = 1; }
                 const rcookie = parent.parent.encodeCookie(rcookieData, parent.parent.loginCookieEncryptionKey);
                 if (obj.id == null) { obj.id = parent.crypto.randomBytes(9).toString('base64').replace(/\+/g, '@').replace(/\//g, '$'); } // If there is no connection id, generate one.
@@ -959,7 +959,7 @@ function CreateMeshRelayEx(parent, ws, req, domain, user, cookie) {
 
                 // Send connection request to agent
                 if (obj.id == null) { obj.id = parent.crypto.randomBytes(9).toString('base64').replace(/\+/g, '@').replace(/\//g, '$'); } // If there is no connection id, generate one.
-                const rcookie = parent.parent.encodeCookie({ ruserid: user._id }, parent.parent.loginCookieEncryptionKey);
+                const rcookie = parent.parent.encodeCookie({ ruserid: user._id, sessionExpire: req.session && req.session.expire }, parent.parent.loginCookieEncryptionKey);
                 if (obj.req.query.tcpport != null) {
                     const command = { nodeid: obj.req.query.nodeid, action: 'msg', type: 'tunnel', userid: user._id, value: '*/' + xdomain + 'meshrelay.ashx?' + (obj.req.query.p != null ? ('p=' + obj.req.query.p + '&') : '') + 'id=' + obj.id + '&rauth=' + rcookie, tcpport: obj.req.query.tcpport, tcpaddr: ((obj.req.query.tcpaddr == null) ? '127.0.0.1' : obj.req.query.tcpaddr), soptions: {} };
                     if (typeof domain.consentmessages == 'object') {
@@ -1034,7 +1034,7 @@ function CreateMeshRelayEx(parent, ws, req, domain, user, cookie) {
 
                 // Send connection request to agent
                 if (obj.id == null) { obj.id = parent.crypto.randomBytes(9).toString('base64').replace(/\+/g, '@').replace(/\//g, '$'); } // If there is no connection id, generate one.
-                const rcookieData = { nodeid: node._id };
+                const rcookieData = { nodeid: node._id, sessionExpire: req.session && req.session.expire };
                 if (user != null) { rcookieData.ruserid = user._id; } else if (obj.nouser === true) { rcookieData.nouser = 1; }
                 const rcookie = parent.parent.encodeCookie(rcookieData, parent.parent.loginCookieEncryptionKey);
                 const command = { nodeid: node._id, action: 'msg', type: 'tunnel', value: '*/' + xdomain + 'meshrelay.ashx?p=' + obj.req.query.p + '&id=' + obj.id + '&rauth=' + rcookie + '&nodeid=' + node._id, soptions: {}, rights: cookie.r, guestuserid: user._id, guestname: cookie.gn, consent: cookie.cf, remoteaddr: cleanRemoteAddr(obj.req.clientIp) };
@@ -1257,6 +1257,7 @@ function CreateLocalRelayEx(parent, ws, req, domain, user, cookie) {
 
     // Perform data accounting
     function dataAccounting() {
+        if (obj.client == null) return;
         const datain = ((obj.client.bytesRead - obj.client.bytesReadEx) + (ws._socket.bytesRead - ws._socket.bytesReadEx));
         const dataout = ((obj.client.bytesWritten - obj.client.bytesWrittenEx) + (ws._socket.bytesWritten - ws._socket.bytesWrittenEx));
         obj.client.bytesReadEx = obj.client.bytesRead;
@@ -1272,7 +1273,8 @@ function CreateLocalRelayEx(parent, ws, req, domain, user, cookie) {
     // Disconnect
     obj.close = function (arg) {
         // If the web socket is already closed, stop here.
-        if (obj.ws == null) return;
+        if (obj.ws == null || obj.closed) return;
+        obj.closed = true;
 
         // Perform data accounting
         dataAccounting();
@@ -1322,6 +1324,23 @@ function CreateLocalRelayEx(parent, ws, req, domain, user, cookie) {
     function sendPing() { try { obj.ws.send('{"ctrlChannel":"102938","type":"ping"}'); } catch (ex) { } }
     function sendPong() { try { obj.ws.send('{"ctrlChannel":"102938","type":"pong"}'); } catch (ex) { } }
 
+    // Keep the original login deadline even on the direct mtype-3 path, which has
+    // no outer application relay. Never treat serialized cookie.expire (minutes)
+    // as an absolute login deadline.
+    const deadlines = [req.session && req.session.expire, cookie && cookie.sessionExpire].filter(x => typeof x == 'number');
+    const sessionExpire = deadlines.length ? Math.min.apply(Math, deadlines) : null;
+    function checkSessionDeadline() {
+        if (obj.closed) return false;
+        if ((sessionExpire != null) && (sessionExpire <= Date.now())) { obj.close(); return false; }
+        return true;
+    }
+    function setSessionExpireTimer() {
+        if (obj.expireTimer != null) { clearTimeout(obj.expireTimer); delete obj.expireTimer; }
+        if (checkSessionDeadline() && (sessionExpire != null)) {
+            obj.expireTimer = setTimeout(setSessionExpireTimer, Math.min(sessionExpire - Date.now(), 0x7FFFFFFF));
+        }
+    }
+
     function performRelay() {
         ws._socket.setKeepAlive(true, 240000); // Set TCP keep alive
 
@@ -1332,6 +1351,7 @@ function CreateLocalRelayEx(parent, ws, req, domain, user, cookie) {
         }
 
         parent.db.Get(obj.nodeid, function (err, docs) {
+            if (!checkSessionDeadline()) return;
             if ((err != null) || (docs == null) || (docs.length != 1)) { try { obj.close(); } catch (e) { } return; } // Disconnect websocket
             const node = docs[0];
             obj.host = node.host;
@@ -1347,6 +1367,7 @@ function CreateLocalRelayEx(parent, ws, req, domain, user, cookie) {
             obj.client.bytesReadEx = 0;
             obj.client.bytesWrittenEx = 0;
             obj.client.connect(obj.tcpport, node.host, function () {
+                if (!checkSessionDeadline()) return;
                 // Log the start of the connection
                 var protocolStr = req.query.p;
                 if (req.query.p == 10) { protocolStr = 'RDP'; }
@@ -1390,6 +1411,7 @@ function CreateLocalRelayEx(parent, ws, req, domain, user, cookie) {
     ws.on('close', function (req) { obj.close(); });
 
     // If this is not an authenticated session, or the session does not have routing instructions, just go ahead an connect to existing session.
-    performRelay();
+    setSessionExpireTimer();
+    if (checkSessionDeadline()) performRelay();
     return obj;
 };

@@ -153,6 +153,7 @@ module.exports.CreateWebServer = function (parent, db, args, certificates, doneF
 
     // Variables
     obj.args = args;
+    require('./rdp/core/limits.js').resolveSettings(args.webrdp); // validate GFX policy once at startup (warning is guarded)
     obj.parent = parent;
     obj.filespath = parent.filespath;
     obj.db = db;
@@ -2363,6 +2364,7 @@ module.exports.CreateWebServer = function (parent, db, args, certificates, doneF
     function handleMSTSCRequest(req, res, page) {
         const domain = getDomain(req);
         if (domain == null) { parent.debug('web', 'handleMSTSCRequest: failed checks.'); res.sendStatus(404); return; }
+        if ((req.session != null) && (typeof req.session.expire == 'number') && (req.session.expire <= Date.now())) { res.sendStatus(401); return; }
         if ((domain.loginkey != null) && (domain.loginkey.indexOf(req.query.key) == -1)) { res.sendStatus(404); return; } // Check 3FA URL key
 
         // Check if we are in maintenance mode
@@ -2381,6 +2383,10 @@ module.exports.CreateWebServer = function (parent, db, args, certificates, doneF
         // If there is a login token, use that
         if (req.query.login != null) {
             var ucookie = parent.decodeCookie(req.query.login, parent.loginCookieEncryptionKey, 60); // Cookie with 1 hour timeout
+            if ((ucookie != null) && (typeof ucookie.sessionExpire == 'number')) {
+                if (ucookie.sessionExpire <= Date.now()) { res.sendStatus(401); return; }
+                req.session.expire = (typeof req.session.expire == 'number') ? Math.min(req.session.expire, ucookie.sessionExpire) : ucookie.sessionExpire;
+            }
             if ((ucookie != null) && (ucookie.a === 3) && (typeof ucookie.u == 'string')) { user = obj.users[ucookie.u]; }
         }
 
@@ -2479,7 +2485,12 @@ module.exports.CreateWebServer = function (parent, db, args, certificates, doneF
             if (req.query.port != null) { var qport = 0; try { qport = parseInt(req.query.port); } catch (ex) { } if ((typeof qport == 'number') && (qport > 0) && (qport < 65536)) { port = qport; } }
 
             // Generate a cookie and respond
-            var cookie = parent.encodeCookie({ userid: user._id, domainid: user.domain, nodeid: node._id, tcpport: port }, parent.loginCookieEncryptionKey);
+            const cookieContent = { userid: user._id, domainid: user.domain, nodeid: node._id, tcpport: port };
+            if ((req.session != null) && (typeof req.session.expire == 'number')) {
+                if (req.session.expire <= Date.now()) { res.sendStatus(401); return; }
+                cookieContent.sessionExpire = req.session.expire;
+            }
+            var cookie = parent.encodeCookie(cookieContent, parent.loginCookieEncryptionKey);
             render(req, res, getRenderPage(page, req, domain), getRenderArgs({ cookie: cookie, name: encodeURIComponent(node.name).replace(/'/g, '%27'), serverCredentials: serverCredentials, features: features }, req, domain));
         });
     }
@@ -3227,6 +3238,10 @@ module.exports.CreateWebServer = function (parent, db, args, certificates, doneF
             setSessionRandom(req);
         } else if (req.query.login && (obj.parent.loginCookieEncryptionKey != null)) {
             var loginCookie = obj.parent.decodeCookie(req.query.login, obj.parent.loginCookieEncryptionKey, 60); // 60 minute timeout
+            if ((loginCookie != null) && (typeof loginCookie.sessionExpire == 'number')) {
+                if (loginCookie.sessionExpire <= Date.now()) { res.sendStatus(401); return; }
+                req.session.expire = (typeof req.session.expire == 'number') ? Math.min(req.session.expire, loginCookie.sessionExpire) : loginCookie.sessionExpire;
+            }
             //if ((loginCookie != null) && (loginCookie.ip != null) && !checkCookieIp(loginCookie.ip, req.clientIp)) { loginCookie = null; } // If the cookie is bound to an IP address, check here.
             if ((loginCookie != null) && (loginCookie.a == 3) && (loginCookie.u != null) && (loginCookie.u.split('/')[1] == domain.id)) {
                 // If a login cookie was provided, setup the session here.
@@ -3375,8 +3390,8 @@ module.exports.CreateWebServer = function (parent, db, args, certificates, doneF
                 const allFeatures = obj.getDomainUserFeatures(domain, dbGetFunc.user, dbGetFunc.req);
 
                 // Create a authentication cookie
-                const authCookie = obj.parent.encodeCookie({ userid: dbGetFunc.user._id, domainid: domain.id, ip: req.clientIp }, obj.parent.loginCookieEncryptionKey);
-                const authRelayCookie = obj.parent.encodeCookie({ ruserid: dbGetFunc.user._id, x: req.session.x }, obj.parent.loginCookieEncryptionKey);
+                const authCookie = obj.parent.encodeCookie({ userid: dbGetFunc.user._id, domainid: domain.id, ip: req.clientIp, sessionExpire: req.session && req.session.expire }, obj.parent.loginCookieEncryptionKey);
+                const authRelayCookie = obj.parent.encodeCookie({ ruserid: dbGetFunc.user._id, x: req.session.x, sessionExpire: req.session.expire }, obj.parent.loginCookieEncryptionKey);
 
                 // Send the main web application
                 var extras = (dbGetFunc.req.query.key != null) ? ('&key=' + dbGetFunc.req.query.key) : '';
@@ -3917,8 +3932,8 @@ module.exports.CreateWebServer = function (parent, db, args, certificates, doneF
                 if ((domain.ldap == null) && (domain.sspi == null) && (obj.args.user == null) && (obj.args.nousers != true)) { logoutcontrols.logoutUrl = (domain.url + 'logout?' + Math.random() + extras); } // If a default user is in use or no user mode, don't display the logout button
 
                 // Create a authentication cookie
-                const authCookie = obj.parent.encodeCookie({ userid: user._id, domainid: domain.id, ip: req.clientIp }, obj.parent.loginCookieEncryptionKey);
-                const authRelayCookie = obj.parent.encodeCookie({ ruserid: user._id, domainid: domain.id }, obj.parent.loginCookieEncryptionKey);
+                const authCookie = obj.parent.encodeCookie({ userid: user._id, domainid: domain.id, ip: req.clientIp, sessionExpire: req.session && req.session.expire }, obj.parent.loginCookieEncryptionKey);
+                const authRelayCookie = obj.parent.encodeCookie({ ruserid: user._id, domainid: domain.id, sessionExpire: req.session.expire }, obj.parent.loginCookieEncryptionKey);
                 var httpsPort = ((obj.args.aliasport == null) ? obj.args.port : obj.args.aliasport); // Use HTTPS alias port is specified
                 render(req, res, getRenderPage('xterm', req, domain), getRenderArgs({ serverDnsName: obj.getWebServerName(domain, req), serverRedirPort: args.redirport, serverPublicPort: httpsPort, authCookie: authCookie, authRelayCookie: authRelayCookie, logoutControls: encodeURIComponent(JSON.stringify(logoutcontrols)).replace(/'/g, '%27'), name: EscapeHtml(node.name) }, req, domain));
             });
@@ -6809,6 +6824,37 @@ module.exports.CreateWebServer = function (parent, db, args, certificates, doneF
         return (obj.getWebServerName(domain, req) == originUrl.hostname); // Match the server hostname
     }
 
+    // Check the complete browser origin for cookie-authenticated application relays.
+    // Keep the hostname policy used by control.ashx, but also bind scheme and port.
+    obj.CheckWebServerOrigin = function (domain, req) {
+        if (domain.allowedorigin === true) return true; // Explicit administrator opt-out
+        if (req.headers.origin == null) return true; // Native clients do not send Origin
+        if (typeof req.headers.origin != 'string') return false;
+        let origin;
+        try { origin = new URL(req.headers.origin); } catch (ex) { return false; }
+        if ((origin.protocol != 'https:') && (origin.protocol != 'http:')) return false;
+        if ((origin.username != '') || (origin.password != '') || (origin.pathname != '/') || origin.search || origin.hash) return false;
+        const scheme = (obj.args.notls && !obj.args.tlsoffload) ? 'http:' : 'https:';
+        let server;
+        // xForwardedHost is set only by the existing trusted-proxy middleware.
+        try { server = new URL(scheme + '//' + (req.xForwardedHost || req.headers.host)); } catch (ex) { return false; }
+        // AliasPort is the explicitly configured public port when a proxy rewrites Host.
+        const aliasPort = (obj.args.aliasport == null) ? null : String(obj.args.aliasport);
+        const defaultPort = (scheme == 'https:') ? '443' : '80';
+        const portAllowed = (origin.port == server.port) || ((aliasPort != null) && ((origin.port || defaultPort) == aliasPort));
+        if (Array.isArray(domain.allowedorigin)) {
+            return domain.allowedorigin.some(function (entry) {
+                if (typeof entry != 'string') return false;
+                // Existing hostname entries inherit the server's external scheme/port.
+                if (entry.indexOf('://') < 0) return (origin.protocol == scheme) && portAllowed && (entry.toLowerCase() == origin.hostname);
+                try { const allowed = new URL(entry); return (allowed.origin == origin.origin) && !allowed.username && !allowed.password && (allowed.pathname == '/') && !allowed.search && !allowed.hash; } catch (ex) { return false; }
+            });
+        }
+        if ((origin.protocol != scheme) || !portAllowed) return false;
+        if (req.xForwardedHost && (origin.hostname == server.hostname)) return true;
+        return obj.CheckWebServerOriginName(domain, req);
+    };
+
     // Create a OSX mesh agent installer
     obj.handleMeshOsxAgentRequest = function (req, res) {
         const domain = getDomain(req, res);
@@ -7372,7 +7418,7 @@ module.exports.CreateWebServer = function (parent, db, args, certificates, doneF
                 if (clientIpSplit.length == 2) { req.clientIp = clientIpSplit[0]; }
 
                 // Get server host
-                if (req.headers['x-forwarded-host']) { xforwardedhost = req.headers['x-forwarded-host'].split(',')[0]; } // If multiple hosts are specified with a comma, take the first one.
+                if (req.headers['x-forwarded-host']) { xforwardedhost = req.xForwardedHost = req.headers['x-forwarded-host'].split(',')[0].trim(); } // If multiple hosts are specified with a comma, take the first one.
             } else {
                 req.clientIp = ipex;
             }
@@ -7420,6 +7466,7 @@ module.exports.CreateWebServer = function (parent, db, args, certificates, doneF
 
             // Finish setup security headers
             var cspBase = "default-src 'none'; font-src 'self' fonts.gstatic.com data:; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval' " + extraScriptSrc + "; connect-src 'self'" + geourl + selfurl + "; img-src 'self' blob: data:" + geourl + extraImgSrc + " data:; style-src 'self' 'unsafe-inline' fonts.googleapis.com; frame-src 'self' blob: mcrouter:" + extraFrameSrc + "; media-src 'self'; form-action 'self' " + duoSrc + "; manifest-src 'self'";
+            cspBase += "; worker-src 'self'"; // The Web-RDP browser client decodes in a Web Worker (public/rdp/rdp-worker.js). CSP3 falls back from worker-src to script-src, which has 'self'; the directive is for browsers that stop at child-src or default-src (CSP2)
             if (hasAllowedFramingOrigins) {
                 var frameAncestors = "'self'" + (framingOrigins.length > 0 ? ' ' + framingOrigins.join(' ') : '');
                 cspBase += "; frame-ancestors " + frameAncestors;
@@ -7700,10 +7747,15 @@ module.exports.CreateWebServer = function (parent, db, args, certificates, doneF
 
                 // Setup RDP unless indicated as disabled
                 if (domain.mstsc !== false) {
+                    try { require('./apprelays.js').CheckWebRdpIsolation(parent); } catch (ex) { console.log(ex); }
                     obj.app.get(url + 'mstsc.html', function (req, res) { handleMSTSCRequest(req, res, 'mstsc'); });
                     obj.app.ws(url + 'mstscrelay.ashx', function (ws, req) {
                         const domain = getDomain(req);
                         if (domain == null) { parent.debug('web', 'mstsc: failed checks.'); try { ws.close(); } catch (e) { } return; }
+                        if (obj.CheckWebServerOrigin(domain, req) == false) { try { ws.close(); } catch (e) { } return; }
+                        // Match PerformWSSessionAuth before applying the default user or decoding relay cookies.
+                        if ((req.session != null) && (typeof req.session.expire == 'number') && (req.session.expire <= Date.now())) { try { ws.close(); } catch (e) { } return; }
+                        if ((req.session.userid != null) && ((typeof req.session.userid != 'string') || (req.session.userid.split('/')[1] != domain.id) || (obj.users[req.session.userid] == null))) { try { ws.close(); } catch (e) { } return; }
                         // If no user is logged in and we have a default user, set it now.
                         if ((req.session.userid == null) && (typeof obj.args.user == 'string') && (obj.users['user/' + domain.id + '/' + obj.args.user.toLowerCase()])) { req.session.userid = 'user/' + domain.id + '/' + obj.args.user.toLowerCase(); }
                         try { require('./apprelays.js').CreateMstscRelay(obj, obj.db, ws, req, obj.args, domain); } catch (ex) { console.log(ex); }
@@ -7716,6 +7768,10 @@ module.exports.CreateWebServer = function (parent, db, args, certificates, doneF
                     obj.app.ws(url + 'sshrelay.ashx', function (ws, req) {
                         const domain = getDomain(req);
                         if (domain == null) { parent.debug('web', 'ssh: failed checks.'); try { ws.close(); } catch (e) { } return; }
+                        if (obj.CheckWebServerOrigin(domain, req) == false) { try { ws.close(); } catch (e) { } return; }
+                        // Match PerformWSSessionAuth before applying the default user or decoding relay cookies.
+                        if ((req.session != null) && (typeof req.session.expire == 'number') && (req.session.expire <= Date.now())) { try { ws.close(); } catch (e) { } return; }
+                        if ((req.session.userid != null) && ((typeof req.session.userid != 'string') || (req.session.userid.split('/')[1] != domain.id) || (obj.users[req.session.userid] == null))) { try { ws.close(); } catch (e) { } return; }
                         // If no user is logged in and we have a default user, set it now.
                         if ((req.session.userid == null) && (typeof obj.args.user == 'string') && (obj.users['user/' + domain.id + '/' + obj.args.user.toLowerCase()])) { req.session.userid = 'user/' + domain.id + '/' + obj.args.user.toLowerCase(); }
                         try { require('./apprelays.js').CreateSshRelay(obj, obj.db, ws, req, obj.args, domain); } catch (ex) { console.log(ex); }
@@ -8204,6 +8260,12 @@ module.exports.CreateWebServer = function (parent, db, args, certificates, doneF
                             if ((expire != null) && (expire <= Date.now())) { parent.debug('webrelay', 'expired link'); res.sendStatus(404); return; }
                         }
 
+                        // Preserve the login deadline when this relay creates new authentication cookies.
+                        if (typeof urlCookie.sessionExpire == 'number') {
+                            if (urlCookie.sessionExpire <= Date.now()) { res.sendStatus(404); return; }
+                            expire = (typeof expire == 'number') ? Math.min(expire, urlCookie.sessionExpire) : urlCookie.sessionExpire;
+                        }
+
                         // No session identifier was setup, exit now
                         if (webSessionId == null) { res.sendStatus(404); return; }
 
@@ -8218,7 +8280,7 @@ module.exports.CreateWebServer = function (parent, db, args, certificates, doneF
                                 if (freeRelayHost == null) { freeRelayHost = host; }
                             } else {
                                 // Check if we already have a relay session that matches exactly what we want
-                                if ((xrelaySession.domain.id == domain.id) && (xrelaySession.userid == userid) && (xrelaySession.nodeid == nodeid) && (xrelaySession.addr == addr) && (xrelaySession.port == port) && (xrelaySession.appid == appid)) {
+                                if ((xrelaySession.domain.id == domain.id) && (xrelaySession.userid == userid) && (xrelaySession.nodeid == nodeid) && (xrelaySession.addr == addr) && (xrelaySession.port == port) && (xrelaySession.appid == appid) && (xrelaySession.sessionExpire === expire)) {
                                     // We found an exact match, we are all setup already, redirect to root of that DNS name
                                     if (host == req.hostname) {
                                         // Request was made on the same host, redirect to root.
@@ -9413,6 +9475,13 @@ module.exports.CreateWebServer = function (parent, db, args, certificates, doneF
                 // This is a encrypted cookie authentication
                 var cookie = obj.parent.decodeCookie(req.query.auth, obj.parent.loginCookieEncryptionKey, 60); // Cookie with 1 hour timeout
                 if ((cookie == null) && (obj.parent.multiServer != null)) { cookie = obj.parent.decodeCookie(req.query.auth, obj.parent.serverKey, 60); } // Try the server key
+                // Apply the authenticated session deadline only after decoding. Encoded expire is
+                // a duration in minutes; meshrelay's in-memory expire is an absolute timestamp.
+                if ((cookie != null) && (typeof cookie.sessionExpire == 'number')) {
+                    if (cookie.sessionExpire <= Date.now()) { try { ws.close(); } catch (e) { } return; }
+                    cookie.expire = cookie.sessionExpire;
+                    if (req.session != null) { req.session.expire = (typeof req.session.expire == 'number') ? Math.min(req.session.expire, cookie.sessionExpire) : cookie.sessionExpire; }
+                }
                 if ((cookie != null) && (cookie.ip != null) && !checkCookieIp(cookie.ip, req.clientIp)) { // If the cookie if binded to an IP address, check here.
                     parent.debug('web', 'ERR: Invalid cookie IP address, got \"' + cookie.ip + '\", expected \"' + cleanRemoteAddr(req.clientIp) + '\".');
                     cookie = null;
@@ -10418,11 +10487,24 @@ module.exports.CreateWebServer = function (parent, db, args, certificates, doneF
         return jsTags;
     }
 
+    // settings.webRdp.gfx for the page: 'on' (default), 'off' or 'dev'.
+    // The server enforces the same value in the relay (apprelays.js), the page only decides what to request.
+    function webRdpGfxMode() {
+        return require('./rdp/core/limits.js').resolveSettings(obj.args.webrdp).gfx;
+    }
+
+    // settings.webRdp.h264 for the page (true unless the boolean false): whether the browser may probe and request H.264. The relay enforces it too.
+    function webRdpH264Allowed() {
+        return require('./rdp/core/limits.js').resolveSettings(obj.args.webrdp).h264;
+    }
+
     // Return the correct render page arguments.
     function getRenderArgs(xargs, req, domain, page) {
         var minify = (domain.minify == true);
         if (req.query.minify == '1') { minify = true; } else if (req.query.minify == '0') { minify = false; }
         xargs.min = minify ? '-min' : '';
+        xargs.webrdpgfx = webRdpGfxMode();
+        xargs.webrdph264 = webRdpH264Allowed() ? 'on' : 'off';
         xargs.titlehtml = domain.titlehtml;
         xargs.title = (domain.title != null) ? domain.title : 'MeshCentral';
         if (

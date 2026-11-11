@@ -1,349 +1,104 @@
-/*
- * Copyright (c) 2014-2015 Sylvain Peyrefitte
- *
- * This file is part of node-rdpjs.
- *
- * node-rdpjs is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program. If not, see <http://www.gnu.org/licenses/>.
- */
-
-var inherits = require('util').inherits;
-var events = require('events');
-var type = require('../core').type;
-var log = require('../core').log;
-var error = require('../core').error;
-
 /**
- * Message type present in X224 packet header
- */
-var MessageType = {
-	X224_TPDU_CONNECTION_REQUEST : 0xE0,
-	X224_TPDU_CONNECTION_CONFIRM : 0xD0,
-	X224_TPDU_DISCONNECT_REQUEST : 0x80,
-	X224_TPDU_DATA : 0xF0,
-	X224_TPDU_ERROR : 0x70
-};
+* @description Web-RDP X.224 (ISO 8073 class 0) connection setup and data TPDUs with RDP security negotiation
+* @license Apache-2.0
+*
+* MS-RDPBCGR 2.2.1.1 / 2.2.1.2. Decisions:
+* - requestedProtocols = PROTOCOL_SSL | PROTOCOL_HYBRID | PROTOCOL_HYBRID_EX by default, HYBRID | HYBRID_EX
+*   when NLA is required (transport security 'nla'): a server answer outside the request is refused. HYBRID_EX adds
+*   the 4-byte Early User Authorization Result after CredSSP, so a user without logon rights gets a clear
+*   RDP_ERROR_ACCESS_DENIED instead of a later disconnect (mstsc requests it as well);
+* - no routing token and no "Cookie: mstshash=<user>" (it would send the user name before TLS);
+* - a Connection Confirm without RDP_NEG_RSP (pre-RDP 5.2 server) or with PROTOCOL_RDP selected means
+*   Standard RDP Security, which is never used: RDP_ERROR_STANDARD_SECURITY_UNSUPPORTED (hint enable-tls);
+* - RDP_NEG_FAILURE → fromNegotiationFailure(); a protocol we did not request (RDSTLS, RDS-AAD, ...) is refused.
+*/
+'use strict';
 
-/**
- * Type of negotiation present in negotiation packet
- */
-var NegotiationType = {
-	TYPE_RDP_NEG_REQ : 0x01,
-	TYPE_RDP_NEG_RSP : 0x02,
-	TYPE_RDP_NEG_FAILURE : 0x03	
-};
+const { RdpError, PHASE, fromNegotiationFailure, toRdpError, hints } = require('./errors.js');
+const { Reader } = require('../core/stream.js');
+const tpkt = require('./tpkt.js');
+const limits = require('../core/limits.js');
 
-/**
- * Protocols available for x224 layer
- */
-var Protocols = {
-	PROTOCOL_RDP : 0x00000000,
-	PROTOCOL_SSL : 0x00000001,
-	PROTOCOL_HYBRID : 0x00000002,
-	PROTOCOL_HYBRID_EX : 0x00000008	
-};
+const PROTOCOL = Object.freeze({ RDP: 0x00000000, SSL: 0x00000001, HYBRID: 0x00000002, RDSTLS: 0x00000004, HYBRID_EX: 0x00000008, RDSAAD: 0x00000010 });
+const DEFAULT_REQUESTED_PROTOCOLS = PROTOCOL.SSL | PROTOCOL.HYBRID | PROTOCOL.HYBRID_EX;
+const NLA_REQUESTED_PROTOCOLS = PROTOCOL.HYBRID | PROTOCOL.HYBRID_EX;
+const SUPPORTED_PROTOCOLS = [PROTOCOL.SSL, PROTOCOL.HYBRID, PROTOCOL.HYBRID_EX];
+const TPDU = Object.freeze({ CR: 0xE0, CC: 0xD0, DR: 0x80, DT: 0xF0 });
+const NEG_TYPE = Object.freeze({ REQ: 0x01, RSP: 0x02, FAILURE: 0x03 });
+// RDP_NEG_RSP flags (MS-RDPBCGR 2.2.1.2.1)
+const NEG_RSP_FLAGS = Object.freeze({ EXTENDED_CLIENT_DATA_SUPPORTED: 0x01, DYNVC_GFX_PROTOCOL_SUPPORTED: 0x02, RESTRICTED_ADMIN_MODE_SUPPORTED: 0x08, REDIRECTED_AUTHENTICATION_MODE_SUPPORTED: 0x10 });
+const DATA_HEADER = Uint8Array.of(0x02, TPDU.DT, 0x80);   // LI = 2, DT, EOT
+const DATA_MAX_BYTES = limits.TPKT_MAX_BYTES - tpkt.TPKT_HEADER_BYTES - DATA_HEADER.length;   // 65528
 
-/**
- * Use to negotiate security layer of RDP stack
- * In node-rdpjs only ssl is available
- * @param opt {object} component type options
- * @see request -> http://msdn.microsoft.com/en-us/library/cc240500.aspx
- * @see response -> http://msdn.microsoft.com/en-us/library/cc240506.aspx
- * @see failure ->http://msdn.microsoft.com/en-us/library/cc240507.aspx
- */
-function negotiation(opt) {
-	var self = {
-		type : new type.UInt8(),
-		flag : new type.UInt8(),
-		length : new type.UInt16Le(0x0008, { constant : true }),
-		result : new type.UInt32Le()
-	};
-	return new type.Component(self, opt);
-}
+function protocol(detail) { return new RdpError('RDP_ERROR_PROTOCOL', { detail: detail || 'INVALID', phase: PHASE.X224 }); }
+function standardSecurity() { return new RdpError('RDP_ERROR_STANDARD_SECURITY_UNSUPPORTED', { phase: PHASE.X224, hint: hints.ENABLE_TLS }); }
 
-/**
- * X224 client connection request
- * @param opt {object} component type options
- * @see	http://msdn.microsoft.com/en-us/library/cc240470.aspx
- */
-function clientConnectionRequestPDU(opt, cookie) {
-	var self = {
-		len : new type.UInt8(function() { 
-			return new type.Component(self).size() - 1; 
-		}),
-		code : new type.UInt8(MessageType.X224_TPDU_CONNECTION_REQUEST, { constant : true }),
-		padding : new type.Component([new type.UInt16Le(), new type.UInt16Le(), new type.UInt8()]),
-		cookie : cookie || new type.Factory( function (s) {
-			var offset = 0;
-			while (true) {
-				var token = s.buffer.readUInt16LE(s.offset + offset);
-				if (token === 0x0a0d) {
-					self.cookie = new type.BinaryString(null, { readLength : new type.CallableValue(offset + 2) }).read(s);
-					return;
-				}
-				else {
-					offset += 1;
-				}
-			}
-		}, { conditional : function () {
-			return self.len.value > 14;
-		}}),
-		protocolNeg : negotiation({ optional : true })
-	};
-
-	return new type.Component(self, opt);
-}
-
-/**
- * X224 Server connection confirm
- * @param opt {object} component type options
- * @see	http://msdn.microsoft.com/en-us/library/cc240506.aspx
- */
-function serverConnectionConfirm(opt) {
-	var self = {
-		len : new type.UInt8(function() { 
-			return new type.Component(self).size() - 1; 
-		}),
-		code : new type.UInt8(MessageType.X224_TPDU_CONNECTION_CONFIRM, { constant : true }),
-		padding : new type.Component([new type.UInt16Le(), new type.UInt16Le(), new type.UInt8()]),
-		protocolNeg : negotiation({ optional : true })
-	};
-
-	return new type.Component(self, opt);
-}
-
-/**
- * Header of each data message from x224 layer
- * @returns {type.Component}
- */
-function x224DataHeader() {
-	var self = {
-		header : new type.UInt8(2),
-		messageType : new type.UInt8(MessageType.X224_TPDU_DATA, { constant : true }),
-		separator : new type.UInt8(0x80, { constant : true })	
-	};
-	return new type.Component(self);
-}
-
-/**
- * Common X224 Automata
- * @param presentation {Layer} presentation layer
- */
-function X224(transport) {
-	this.transport = transport;
-    this.requestedProtocol = Protocols.PROTOCOL_SSL | Protocols.PROTOCOL_HYBRID;
-    this.selectedProtocol = Protocols.PROTOCOL_SSL | Protocols.PROTOCOL_HYBRID;
-	
-	var self = this;
-	this.transport.on('close', function() {
-		self.emit('close');
-	}).on('error', function (err) {
-		self.emit('error', err);
-	});
-}
-
-//inherit from Layer
-inherits(X224, events.EventEmitter);
-
-/**
- * Main data received function 
- * after connection sequence
- * @param s {type.Stream} stream formatted from transport layer
- */
-X224.prototype.recvData = function(s) {
-    // check header
-	x224DataHeader().read(s);
-	this.emit('data', s);
-};
-
-/**
- * Format message from x224 layer to transport layer
- * @param message {type}
- * @returns {type.Component} x224 formatted message
- */
-X224.prototype.send = function(message) {
-	this.transport.send(new type.Component([x224DataHeader(), message]));
-};
-
-/**
- * Client x224 automata
- * @param transport {events.EventEmitter} (bind data events)
- */
-function Client(transport, config) {
-    this.config = config;
-    X224.call(this, transport);
-}
-
-//inherit from X224 automata
-inherits(Client, X224);
-
-/**
- * Client automata connect event
- */
-Client.prototype.connect = function() {
-	var message = clientConnectionRequestPDU(null, new type.BinaryString());
-	message.obj.protocolNeg.obj.type.value = NegotiationType.TYPE_RDP_NEG_REQ;
-	message.obj.protocolNeg.obj.result.value = this.requestedProtocol;
-	this.transport.send(message);
-
-	// next state wait connection confirm packet
-	var self = this;
-	this.transport.once('data', function(s) {
-		self.recvConnectionConfirm(s);
-	});
-};
-
-/**
- * close stack
- */
-Client.prototype.close = function() {
-	this.transport.close();
-};
-
-/**
- * Receive connection from server
- * @param s {Stream}
- */
-Client.prototype.recvConnectionConfirm = function(s) {
-	var message = serverConnectionConfirm().read(s);
-
-	if (message.obj.protocolNeg.obj.type.value == NegotiationType.TYPE_RDP_NEG_FAILURE) {
-        this.emit('error', { err: 'NODE_RDP_PROTOCOL_X224_NEG_FAILURE', code: message.obj.protocolNeg.obj.result.value });
-        return;
-		//throw new error.ProtocolError('NODE_RDP_PROTOCOL_X224_NEG_FAILURE', 'Failure code:' + message.obj.protocolNeg.obj.result.value + " (see https://msdn.microsoft.com/en-us/library/cc240507.aspx)");
-	}
-
-	if (message.obj.protocolNeg.obj.type.value == NegotiationType.TYPE_RDP_NEG_RSP) {
-		this.selectedProtocol = message.obj.protocolNeg.obj.result.value;
-	}
-
-    if ([Protocols.PROTOCOL_HYBRID_EX].indexOf(this.selectedProtocol) !== -1) {
-        this.emit('error', 'NODE_RDP_PROTOCOL_X224_NLA_NOT_SUPPORTED');
-        return;
-        //throw new error.ProtocolError('NODE_RDP_PROTOCOL_X224_NLA_NOT_SUPPORTED');
+// Any non-empty subset of SSL | HYBRID | HYBRID_EX (HYBRID_EX only together with HYBRID). Without SSL the
+// server cannot select TLS only: used by security 'nla'.
+function checkRequested(p) {
+    if (!Number.isInteger(p) || (p <= 0) || ((p & ~DEFAULT_REQUESTED_PROTOCOLS) !== 0) || (((p & PROTOCOL.HYBRID_EX) !== 0) && ((p & PROTOCOL.HYBRID) === 0))) {
+        throw new RdpError('RDP_ERROR_INTERNAL', { detail: 'INVALID', phase: PHASE.X224 });
     }
-
-	if (this.selectedProtocol == Protocols.PROTOCOL_RDP) {
-		log.debug("RDP standard security selected");
-		return;
-	}
-
-    if (this.selectedProtocol == Protocols.PROTOCOL_HYBRID) {
-        log.debug("NLA security layer selected");
-        var self = this;
-        var transportEx = this.transport.transport;
-        this.transport.transport.startTLS(function () {
-            //console.log('TLS connected, start cssp_connect()');
-            var NLA = require('./nla');
-            self.nla = new NLA(transportEx, function () { self.nlaCompleted(); }, self.config.domain, self.config.userName, self.config.password);
-            self.nla.sendNegotiateMessage();
-        });
-        return;
-    }
-
-	// finish connection sequence
-	var self = this;
-	this.transport.on('data', function(s) {
-		self.recvData(s);
-	});
-
-    if (this.selectedProtocol == Protocols.PROTOCOL_SSL) {
-		log.debug("SSL standard security selected");
-		this.transport.transport.startTLS(function() {
-			self.emit('connect', self.selectedProtocol);
-		});
-		return;
-    }
-};
-
-/**
- * Called when NLA is completed
- */
-Client.prototype.nlaCompleted = function () {
-    const self = this;
-    delete self.nla;
-    this.transport.on('data', function (s) { self.recvData(s); });
-    this.emit('connect', this.selectedProtocol);
 }
 
-
-/**
- * Server x224 automata
- */
-function Server(transport, keyFilePath, crtFilePath) {
-	X224.call(this, transport);
-	this.keyFilePath = keyFilePath;
-	this.crtFilePath = crtFilePath;
-	var self = this;
-	this.transport.once('data', function (s) {
-		self.recvConnectionRequest(s);
-	});
+// X.224 Connection Request with RDP_NEG_REQ → TPKT frame
+function encodeConnectionRequest(requestedProtocols) {
+    const p = (requestedProtocols === undefined) ? DEFAULT_REQUESTED_PROTOCOLS : requestedProtocols;
+    checkRequested(p);
+    return tpkt.encode(Uint8Array.of(
+        14, TPDU.CR, 0, 0, 0, 0, 0,                                     // LI, CR CDT, DST-REF, SRC-REF, class 0
+        NEG_TYPE.REQ, 0x00, 0x08, 0x00, p & 0xFF, (p >>> 8) & 0xFF, (p >>> 16) & 0xFF, p >>> 24
+    ));
 }
 
-//inherit from X224 automata
-inherits(Server, X224);
+// X.224 Connection Confirm (complete TPKT frame) → { selectedProtocol, flags }; throws RdpError
+function parseConnectionConfirm(frame, requestedProtocols) {
+    const requested = (requestedProtocols === undefined) ? DEFAULT_REQUESTED_PROTOCOLS : requestedProtocols;
+    try {
+        const r = new Reader(tpkt.decode(frame));
+        const li = r.u8();
+        if ((li < 6) || (li !== r.remaining)) { throw protocol(); }
+        if ((r.u8() & 0xF0) !== TPDU.CC) { throw protocol(); }
+        r.skip(5);                                                      // DST-REF, SRC-REF, class option
+        if (r.remaining === 0) { throw standardSecurity(); }           // no RDP_NEG_RSP: legacy server
+        if (r.remaining !== 8) { throw protocol(); }
+        const type = r.u8(), flags = r.u8(), length = r.u16le(), value = r.u32le();
+        if (length !== 8) { throw protocol(); }
+        if (type === NEG_TYPE.FAILURE) { throw fromNegotiationFailure(value); }
+        if (type !== NEG_TYPE.RSP) { throw protocol(); }
+        if (value === PROTOCOL.RDP) { throw standardSecurity(); }
+        if ((SUPPORTED_PROTOCOLS.indexOf(value) < 0) || ((value & requested) === 0)) {
+            throw new RdpError('RDP_ERROR_SECURITY_NEGOTIATION', { detail: 'UNSUPPORTED', phase: PHASE.X224 });
+        }
+        return { selectedProtocol: value, flags: flags };
+    } catch (err) {
+        throw toRdpError(err, PHASE.X224);
+    }
+}
 
-/**
- * @see http://msdn.microsoft.com/en-us/library/cc240470.aspx
- * @param s {type.Stream}
- */
-Server.prototype.recvConnectionRequest = function (s) {
-	var request = clientConnectionRequestPDU().read(s);
-	if (!request.obj.protocolNeg.isReaded) {
-		throw new Error('NODE_RDP_PROTOCOL_X224_NO_BASIC_SECURITY_LAYER');
-	}
-	
-	this.requestedProtocol = request.obj.protocolNeg.obj.result.value;
-	this.selectedProtocol = this.requestedProtocol & Protocols.PROTOCOL_SSL;
-	
-	if (!(this.selectedProtocol & Protocols.PROTOCOL_SSL)) {
-		var confirm = serverConnectionConfirm();
-		confirm.obj.protocolNeg.obj.type.value = NegociationType.TYPE_RDP_NEG_FAILURE;
-		confirm.obj.protocolNeg.obj.result.value = NegotiationFailureCode.SSL_REQUIRED_BY_SERVER;
-		this.transport.send(confirm);
-		this.close();
-	}
-	else {
-		this.sendConnectionConfirm();
-	}
-};
+// Data TPDU: user data → TPKT frame
+function encodeData(payload) {
+    if (!(payload instanceof Uint8Array)) { throw new RdpError('RDP_ERROR_INTERNAL', { detail: 'INVALID' }); }
+    // Checked before allocating: TPKT header (4) + data TPDU header (3) + payload <= TPKT_MAX_BYTES
+    if (payload.length > DATA_MAX_BYTES) { throw new RdpError('RDP_ERROR_RESOURCE_LIMIT', { detail: 'LIMIT' }); }
+    const p = new Uint8Array(DATA_HEADER.length + payload.length);
+    p.set(DATA_HEADER); p.set(payload, DATA_HEADER.length);
+    // Client Info can contain credentials. Only the returned frame may outlive this call.
+    try { return tpkt.encode(p); } finally { p.fill(0); }
+}
 
-/**
- * Start SSL connection if needed
- * @see http://msdn.microsoft.com/en-us/library/cc240501.aspx
- */
-Server.prototype.sendConnectionConfirm = function () {
-	var confirm = serverConnectionConfirm();
-	confirm.obj.protocolNeg.obj.type.value = NegotiationType.TYPE_RDP_NEG_RSP;
-	confirm.obj.protocolNeg.obj.result.value = this.selectedProtocol;
-	this.transport.send(confirm);
-	
-	// finish connection sequence
-	var self = this;
-	this.transport.on('data', function(s) {
-		self.recvData(s);
-	});
-	
-	this.transport.transport.listenTLS(this.keyFilePath, this.crtFilePath, function() {
-		log.debug('start SSL connection');
-		self.emit('connect', self.requestedProtocol);
-	});
-};
+// TPKT payload of a slow-path frame → user data (view). A Disconnect Request ends the session.
+function decodeData(payload) {
+    if (!(payload instanceof Uint8Array) || (payload.length < 2)) { throw new RdpError('RDP_ERROR_PROTOCOL', { detail: 'TRUNCATED' }); }
+    const li = payload[0], code = payload[1] & 0xF0;
+    if (code === TPDU.DR) { throw new RdpError('RDP_ERROR_SERVER_DISCONNECTED'); }
+    if ((code !== TPDU.DT) || (li !== 2) || (payload.length < 3)) { throw new RdpError('RDP_ERROR_PROTOCOL', { detail: 'INVALID' }); }
+    if ((payload[2] & 0x80) === 0) { throw new RdpError('RDP_ERROR_PROTOCOL', { detail: 'UNSUPPORTED' }); }   // segmented TPDUs are not used by RDP
+    return payload.subarray(3);
+}
 
-/**
- * Module exports
- */
-module.exports = {
-		Client : Client,
-		Server : Server
-};
+module.exports = Object.freeze({
+    PROTOCOL: PROTOCOL, DEFAULT_REQUESTED_PROTOCOLS: DEFAULT_REQUESTED_PROTOCOLS, NLA_REQUESTED_PROTOCOLS: NLA_REQUESTED_PROTOCOLS, DATA_MAX_BYTES: DATA_MAX_BYTES, TPDU: TPDU, NEG_TYPE: NEG_TYPE, NEG_RSP_FLAGS: NEG_RSP_FLAGS,
+    encodeConnectionRequest: encodeConnectionRequest, parseConnectionConfirm: parseConnectionConfirm,
+    encodeData: encodeData, decodeData: decodeData
+});

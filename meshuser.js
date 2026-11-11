@@ -3012,6 +3012,7 @@ module.exports.CreateMeshUser = function (parent, db, ws, req, args, domain, use
                             db.Remove(node._id);                                 // Remove node with that id
                             db.Remove('if' + node._id);                          // Remove interface information
                             db.Remove('nt' + node._id);                          // Remove notes
+                            require('./rdp/trust.js').forDb(db).removeNode(node._id); // Remove the Web-RDP trust (pinned certificates)
                             db.Remove('lc' + node._id);                          // Remove last connect time
                             db.Remove('si' + node._id);                          // Remove system information
                             db.Remove('al' + node._id);                          // Remove error log last time
@@ -3203,7 +3204,7 @@ module.exports.CreateMeshUser = function (parent, db, ws, req, args, domain, use
                         var webRelayDns = (args.relaydns != null) ? args.relaydns[0] : parent.getWebServerName(domain, req);
                         var webRelayPort = ((args.relaydns != null) ? ((typeof args.aliasport == 'number') ? args.aliasport : args.port) : ((parent.webrelayserver != null) ? ((typeof args.relayaliasport == 'number') ? args.relayaliasport : parent.webrelayserver.port) : 0));
                         if (webRelayPort == 0) { try { ws.send(JSON.stringify({ action: 'webrelay',  responseid: command.responseid, result: 'WebRelay Disabled' })); return; } catch (ex) { } }
-                        const authRelayCookie = parent.parent.encodeCookie({ ruserid: user._id, x: req.session.x }, parent.parent.loginCookieEncryptionKey);
+                        const authRelayCookie = parent.parent.encodeCookie({ ruserid: user._id, x: req.session.x, sessionExpire: req.session.expire }, parent.parent.loginCookieEncryptionKey);
                         var url = 'https://' + webRelayDns + ':' + webRelayPort + '/control-redirect.ashx?n=' + command.nodeid + '&p=' + command.port + '&appid=' + command.appid + '&c=' + authRelayCookie;
                         if (addr != null) { url += '&addr=' + addr; }
                         if (relayid != null) { url += '&relayid=' + relayid }
@@ -3507,6 +3508,22 @@ module.exports.CreateMeshUser = function (parent, db, ws, req, args, domain, use
 
                     // Send response if required
                     if (command.responseid != null) { try { ws.send(JSON.stringify({ action: 'toast', responseid: command.responseid, result: 'ok' })); } catch (ex) { } }
+                    break;
+                }
+            case 'webrdptrust':
+                {
+                    // Web-RDP trust of one device (rdp/trust.js): list the pinned certificates, accept the certificate a refused session
+                    // presented, or reset a pin. Same right as editing the device settings (changedevice).
+                    require('./rdp/trust.js').handleCommand({
+                        command: command, domain: domain, user: user, db: db,
+                        getNode: function (nodeid, func) { parent.GetNodeWithRights(domain, user, nodeid, func); },
+                        rightsOk: function (rights) { return (rights & MESHRIGHT_MANAGECOMPUTERS) != 0; },
+                        reply: function (r) { try { ws.send(JSON.stringify(r)); } catch (ex) { } },
+                        audit: function (node, msg) {
+                            const event = { etype: 'node', userid: user._id, username: user.name, action: 'webrdptrust', nodeid: node._id, domain: domain.id, msg: msg };
+                            parent.parent.DispatchEvent(parent.CreateNodeDispatchTargets(node.meshid, node._id, [user._id]), obj, event);
+                        }
+                    });
                     break;
                 }
             case 'changedevice':
@@ -6690,8 +6707,8 @@ module.exports.CreateMeshUser = function (parent, db, ws, req, args, domain, use
         try {
             ws.send(JSON.stringify({
                 action: 'authcookie',
-                cookie: parent.parent.encodeCookie({ userid: user._id, domainid: domain.id, ip: req.clientIp }, parent.parent.loginCookieEncryptionKey),
-                rcookie: parent.parent.encodeCookie({ ruserid: user._id, x: req.session.x }, parent.parent.loginCookieEncryptionKey)
+                cookie: parent.parent.encodeCookie({ userid: user._id, domainid: domain.id, ip: req.clientIp, sessionExpire: req.session && req.session.expire }, parent.parent.loginCookieEncryptionKey),
+                rcookie: parent.parent.encodeCookie({ ruserid: user._id, x: req.session.x, sessionExpire: req.session.expire }, parent.parent.loginCookieEncryptionKey)
             }));
         } catch (ex) { }
     }
@@ -6927,6 +6944,11 @@ module.exports.CreateMeshUser = function (parent, db, ws, req, args, domain, use
             if (command.tcpport) { cookieContent.tcpport = command.tcpport; } // Indicates the browser want the agent to TCP connect to a remote port
             if (command.tag == 'novnc') { cookieContent.p = 12; } // If tag is novnc we must encode a protocol for meshrelay logging
             if (node.mtype == 3) { cookieContent.lc = 1; command.localRelay = true; } // Indicate this is for a local connection
+            // Application relay cookies must not outlive the login-token session that issued them.
+            if ((req.session != null) && (typeof req.session.expire == 'number')) {
+                if (req.session.expire <= Date.now()) return;
+                cookieContent.sessionExpire = req.session.expire;
+            }
             command.cookie = parent.parent.encodeCookie(cookieContent, parent.parent.loginCookieEncryptionKey);
             command.trustedCert = parent.isTrustedCert(domain);
             obj.send(command);
@@ -7137,7 +7159,7 @@ module.exports.CreateMeshUser = function (parent, db, ws, req, args, domain, use
     function serverCommandLoginCookie(command) {
         // If allowed, return a login cookie
         if (parent.parent.config.settings.allowlogintoken === true) {
-            obj.send({ action: 'logincookie', cookie: parent.parent.encodeCookie({ u: user._id, a: 3 }, parent.parent.loginCookieEncryptionKey) });
+            obj.send({ action: 'logincookie', cookie: parent.parent.encodeCookie({ u: user._id, a: 3, sessionExpire: req.session && req.session.expire }, parent.parent.loginCookieEncryptionKey) });
         }
     }
 
