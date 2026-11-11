@@ -30,12 +30,6 @@
           "sha384": "7abe621c6e9f8e1b11c842e052d890c942f285febb1a31897fd30ebccd1f2a12873b3a6e14689fdc7e646352b903d0ca"
         },
         {
-          "filename": "MeshService64.exe",
-          "asset": "MeshService64.exe",
-          "size": 3444736,
-          "sha384": "319d3ad514173be85838bf7ba5995e11671d8f8e6df8e51b74c8304c3caf70e754e69db74b1baec1a6430ece213ab293"
-        },
-        {
           "filename": "MeshServiceARM64.exe",
           "asset": "MeshServiceARM64.exe",
           "size": 3637760,
@@ -184,6 +178,18 @@
           "asset": "meshagent_x86_nokvm",
           "size": 3368896,
           "sha384": "a7fa5a203669c051f15eb07b050ec8c2f2938fe45b932f6692e6352db2519421237c984d0aa2b4b31e77633a98095429"
+        }
+      ]
+    },
+    {
+      "repository": "kxd231/MeshAgent",
+      "tag": "dxgi",
+      "files": [
+        {
+          "filename": "MeshService64.exe",
+          "asset": "MeshService64.exe",
+          "size": 4121088,
+          "sha384": "6f9445cefe8e70a20b116687d7b665700cb9dbf46a82343f5a48a928b6b5435e8efb76ebfe42e065c9cb106505f851d5"
         }
       ]
     },
