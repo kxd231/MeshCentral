@@ -1,82 +1,52 @@
-# MeshCentral
+# MeshCentral (kxd231 fork)
 
-## Table of Contents
+A fork of [MeshCentral](https://github.com/Ylianst/MeshCentral) by Ylian Saint-Hilaire and contributors, based on
+upstream **1.3.1**. MeshCentral is a self-hosted web site for remote management of computers: install the server,
+create a device group, install the agent on each computer and control it from the browser (remote desktop,
+terminal, files). This fork keeps all of that and changes the parts below.
 
-[About](#about)
-[Social Media](#social-media)
-[Documentation](#documentation)
-[Video Tutorials](#video-tutorials)
-[Community Meetings](#community-meetings)
-[Feedback](#feedback)
-[Unofficial Chatrooms](#unofficial-chatrooms)
-[Archive PDFs](#archive-pdfs)
-[License](#license)
+This is not the official MeshCentral. Report problems of this fork in
+[this repository](https://github.com/kxd231/MeshCentral/issues), not upstream.
 
-## About
-MeshCentral is a full computer management web site. With MeshCentral, you can run your own web server to remotely manage and control computers on a local network or anywhere on the internet. Once you get the server started, create device group and download and install an agent on each computer you want to manage. A minute later, the new computer will show up on the web site and you can take control of it. MeshCentral includes full web-based remote desktop, terminal and file management capability.
+## What is different
 
-For more information, [visit MeshCentral.com](https://meshcentral.com).
+- **Web-RDP in JavaScript.** The RDP client (RDP tab and `mstsc.html`) is a new engine written in JavaScript,
+  isolated per session, with NLA (CredSSP/NTLMv2), clipboard, resize and the graphics pipeline (RDPGFX):
+  Progressive, RemoteFX, ClearCodec and H.264 (AVC420 / AVC444, decoded with WebCodecs and WebAssembly SIMD in a
+  worker). It replaces node-rdpjs. See [docs/webrdp.md](docs/webrdp.md).
+- **Faster MeshAgent remote desktop (KVM).** Ordered drawing in the browser, optional flow control for shared
+  sessions, frame rates up to 60 frames/s, a bandwidth limit chosen by the viewer and an FPS / bandwidth readout.
+  See [docs/kvm.md](docs/kvm.md).
+- **Windows x64 agent with DXGI capture.** The default `MeshService64.exe` comes from the
+  [dxgi release of kxd231/MeshAgent](https://github.com/kxd231/MeshAgent/releases/tag/dxgi): DXGI Desktop
+  Duplication, TurboJPEG, quality that adapts to motion and to the bandwidth limit. All other agents are the
+  upstream ones.
+- **Updates from this repository.** The server's Update button installs releases of this fork from GitHub
+  (verified by digest), not the upstream npm package. See [docs/fork-updates.md](docs/fork-updates.md).
 
-## Social Media
-[YouTube](https://www.youtube.com/channel/UCJWz607A8EVlkilzcrb-GKg/videos)
-[Reddit](https://www.reddit.com/r/MeshCentral/)
-[BlogSpot](https://meshcentral2.blogspot.com/)
-[LinkedIn](https://www.linkedin.com/groups/13067101/)
+## Versions
 
-## Documentation
-[New Searchable Documentation](https://ylianst.github.io/MeshCentral/) is available here and contains information every administrator should know including usage, the server configuration file, databases, TLS offloading, Let's Encrypt, IP Filtering, Email setup, embedding, server port aliasing, reverse proxy setup, multi factor authentication, branding & terms of use, HashiCorp Vault support, and SSO.
+Releases are numbered `<upstream version>-custom.<n>`, for example `1.3.1-custom.1`: based on upstream 1.3.1, first
+release of the fork. The next release of the fork on the same base is `1.3.1-custom.2`; after moving to a newer
+upstream it becomes for example `1.3.5-custom.1`.
 
-The [Design and Architecture Guide](https://meshcentral.com/docs/MeshCentral2DesignArchitecture.pdf) is a short document that includes information on the design overview, dependencies, source code descriptions of each file, certificates, TLS security, the agent to server handshake, browser to agent relay and WebRTC and the messenger service.
+## Installing and updating
 
-## Video Tutorials
-You can watch many tutorial videos on the [MeshCentral YouTube Channel](https://www.youtube.com/channel/UCJWz607A8EVlkilzcrb-GKg/videos). Two videos to get started involve installation and basic usages.
+Download `meshcentral-<version>.tgz` from the [releases](https://github.com/kxd231/MeshCentral/releases) and install
+it in the folder that holds (or will hold) `node_modules`:
 
-Installing MeshCentral on Windows, Linux and macOS.  
-[![MeshCentral - Installation](https://img.youtube.com/vi/GsQbWZmRRAU/mqdefault.jpg)](https://www.youtube.com/watch?v=GsQbWZmRRAU)
+```sh
+npm install --save-exact --no-audit ./meshcentral-1.3.1-custom.1.tgz
+node node_modules/meshcentral
+```
 
-Basic Usages including installing the agent and remote desktop, terminal and file access.  
-[![MeshCentral - Basics](https://img.youtube.com/vi/D9Q7M7PdTg0/mqdefault.jpg)](https://www.youtube.com/watch?v=D9Q7M7PdTg0)
+A server that runs the upstream npm package still updates from npm; install the fork once by hand as above, after
+that the Update button and `selfUpdate` take the fork's releases. To go back to the upstream npm releases set
+`"serverUpdateSource": "npm"` in the `settings` section of `config.json`.
 
-MeshCentral support for two-factor authentication.  
-[![MeshCentral - Two Factor Authentication](https://img.youtube.com/vi/luLZKcma9l0/mqdefault.jpg)](https://www.youtube.com/watch?v=luLZKcma9l0)
-
-How to setup MeshCentral with the NGINX reverse proxy.  
-[![MeshCentral - NGINX Reverse Proxy](https://img.youtube.com/vi/YSmiLyKSX2I/mqdefault.jpg)](https://www.youtube.com/watch?v=YSmiLyKSX2I)
-
-Installing and using the MeshCentral Android agent.  
-[![MeshCentral - Android](https://img.youtube.com/vi/wi1HYdW00Bk/mqdefault.jpg)](https://www.youtube.com/watch?v=wi1HYdW00Bk)
-
-Using MeshCentral Router to port map TCP connections.  
-[![MeshCentral - Basics](https://img.youtube.com/vi/BubeVRmbCRM/mqdefault.jpg)](https://www.youtube.com/watch?v=BubeVRmbCRM)
-
-## Community Meetings
-Join our monthly community meetings to stay updated with the latest MeshCentral developments, ask questions, and connect with other users and developers.
-
-- [Watch past meeting recordings](https://videos.evoludata.com/w/p/tUnLpw6z1LCASuATa7wnCo)
-- [Learn more about our monthly meetings](https://github.com/Ylianst/MeshCentral/wiki/Community-Monthly-Meetings)
-
-## Feedback
-If you encounter a problem or have a suggestion to improve the product, you may file an [issue report](https://github.com/Ylianst/MeshCentral/issues/)
-
-If you are filing a problem report, you should include:
-* The version of the software you are using
-* The operating system and version
-* The observed output
-* The expected output
-* Any troubleshooting you took to resolve the issue yourself
-* Any other similar reports
-
-If you are having issues with the following other products, you should file a report on their respective issue pages
-[MeshAgent](https://github.com/Ylianst/MeshAgent/issues)
-[MeshRouter](https://github.com/Ylianst/MeshCentralRouter/issues)
-
-## Unofficial chatrooms
-- Discord Server: https://discord.gg/8wHC6ASWAc
-- Telegram Channel: https://t.me/meshcentral
-
-## Archive PDFs
-[User's Guide](https://meshcentral.com/docs/MeshCentral2UserGuide.pdf)
-[Installation Guide](https://meshcentral.com/docs/MeshCentral2InstallGuide.pdf)
+Configuration, databases, TLS, reverse proxies, users and everything else not listed above work as in upstream; the
+[upstream documentation](https://ylianst.github.io/MeshCentral/) applies.
 
 ## License
-This software is licensed under [Apache 2.0](https://www.apache.org/licenses/LICENSE-2.0).
+
+Apache License 2.0, like upstream; see [LICENSE](LICENSE). MeshCentral is © Ylian Saint-Hilaire and contributors.
