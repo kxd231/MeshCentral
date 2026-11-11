@@ -319,6 +319,8 @@ function install_stylishui() {
         # Retrieve the values we need to determine compatibility
         compat_data=$(curl -fsSL "$stylishui_compat")
         meshcentral_version=$(jq -r '.version' /opt/meshcentral/meshcentral/package.json)
+        # The fork's own releases (1.3.1-custom.2) are matched by the upstream version they are based on (1.3.1)
+        meshcentral_version=${meshcentral_version%%-custom.*}
         # Target the StylishUI version we need for our present Meshcentral version
         compat_version=$(echo "$compat_data" | jq -r --arg mcv "$meshcentral_version" \
             '.compatibility[] | select(.meshcentral==$mcv) | .stylishui')

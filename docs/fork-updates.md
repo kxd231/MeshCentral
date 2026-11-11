@@ -18,8 +18,8 @@ account and no GitHub token are needed.
    answers with a redirect, which is refused; set the new `serverUpdateRepository`), the
    latest version is reported as unknown and the server keeps running.
 2. **Which releases count.** A release is usable when it is not a draft, its tag is a
-   version (`1.3.2`, `v1.3.2`, or four parts such as `1.3.1.1`, numbers without leading
-   zeros, compared numerically part by part) and it has an asset named exactly
+   version (`1.3.1-custom.2`, `v1.3.1-custom.2`, a plain `1.3.2`, or the older four part form
+   `1.3.1.1`; see [Versioning](#versioning)) and it has an asset named exactly
    `meshcentral-<version>.tgz` (`<version>` is the tag without a leading `v`). `latest`
    (and `stable`) is the newest usable release that is not marked prerelease. A usable
    prerelease that is newer than `latest` is shown as the tag `prerelease`. `npmTag`
@@ -105,7 +105,7 @@ to pin the dependency tree.
 | `serverUpdateRepository` | `"kxd231/MeshCentral"` | `owner/repo` of a public GitHub repository. Strictly validated; an invalid value is logged once and disables the GitHub update checks. |
 | `npmPath`, `npmProxy` | unchanged | `npmPath` is a command line run by the shell, as before (it may hold quotes, `node /path/npm-cli.js`, variables); it is used for both sources. `npmProxy` is also used for the GitHub requests. |
 | `npmTag` | unset | Show only that tag (`latest`, `stable` or `prerelease`). |
-| `selfUpdate` | `false` | `true`: update to the newest release after midnight. A version such as `"1.3.2"` updates to exactly that version at startup; it is compared as a version (`v1.3.2` and `1.3.2.0` equal `1.3.2`) and is never reinstalled when it is already installed. A value that is not an exact version (`latest`, `stable`, `1.3.2-beta`) is logged and treated as `false`. |
+| `selfUpdate` | `false` | `true`: update to the newest release after midnight. A version such as `"1.3.2"` updates to exactly that version at startup; it is compared as a version (`v1.3.1-custom.2` equals `1.3.1-custom.2`, `1.3.2.0` equals `1.3.2`) and is never reinstalled when it is already installed. A value that is not an exact version (`latest`, `stable`, `1.3.2-beta`, `1.3.1-custom`) is logged and treated as `false`. |
 
 `runOnServerUpdated` and `cleanNpmCacheOnUpdate` work as before.
 
@@ -113,6 +113,61 @@ The install command quotes the package path and the proxy for the shell. On Linu
 single quote or control character in the data folder path is refused; on Windows a
 double quote, `%`, `!` or `^` is refused (non-ASCII characters and spaces are fine). A refused
 path aborts the update with a log line and counts as a failure.
+
+## Versioning
+
+The fork's version is `<upstream base>-custom.<n>`: the MeshCentral version the code is based
+on, then the number of the fork's release on that base.
+
+| Version | Meaning |
+| --- | --- |
+| `1.3.1` | upstream 1.3.1 as it is |
+| `1.3.1-custom.1` | first release of the fork based on upstream 1.3.1 |
+| `1.3.1-custom.2` | second release of the fork on the same base |
+| `1.3.5-custom.1` | first release after merging upstream 1.3.5 |
+
+The same text is used everywhere: the `package.json` `version` (shown as "Current Version" in the
+server Update dialog, in the log, and available as the `serverversion` placeholder in the domain
+footer text), the GitHub release tag (`1.3.1-custom.1`) and the asset `meshcentral-1.3.1-custom.1.tgz`.
+The `package.json` inside the asset must hold exactly the same text, or the server refuses the
+download.
+
+A leading `v` is accepted on release tags (`v1.3.1-custom.1`) and in the `selfUpdate` setting; it is
+dropped from the version, so the asset is still `meshcentral-1.3.1-custom.1.tgz`. It is not accepted
+in `package.json`, in the asset name, in the argument of `tools/release/build-server-tgz.sh`, or in
+the version the server passes to its parent process (which are always the plain text).
+
+Accepted forms: `X.Y.Z`, `X.Y.Z-custom.N` (`N` is at least 1) and the older `X.Y.Z.W`.
+Numbers have no leading zeros. Anything else is not a version and is ignored: `1.3.1-beta`,
+`1.3.1-custom`, `1.3.1-custom.01`, `latest`.
+
+Ordering: the upstream base `X.Y.Z` is compared first, numerically, then the fork number.
+So `1.3.1` < `1.3.1-custom.1` < `1.3.1-custom.2` < `1.3.2` < `1.3.2-custom.1`. A newer upstream
+base always wins, even over a higher fork number (`1.3.2` is newer than `1.3.1-custom.9`).
+The older form `X.Y.Z.W` is ordered as `X.Y.Z-custom.W`, so `1.3.1.1` and `1.3.1-custom.1` are
+the same version for ordering. When a release list holds both with a usable asset, the
+`-custom` one is used and the other is ignored; of `1.3.2` and `1.3.2.0` the one listed
+first is used.
+
+Which tag is used decides the `prerelease` flag: it is the flag of the release that is kept after
+this selection, so a `-custom` release marked prerelease stays a prerelease even if the ignored
+older-form tag of the same version is not.
+
+npm and semver read `1.3.1-custom.1` as a prerelease of `1.3.1`, so by semver rules it sorts
+*below* `1.3.1`. This does not matter here: the server orders versions with its own comparison
+described above, never with semver, and the update is installed from a local file
+(a `file:` dependency in `package.json`), so npm never resolves the version against a range.
+
+Plugins see the fork as its upstream base: `1.3.1-custom.1` satisfies a `meshCentralCompat`
+of `>=1.3.1`.
+
+How to bump:
+
+- Next release on the same upstream base: increase `n` (`1.3.1-custom.1` to `1.3.1-custom.2`).
+- After merging a newer upstream release: `<new base>-custom.1` (for example `1.3.5-custom.1`).
+- Set `version` in `package.json` and `package-lock.json` (the first two `"version"` lines), commit,
+  then build with `tools/release/build-server-tgz.sh <version>`, which checks that
+  `package.json` at that commit has this version.
 
 ## Making a release (owner)
 
@@ -127,20 +182,20 @@ when the translation is incomplete) so that
 package. A server updated from it keeps its translated UI and `minify` option.
 
 ```sh
-# 1. package.json "version" is the release version (3 or 4 numeric parts, no leading
-#    zeros); commit it in the repository you publish.
+# 1. package.json "version" is the release version, <upstream base>-custom.<n>
+#    (see Versioning); commit it in the repository you publish.
 # 2. Build the package from that commit (the output file must not exist yet):
-tools/release/build-server-tgz.sh --check-agents 1.3.2 HEAD ./release-out
-#    -> checks package.json version == 1.3.2, makes the translated and minified pages, packs,
+tools/release/build-server-tgz.sh --check-agents 1.3.1-custom.1 HEAD ./release-out
+#    -> checks package.json version == 1.3.1-custom.1, makes the translated and minified pages, packs,
 #       checks that translations are in and agent binaries are not, optionally runs
 #       agents/check-releases.js (--check-agents, needs network), prints the sha256.
 # 3. Create the release and upload the asset yourself (the asset name must stay
 #    meshcentral-<version>.tgz, the tag is the version, optionally with a leading v).
 #    --target must be a commit that exists in kxd231/MeshCentral:
-gh release create 1.3.2 release-out/meshcentral-1.3.2.tgz --repo kxd231/MeshCentral \
-   --target <commit> --title 1.3.2 --notes-file notes.md
+gh release create 1.3.1-custom.1 release-out/meshcentral-1.3.1-custom.1.tgz --repo kxd231/MeshCentral \
+   --target <commit> --title 1.3.1-custom.1 --notes-file notes.md
 # 4. Check that GitHub shows the same digest for the asset (this is what servers verify):
-gh api repos/kxd231/MeshCentral/releases/tags/1.3.2 --jq '.assets[] | [.name,.digest]'
+gh api repos/kxd231/MeshCentral/releases/tags/1.3.1-custom.1 --jq '.assets[] | [.name,.digest]'
 ```
 
 Use `--prerelease` for a test release: it appears only as the `prerelease` tag and is
@@ -153,16 +208,16 @@ release action when `package.json` changes on `master`. It may create a tag or r
 an asset. Disable that workflow in the published repository, or create your release first.
 
 The releases `1.3.1` and `1.3.1.1` have no asset and are ignored by servers. The first
-release accepted by the new mechanism must be a newer version (for example `1.3.2`), or
-the asset can be added to an existing release with `gh release upload`. A server running
+release accepted by the new mechanism is `1.3.1-custom.1` (newer than `1.3.1`), or the asset can
+be added to an existing release with `gh release upload`. A server running
 an older build still checks npm, so the first move to the new mechanism is a manual install.
 Put the file where later updates expect it first, because npm records the path:
 
 ```sh
 mkdir -p meshcentral-data/serverupdates
-cp meshcentral-1.3.2.tgz meshcentral-data/serverupdates/
+cp meshcentral-1.3.1-custom.1.tgz meshcentral-data/serverupdates/
 cd <folder that holds node_modules>
-npm install --save-exact --no-audit ./meshcentral-data/serverupdates/meshcentral-1.3.2.tgz
+npm install --save-exact --no-audit ./meshcentral-data/serverupdates/meshcentral-1.3.1-custom.1.tgz
 ```
 
 Restart the MeshCentral process or service afterwards.

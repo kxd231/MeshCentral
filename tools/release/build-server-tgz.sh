@@ -10,7 +10,8 @@
 # and packing run with --network none. translate.js exits with 0 even when it fails, so the result is checked below.
 #
 # Usage: tools/release/build-server-tgz.sh [--check-agents] <version> [<git-ref> [<output-dir>]]
-#   <version>       release version without "v", 3 or 4 numeric parts without leading zeros, e.g. 1.3.2 or 1.3.1.2
+#   <version>       release version without "v": <upstream base>-custom.<n> such as 1.3.1-custom.1 (see docs/fork-updates.md),
+#                   or X.Y.Z / X.Y.Z.W; numbers without leading zeros
 #   <git-ref>       commit, tag or branch to pack (default HEAD)
 #   <output-dir>    where the .tgz is written (default ./release-out); an existing file is never overwritten
 #   --check-agents  also run agents/check-releases.js (needs network): the default agent files that
@@ -31,8 +32,8 @@ VERSION=$1
 REF=${2:-HEAD}
 OUT_DIR=${3:-./release-out}
 
-if ! printf '%s\n' "$VERSION" | grep -Eq '^(0|[1-9][0-9]{0,5})\.(0|[1-9][0-9]{0,5})\.(0|[1-9][0-9]{0,5})(\.(0|[1-9][0-9]{0,5}))?$'; then
-    echo "Invalid version '$VERSION': expected 3 or 4 numeric parts without leading zeros, e.g. 1.3.2" >&2
+if ! printf '%s\n' "$VERSION" | grep -Eq '^(0|[1-9][0-9]{0,5})\.(0|[1-9][0-9]{0,5})\.(0|[1-9][0-9]{0,5})(\.(0|[1-9][0-9]{0,5})|-custom\.[1-9][0-9]{0,5})?$'; then
+    echo "Invalid version '$VERSION': expected <upstream base>-custom.<n> (for example 1.3.1-custom.1), or X.Y.Z / X.Y.Z.W, numbers without leading zeros and no leading v" >&2
     exit 2
 fi
 

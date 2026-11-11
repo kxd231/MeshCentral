@@ -689,7 +689,7 @@ function CreateMeshCentralServer(config, args) {
                             // The installed package must be the version that was announced, or the next check would install it again
                             var installed = null;
                             try { installed = JSON.parse(obj.fs.readFileSync(obj.path.join(obj.parentpath, 'node_modules', 'meshcentral', 'package.json'), 'utf8')).version; } catch (ex) { }
-                            if (serverUpdates.compareVersions(installed, pkg.version) !== 0) {
+                            if (installed !== pkg.version) {
                                 console.log('ERROR: The installed MeshCentral version is ' + installed + ', not ' + pkg.version + ' as announced by the release.');
                                 updater.recordFailure(pkg.version, 'The installed version is ' + installed + ' instead of ' + pkg.version + '.');
                             } else { updater.clearFailure(); updater.cleanup(fileName).catch(function () { }); }
@@ -729,22 +729,10 @@ function CreateMeshCentralServer(config, args) {
             else if (data.indexOf('Server restart...') >= 0) { childProcess.xrestart = 1; }
             else if (data.indexOf('Starting self upgrade to: ') >= 0) {
                 const specificupdate = data.substring(data.indexOf('Starting self upgrade to: ') + 26).split('\r')[0].split('\n')[0];
-                if (/^[0-9\.\-]+$/i.test(specificupdate)) {
-                    var isUpgrade = false;
-                    try {
-                        var currentVersion = getCurrentVersion();
-                        if (currentVersion) {
-                            var sVer = specificupdate.split('-')[0].split('.');
-                            var cVer = currentVersion.split('-')[0].split('.');
-                            for (var i = 0; i <= 3; i++) { // Up to 4 parts, the fork has versions like 1.3.1.1
-                                var sVal = parseInt(sVer[i] || 0);
-                                var cVal = parseInt(cVer[i] || 0);
-                                if (sVal > cVal) { isUpgrade = true; break; }
-                                else if (sVal < cVal) { break; }
-                            }
-                        }
-                    } catch (ex) { }
-                    if (isUpgrade) {
+                var currentVersion = getCurrentVersion();
+                const request = require('./serverupdates.js').selfUpgradeRequest(obj.getServerUpdater().settings.source, specificupdate, currentVersion);
+                if (request != null) {
+                    if (request.upgrade) {
                         obj.args.specificupdate = specificupdate;
                         childProcess.xrestart = 3;
                     } else {

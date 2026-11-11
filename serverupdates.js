@@ -18,18 +18,27 @@ const FOLDER_NAME = 'serverupdates';
 const FAILURE_FILE = 'last-failure.json';
 const FAILURE_RETRY_MS = 24 * 3600 * 1000; // An automatic update to a version that failed is not retried for this long
 
-// "1.3.1", "v1.3.1.1": three or four numeric parts without leading zeros. Anything else is not a release version.
+// Version scheme of the fork: <upstream base>-custom.<n>, e.g. 1.3.1-custom.1, 1.3.1-custom.2, later 1.3.5-custom.1.
+// Accepted forms, each with an optional leading "v" (tags only):
+//   X.Y.Z            plain, e.g. an upstream version
+//   X.Y.Z.W          older fork form, e.g. 1.3.1.1; ordered like X.Y.Z-custom.W
+//   X.Y.Z-custom.N   N >= 1
+// Numbers have no leading zeros. Anything else (1.3.1-beta, 1.3.1-custom, 1.3.1-custom.01, latest) is not a version.
+const VERSION_PATTERN = /^v?(0|[1-9]\d{0,5})\.(0|[1-9]\d{0,5})\.(0|[1-9]\d{0,5})(?:\.(0|[1-9]\d{0,5})|-custom\.([1-9]\d{0,5}))?$/;
+
+// Returns { parts: [X, Y, Z, fork], text, form } or null. parts[3] is the fork number (0 for a plain version), which makes
+// "1.3.1.1" and "1.3.1-custom.1" the same in ordering. text is the canonical text: as written, without the "v". form is
+// 'plain', 'dotted' (X.Y.Z.W) or 'custom'.
 function parseVersion(text) {
     if (typeof text !== 'string') { return null; }
-    // No leading zeros: "1.03.2" and "1.3.2" must not name the same version with different asset names
-    const match = /^v?(0|[1-9]\d{0,5})\.(0|[1-9]\d{0,5})\.(0|[1-9]\d{0,5})(?:\.(0|[1-9]\d{0,5}))?$/.exec(text);
+    const match = VERSION_PATTERN.exec(text);
     if (match == null) { return null; }
-    const parts = [Number(match[1]), Number(match[2]), Number(match[3]), match[4] == null ? 0 : Number(match[4])];
-    // Canonical text: no "v", the fourth part only when it was written
-    return { parts: parts, text: (match[4] == null) ? parts.slice(0, 3).join('.') : parts.join('.') };
+    const parts = [Number(match[1]), Number(match[2]), Number(match[3]), Number(match[4] || match[5] || 0)];
+    return { parts: parts, text: (text.charAt(0) === 'v') ? text.substring(1) : text, form: (match[5] != null) ? 'custom' : ((match[4] != null) ? 'dotted' : 'plain') };
 }
 
-// Numeric, part by part. Accepts version strings or parseVersion() results. Unparsable values sort below everything.
+// Numeric, part by part: the upstream base first, then the fork number (plain < -custom.1 < -custom.2). A newer upstream base
+// always wins, 1.3.2 > 1.3.1-custom.9. Accepts version strings or parseVersion() results. Unparsable values sort below everything.
 function compareVersions(a, b) {
     const pa = (typeof a === 'string') ? parseVersion(a) : a, pb = (typeof b === 'string') ? parseVersion(b) : b;
     if ((pa == null) && (pb == null)) { return 0; }
@@ -60,18 +69,20 @@ function parseDigest(digest) {
 function selectReleases(releases) {
     const usable = [];
     if (!Array.isArray(releases)) { return { usable: usable, latest: null, prerelease: null }; }
-    const seen = new Set();
     for (const release of releases) {
         if ((release == null) || (typeof release !== 'object') || (release.draft === true) || (typeof release.tag_name !== 'string')) { continue; }
         const version = parseVersion(release.tag_name);
-        if ((version == null) || seen.has(version.parts.join('.')) || !Array.isArray(release.assets)) { continue; } // "1.3.2" and "1.3.2.0" are the same version
-        const tag = release.tag_name, expected = assetNameFor(tag.replace(/^v/, ''));
+        if ((version == null) || !Array.isArray(release.assets)) { continue; }
+        const tag = release.tag_name, expected = assetNameFor(version.text);
         const asset = release.assets.find(function (a) {
             return (a != null) && (a.name === expected) && Number.isInteger(a.size) && (a.size > 0) && (a.size <= MAX_ASSET_BYTES) && ((a.state == null) || (a.state === 'uploaded'));
         });
         if (asset == null) { continue; }
-        seen.add(version.parts.join('.'));
-        usable.push({ version: version.text, parts: version.parts, tag: tag, prerelease: (release.prerelease === true), asset: { name: asset.name, size: asset.size, digest: parseDigest(asset.digest) }, publishedAt: release.published_at || null });
+        const entry = { version: version.text, parts: version.parts, form: version.form, tag: tag, prerelease: (release.prerelease === true), asset: { name: asset.name, size: asset.size, digest: parseDigest(asset.digest) }, publishedAt: release.published_at || null };
+        // One version can have several usable tags ("1.3.2" and "1.3.2.0", "1.3.1.1" and "1.3.1-custom.1"). The -custom form is
+        // preferred, otherwise the first one in the list stays. A tag without a usable asset never hides the other one.
+        const key = version.parts.join('.'), index = usable.findIndex(function (r) { return r.parts.join('.') === key; });
+        if (index < 0) { usable.push(entry); } else if ((entry.form === 'custom') && (usable[index].form !== 'custom')) { usable[index] = entry; }
     }
     usable.sort(function (a, b) { return compareVersions(b, a); });
     const latest = usable.find(function (r) { return !r.prerelease; }) || null;
@@ -85,14 +96,45 @@ function selectReleases(releases) {
 function updateNeeded(source, currentVer, latestVer) {
     if (source === 'npm') { return (currentVer != latestVer); }
     if (source !== 'github') { return false; }
-    return (typeof latestVer === 'string') && (typeof currentVer === 'string') && (parseVersion(latestVer) != null) && (compareVersions(latestVer, currentVer) > 0);
+    // Both must be versions of the scheme: an installed version outside it would otherwise look older than everything and be "updated" every day
+    return (typeof latestVer === 'string') && (typeof currentVer === 'string') && (parseVersion(latestVer) != null) && (parseVersion(currentVer) != null) && (compareVersions(latestVer, currentVer) > 0);
 }
 
 // selfUpdate set to a string: for the github source it must be an exact release version. Versions are compared as versions
-// ("v1.3.2", "1.3.2.0" and "1.3.2" are the same), "latest", "stable" or "1.3.2-beta" are not valid. For npm the string is
+// ("v1.3.2", "1.3.2.0" and "1.3.2" are the same, so are "1.3.1.1" and "1.3.1-custom.1"), "latest", "stable" or "1.3.2-beta" are not valid. For npm the string is
 // compared as written, like before.
 function selfUpdateValid(source, value) { return (source !== 'github') || (parseVersion(value) != null); }
 function selfUpdateIsCurrent(source, current, value) { return (source === 'github') ? (compareVersions(current, value) === 0) : (current === value); }
+
+// The server child process announces an update to an exact version with the console line "Starting self upgrade to: <version>".
+// The parent process reads that line and decides here whether to act on it. Returns null when the text is not a version the
+// source accepts (the line is ignored), otherwise { upgrade } where upgrade says whether it is newer than the installed version.
+// npm: the previous check, unchanged (digits, dots and hyphens; the part before the first hyphen compared in up to 4 parts).
+// github: the strict release version (no "v", no other characters, so nothing reaches a shell), compared with compareVersions.
+function selfUpgradeRequest(source, requested, current) {
+    if (typeof requested !== 'string') { return null; }
+    if (source === 'npm') {
+        if (!/^[0-9\.\-]+$/i.test(requested)) { return null; }
+        let isUpgrade = false;
+        try {
+            if (current) {
+                const sVer = requested.split('-')[0].split('.');
+                const cVer = current.split('-')[0].split('.');
+                for (let i = 0; i <= 3; i++) {
+                    const sVal = parseInt(sVer[i] || 0);
+                    const cVal = parseInt(cVer[i] || 0);
+                    if (sVal > cVal) { isUpgrade = true; break; }
+                    else if (sVal < cVal) { break; }
+                }
+            }
+        } catch (ex) { }
+        return { upgrade: isUpgrade };
+    }
+    const wanted = parseVersion(requested);
+    if ((wanted == null) || (wanted.text !== requested)) { return null; }
+    const installed = parseVersion(current);
+    return { upgrade: (installed != null) && (compareVersions(wanted, installed) > 0) };
+}
 
 // settings: { source: 'github' | 'npm' | null, repository, error } from the (lower case) server arguments
 function resolveSettings(args) {
@@ -295,7 +337,8 @@ function createServerUpdater(options) {
                 // The package must be the version the release announces, or the server would update again and again
                 let inner;
                 try { inner = await readTgzPackageJson(temp); } catch (ex) { throw new Error('Unable to read package.json from ' + release.asset.name + ': ' + ex.message); }
-                if (compareVersions(inner && inner.version, release) !== 0) { throw new Error('The package ' + release.asset.name + ' holds version ' + String(inner && inner.version).substring(0, 40) + ', not ' + release.version + '.'); }
+                // The text must match exactly: 1.3.1-custom.1 and 1.3.1.1 are one version in ordering but different packages
+                if ((inner == null) || (inner.version !== release.version)) { throw new Error('The package ' + release.asset.name + ' holds version ' + String(inner && inner.version).substring(0, 40) + ', not ' + release.version + '.'); }
                 if (inner.name !== 'meshcentral') { throw new Error('The package ' + release.asset.name + ' is named ' + String(inner.name).substring(0, 40) + ', not meshcentral.'); }
                 await fs.promises.chmod(temp, 0o600);
                 await fs.promises.rename(temp, target);
@@ -310,7 +353,7 @@ function createServerUpdater(options) {
             let names;
             try { names = await fs.promises.readdir(folder); } catch (ex) { return; }
             for (const name of names) {
-                if ((/^meshcentral-[0-9.]+\.tgz$/.test(name) && (name !== keepAssetName)) || /^\.[0-9a-f]{32}\.tmp$/.test(name)) { await fs.promises.unlink(path.join(folder, name)).catch(function () { }); }
+                if ((/^meshcentral-[0-9][0-9.]*(-custom\.[0-9]+)?\.tgz$/.test(name) && (name !== keepAssetName)) || /^\.[0-9a-f]{32}\.tmp$/.test(name)) { await fs.promises.unlink(path.join(folder, name)).catch(function () { }); }
             }
         },
 
@@ -341,5 +384,5 @@ function createServerUpdater(options) {
 
 module.exports = {
     DEFAULT_REPOSITORY, FOLDER_NAME, MAX_ASSET_BYTES, parseVersion, compareVersions, validRepository, assetNameFor, parseDigest,
-    selectReleases, resolveSettings, updateNeeded, selfUpdateValid, selfUpdateIsCurrent, npmCommandLine, buildLocalInstall, shellQuote, readTgzPackageJson, createServerUpdater, FAILURE_RETRY_MS
+    selectReleases, resolveSettings, updateNeeded, selfUpdateValid, selfUpdateIsCurrent, selfUpgradeRequest, npmCommandLine, buildLocalInstall, shellQuote, readTgzPackageJson, createServerUpdater, FAILURE_RETRY_MS
 };
