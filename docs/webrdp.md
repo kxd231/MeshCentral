@@ -12,6 +12,8 @@ now means **Classic bitmaps** within the JavaScript engine. Update any custom
 templates or theme overrides that loaded `mstsc/*` or checked `webrdpengine`
 to match the current templates.
 
+The MeshAgent remote desktop (KVM) changes of this fork are described in [kvm.md](kvm.md).
+
 ## Requirements and access
 
 - Node.js 20 or newer, as required by MeshCentral. Use a supported Node release
