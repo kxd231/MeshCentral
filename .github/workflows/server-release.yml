@@ -1,19 +1,26 @@
 name: Server release package
 
-# Builds meshcentral-<version>.tgz (translated and minified pages, npm pack) from the release tag with
-# tools/release/build-server-tgz.sh and attaches it to the release. Servers of this fork install only releases
-# that carry this file (see docs/fork-updates.md). Runs when a release is published, or by hand for an existing tag.
+# Builds meshcentral-<version>.tgz (translated and minified pages, npm pack) from a release tag with
+# tools/release/build-server-tgz.sh and puts it into a DRAFT release of that tag. The owner compares the hashes with
+# a local build of the same tag and publishes the draft; published releases are immutable, so the package cannot be
+# replaced afterwards (docs/fork-updates.md, "Making a release"). Runs when a version tag is pushed, or by hand for an
+# existing tag whose release is not published yet.
 on:
-  release:
-    types: [ published ]
+  push:
+    tags:
+      - '[0-9]+.[0-9]+.[0-9]+-custom.[0-9]+'
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Existing release tag, for example 1.3.1-custom.1'
+        description: 'Existing version tag without a published release, for example 1.3.1-custom.3'
         required: true
 
 permissions:
-  contents: write # upload the package to the release
+  contents: write # create the draft release and upload the package
+
+concurrency:
+  group: server-release-${{ github.event_name == 'push' && github.ref_name || inputs.tag }}
+  cancel-in-progress: false
 
 jobs:
   package:
@@ -22,28 +29,43 @@ jobs:
       - name: Release tag
         id: tag
         env:
-          TAG: ${{ github.event_name == 'release' && github.event.release.tag_name || inputs.tag }}
+          TAG: ${{ github.event_name == 'push' && github.ref_name || inputs.tag }}
         run: |
-          case "$TAG" in (*[!0-9A-Za-z.-]*|'') echo "Invalid tag: $TAG" >&2; exit 1 ;; esac
+          # The version scheme of the fork: <upstream base>-custom.<n>, numbers without leading zeros
+          if ! printf '%s\n' "$TAG" | grep -Eqx '(0|[1-9][0-9]{0,5})\.(0|[1-9][0-9]{0,5})\.(0|[1-9][0-9]{0,5})-custom\.[1-9][0-9]{0,5}'; then
+            echo "Not a release tag of this fork: $TAG" >&2; exit 1
+          fi
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
 
-      - name: Checkout
-        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - name: Checkout the tag
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           ref: refs/tags/${{ steps.tag.outputs.tag }}
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Build the package
-        run: tools/release/build-server-tgz.sh --check-agents "${{ steps.tag.outputs.version }}" "refs/tags/${{ steps.tag.outputs.tag }}" out
+        run: tools/release/build-server-tgz.sh --check-agents "${{ steps.tag.outputs.tag }}" "refs/tags/${{ steps.tag.outputs.tag }}" out
 
-      - name: Attach to the release
+      - name: Draft release with the package
         env:
           GH_TOKEN: ${{ github.token }}
-          FILE: meshcentral-${{ steps.tag.outputs.version }}.tgz
+          TAG: ${{ steps.tag.outputs.tag }}
+          FILE: meshcentral-${{ steps.tag.outputs.tag }}.tgz
         run: |
-          gh release upload "${{ steps.tag.outputs.tag }}" "out/$FILE" --clobber -R "$GITHUB_REPOSITORY"
-          echo "## $FILE" >> "$GITHUB_STEP_SUMMARY"
-          echo "- commit: $(git rev-parse HEAD)" >> "$GITHUB_STEP_SUMMARY"
-          echo "- size: $(stat -c %s "out/$FILE")" >> "$GITHUB_STEP_SUMMARY"
-          echo "- sha256: $(sha256sum "out/$FILE" | cut -d' ' -f1)" >> "$GITHUB_STEP_SUMMARY"
+          state=$(gh release view "$TAG" -R "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft 2>/dev/null || echo none)
+          if [ "$state" = false ]; then
+            echo "Release $TAG is already published; its package cannot be replaced." >&2; exit 1
+          elif [ "$state" = true ]; then
+            gh release upload "$TAG" "out/$FILE" --clobber -R "$GITHUB_REPOSITORY"
+          else
+            gh release create "$TAG" "out/$FILE" --draft --verify-tag --title "$TAG" \
+              --notes "Draft made by the release workflow. Compare the package with a local build of the tag, write the notes and publish." -R "$GITHUB_REPOSITORY"
+          fi
+          {
+            echo "## $FILE (draft release $TAG)"
+            echo "- commit: $(git rev-parse HEAD)"
+            echo "- size: $(stat -c %s "out/$FILE")"
+            echo "- sha256: $(sha256sum "out/$FILE" | cut -d' ' -f1)"
+            echo "- sha384: $(sha384sum "out/$FILE" | cut -d' ' -f1)"
+          } >> "$GITHUB_STEP_SUMMARY"

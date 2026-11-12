@@ -5,6 +5,9 @@ on:
     inputs:
       run_id:
         required: true
+permissions:
+  actions: write # rerun the failed jobs of a run
+
 jobs:
   rerun:
     runs-on: ubuntu-latest
@@ -14,6 +17,8 @@ jobs:
           GH_REPO: ${{ github.repository }}
           GH_TOKEN: ${{ github.token }}
           GH_DEBUG: api
+          RUN_ID: ${{ inputs.run_id }}
         run: |
-          gh run watch ${{ inputs.run_id }} > /dev/null 2>&1
-          gh run rerun ${{ inputs.run_id }} --failed
+          case "$RUN_ID" in (''|*[!0-9]*) echo "run_id must be a number" >&2; exit 1 ;; esac
+          gh run watch "$RUN_ID" > /dev/null 2>&1
+          gh run rerun "$RUN_ID" --failed

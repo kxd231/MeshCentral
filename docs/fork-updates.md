@@ -207,11 +207,35 @@ How to bump:
 
 ## Making a release (owner)
 
-Normally the package is built by GitHub Actions: publishing a release (tag = version, on the commit whose
-`package.json` has that version) starts `.github/workflows/server-release.yml`, which runs the release helper
-below on the tag and attaches `meshcentral-<version>.tgz` to the release; the run summary shows the commit, size
-and sha256. Servers see the release once the file is attached. The same workflow can be started by hand for an
-existing tag. Building locally, as below, is the fallback.
+The package is built by GitHub Actions from a tag, and a published release cannot be changed: the repository
+has immutable releases on, and rulesets forbid force pushes to `custom` and moving or deleting tags.
+
+```sh
+# 1. package.json and npm-shrinkwrap.json hold the release version, <upstream base>-custom.<n>
+#    (see Versioning); that commit is on the custom branch.
+# 2. Tag it and push the tag. This starts .github/workflows/server-release.yml, which builds
+#    meshcentral-<version>.tgz from the tag and puts it into a draft release. The run summary shows
+#    commit, size, sha256 and sha384.
+git tag 1.3.1-custom.3 <commit> && git push origin 1.3.1-custom.3
+# 3. Build the same tag locally. The build is reproducible, so the hashes must be equal:
+tools/release/build-server-tgz.sh --check-agents 1.3.1-custom.3 1.3.1-custom.3 ./release-out
+#    -> checks the version, makes the translated and minified pages, packs, checks that translations are
+#       in and agent binaries are not, runs agents/check-releases.js, prints size, sha256, sha384 and the
+#       serverupdate-pins.json entry.
+gh api repos/kxd231/MeshCentral/releases --jq '.[] | select(.tag_name=="1.3.1-custom.3") | .assets[] | [.name,.size,.digest]'
+# 4. Write the notes and publish the draft. Publishing starts the Docker image builds.
+gh release edit 1.3.1-custom.3 --repo kxd231/MeshCentral --notes-file notes.md --draft=false
+# 5. Give the servers the pins entry from step 3.
+```
+
+If the build in step 2 failed, fix the cause and start the workflow again for the same tag
+(Actions, "Server release package", Run workflow, or `gh workflow run server-release.yml -f tag=<tag>`);
+it replaces the package of a draft, never of a published release. A wrong tag cannot be moved: delete the
+draft and use the next version number.
+
+Use `--prerelease` (in `gh release edit`) for a test release: it appears only as the `prerelease` tag and is
+never offered as `latest`. Publish a newer version instead of changing a published one. The package is about
+70 MB; the server refuses assets above 256 MiB.
 
 The release helper runs everything in Docker (pinned Node image, no Node on the host) from a
 clean `git archive` of a commit or tag. It does not tag, push or publish anything. Like the
@@ -222,32 +246,6 @@ upstream npm package, the tgz carries the generated pages that git does not hold
 when the translation is incomplete) so that
 `views/translations/`, `emails/translations/` and the `-min` pages and scripts are in the
 package. A server updated from it keeps its translated UI and `minify` option.
-
-```sh
-# 1. package.json "version" is the release version, <upstream base>-custom.<n>
-#    (see Versioning); commit it in the repository you publish.
-# 2. Build the package from that commit (the output file must not exist yet):
-tools/release/build-server-tgz.sh --check-agents 1.3.1-custom.1 HEAD ./release-out
-#    -> checks package.json version == 1.3.1-custom.1, makes the translated and minified pages, packs,
-#       checks that translations are in and agent binaries are not, optionally runs
-#       agents/check-releases.js (--check-agents, needs network), prints the sha256.
-# 3. Create the release and upload the asset yourself (the asset name must stay
-#    meshcentral-<version>.tgz, the tag is the version, optionally with a leading v).
-#    --target must be a commit that exists in kxd231/MeshCentral:
-gh release create 1.3.1-custom.1 release-out/meshcentral-1.3.1-custom.1.tgz --repo kxd231/MeshCentral \
-   --target <commit> --title 1.3.1-custom.1 --notes-file notes.md
-# 4. Check that GitHub shows the same digest for the asset (this is what servers verify):
-gh api repos/kxd231/MeshCentral/releases/tags/1.3.1-custom.1 --jq '.assets[] | [.name,.digest]'
-```
-
-Use `--prerelease` for a test release: it appears only as the `prerelease` tag and is
-never offered as `latest`. Do not delete a published asset that servers may be
-installing; publish a newer version instead. The package is about 70 MB; the server
-refuses assets above 256 MiB.
-
-The repository still contains upstream's `.github/workflows/release.yml`, which runs an npm
-release action when `package.json` changes on `master`. It may create a tag or release without
-an asset. Disable that workflow in the published repository, or create your release first.
 
 The releases `1.3.1` and `1.3.1.1` have no asset and are ignored by servers. The first
 release accepted by the new mechanism is `1.3.1-custom.1` (newer than `1.3.1`), or the asset can
