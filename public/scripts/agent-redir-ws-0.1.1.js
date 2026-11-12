@@ -165,7 +165,7 @@ var CreateAgentRedirect = function (meshserver, module, serverPublicNamePort, au
                 try { obj.socket.send(obj.protocol); } catch (ex) { }
                 obj.xxStateChange(3);
 
-                if (obj.attemptWebRTC == true) {
+                if ((obj.attemptWebRTC == true) && (obj.serverIsRecording == false)) { // WebRTC traffic bypasses the server and can't be recorded
                     // Try to get WebRTC setup
                     var configuration = obj.webrtcconfig; //{ "iceServers": [ { 'urls': 'stun:stun.cloudflare.com:3478' }, { 'urls': 'stun:stun.l.google.com:19302' } ] };
                     if (typeof RTCPeerConnection !== 'undefined') { obj.webrtc = new RTCPeerConnection(configuration); }

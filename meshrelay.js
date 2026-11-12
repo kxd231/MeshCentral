@@ -682,6 +682,12 @@ function CreateMeshRelayEx(parent, ws, req, domain, user, cookie) {
 
         if (this.peer != null) {
             //if (typeof data == 'string') { console.log('Relay: ' + data); } else { console.log('Relay:' + data.length + ' byte(s)'); }
+            // If this session is recorded, drop WebRTC offers. WebRTC traffic bypasses the server and would leave the recording empty.
+            if ((this.logfile != null) && (data.length < 65536) && ((typeof data == 'string') ? (data[0] == '{') : (data[0] == 123))) {
+                var ctrlMsg = null;
+                try { ctrlMsg = JSON.parse(data.toString()); } catch (ex) { }
+                if ((ctrlMsg != null) && (ctrlMsg.type == 'offer') && (typeof ctrlMsg.sdp == 'string')) return;
+            }
             if (this.peer.slowRelay == null) {
                 try {
                     this._socket.pause();
