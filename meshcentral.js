@@ -4540,7 +4540,7 @@ function mainStart() {
         if (passport != null) { passport = passport.filter((value, index, self) => self.indexOf(value) === index); modules.push(...passport); }
         if (captcha == true) { modules.push('svg-captcha@1.4.0'); }
 
-        if (sessionRecording == true) { modules.push('image-size@2.0.2'); } // Need to get the remote desktop JPEG sizes to index the recording file.
+        if (sessionRecording == true) { modules.push('image-size@2.0.3'); } // Need to get the remote desktop JPEG sizes to index the recording file.
         if (config.letsencrypt != null) { modules.push('acme-client@4.2.5'); } // Add acme-client module. We need to force v4.2.4 or higher since olver versions using SHA-1 which is no longer supported by Let's Encrypt.
         if (config.settings.mqtt != null) { modules.push('aedes@0.51.3'); } // Add MQTT Modules
         if (config.settings.mysql != null) { modules.push('mysql2@3.15.1'); } // Add MySQL.
@@ -4582,7 +4582,7 @@ function mainStart() {
         }
 
         // Desktop multiplexor support
-        if (config.settings.desktopmultiplex === true) { modules.push('image-size@2.0.2'); }
+        if (config.settings.desktopmultiplex === true) { modules.push('image-size@2.0.3'); }
 
         // SMS support
         if (config.sms != null) {
