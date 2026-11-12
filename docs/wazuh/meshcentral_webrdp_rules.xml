@@ -1,0 +1,100 @@
+<!--
+  MeshCentral Web-RDP: Wazuh rules that lower the "RDP logon from loopback" alerts only for sessions the
+  MeshCentral server started. Description, deployment and threat model: docs/webrdp.md, "SIEM / Wazuh".
+  SPDX-License-Identifier: Apache-2.0
+
+  Written for and tested with the Wazuh 4.12 ruleset:
+    92656 (level 15)  Security 4624, logon type 10, source address 127.0.0.1 or ::1
+    92109 (level 15)  Sysmon event 3, port 3389, source and destination on loopback
+  Copy this file to /var/ossec/etc/rules/ on the Wazuh manager and restart the manager.
+
+  BEFORE USE, edit the <location> of rule 100500: it must name the Wazuh agent on the MeshCentral host
+  and the audit file exactly. Only events from that agent and that file count as a session start.
+    agent "meshcentral", file /opt/meshcentral/meshcentral-data/webrdp-audit.json (the form below)
+    MeshCentral on the Wazuh manager itself:  ^/opt/meshcentral/meshcentral-data/webrdp-audit\.json$
+
+  Rule ids 100500 - 100509. A logon that does not pair keeps the original rule and its level.
+-->
+<group name="meshcentral,webrdp,">
+
+  <!-- The MeshCentral server is about to start a Web-RDP session (one line of settings.webRdp.auditLog). -->
+  <rule id="100500" level="3">
+    <decoded_as>json</decoded_as>
+    <location type="pcre2">^\(meshcentral\) [^>]*->/opt/meshcentral/meshcentral-data/webrdp-audit\.json$</location>
+    <field name="meshcentral.action">^webrdp-start$</field>
+    <field name="meshcentral.tag" type="pcre2">^MC[A-Z2-7]{12}$</field>
+    <description>MeshCentral: user $(meshcentral.user) starts a Web-RDP session to $(meshcentral.device) as $(meshcentral.rdpuser), session tag $(meshcentral.tag)</description>
+    <group>audit,</group>
+  </rule>
+
+  <!--
+    RDP logon from loopback whose workstation name is a session tag that rule 100500 reported in the
+    last 20 seconds for the same computer (the line comes auditLogDelayMs, at most 10 s, before the logon).
+    Windows 10 21H2 was seen writing its own computer name here instead (rules 100502 and 100503 below);
+    this rule covers versions that write the RDP client name. global_frequency: the two events come from different agents.
+    same_field compares fields of the same name: the audit line repeats the tag and the computer name as
+    win.eventdata.workstationName and win.system.computer.
+  -->
+  <rule id="100501" level="5" timeframe="20">
+    <if_sid>92656</if_sid>
+    <field name="win.eventdata.workstationName" type="pcre2">^MC[A-Z2-7]{12}$</field>
+    <if_matched_sid>100500</if_matched_sid>
+    <global_frequency />
+    <same_field>win.eventdata.workstationName</same_field>
+    <same_field>win.system.computer</same_field>
+    <description>MeshCentral Web-RDP session: RDP logon of $(win.eventdata.targetDomainName)\$(win.eventdata.targetUserName) from loopback, started by the MeshCentral server (session tag $(win.eventdata.workstationName), see rule 100500 for the MeshCentral user)</description>
+    <mitre>
+      <id>T1021.001</id>
+    </mitre>
+    <group>authentication_success,</group>
+  </rule>
+
+  <!--
+    Windows that records its own computer name in the logon type 10 event (seen on Windows 10 Enterprise
+    LTSC 21H2, build 19044: type 3 had the tag, type 10 the computer name 0.6 s later; a reconnect to a
+    disconnected session is type 7 with the computer name): the tag is then only in the network logon
+    (type 3) of Network Level Authentication, which comes first. The MeshCentral client authenticates
+    with NTLM only, so that logon always carries the workstation name. 100502 pairs it with the server
+    like 100501; 100503 lowers the type 10 logon of the same account on the same computer that follows
+    within 5 seconds. Needs NLA (settings.webRdp.requireNla).
+  -->
+  <rule id="100502" level="3" timeframe="20">
+    <if_sid>60106</if_sid>
+    <field name="win.eventdata.logonType">^3$</field>
+    <field name="win.eventdata.workstationName" type="pcre2">^MC[A-Z2-7]{12}$</field>
+    <if_matched_sid>100500</if_matched_sid>
+    <global_frequency />
+    <same_field>win.eventdata.workstationName</same_field>
+    <same_field>win.system.computer</same_field>
+    <description>MeshCentral Web-RDP session: network logon (NLA) of $(win.eventdata.targetDomainName)\$(win.eventdata.targetUserName), started by the MeshCentral server (session tag $(win.eventdata.workstationName))</description>
+    <group>authentication_success,</group>
+  </rule>
+
+  <rule id="100503" level="5" timeframe="5">
+    <if_sid>92656</if_sid>
+    <if_matched_sid>100502</if_matched_sid>
+    <same_field>win.system.computer</same_field>
+    <same_field>win.eventdata.targetUserName</same_field>
+    <description>MeshCentral Web-RDP session: RDP logon of $(win.eventdata.targetDomainName)\$(win.eventdata.targetUserName) from loopback, right after its network logon with a session tag of the MeshCentral server (rule 100502)</description>
+    <mitre>
+      <id>T1021.001</id>
+    </mitre>
+    <group>authentication_success,</group>
+  </rule>
+
+  <!--
+    Optional, Sysmon: the loopback connection to port 3389 is opened by the MeshAgent service binary in
+    its protected folder (change the path if the agent was installed under another company or service
+    name). This says which process opened the tunnel, not who logged on: the logon is judged by the rules above.
+  -->
+  <rule id="100505" level="5">
+    <if_sid>92109</if_sid>
+    <field name="win.eventdata.image" type="pcre2">(?i)^C:\\\\Program Files\\\\Mesh Agent\\\\MeshAgent\.exe$</field>
+    <options>no_full_log</options>
+    <description>MeshCentral agent connected to the RDP port on loopback (Web-RDP or RDP port forwarding through MeshCentral)</description>
+    <mitre>
+      <id>T1021.001</id>
+    </mitre>
+  </rule>
+
+</group>

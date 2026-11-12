@@ -157,6 +157,9 @@ are examples, not the defaults. Requiring NLA refuses a TLS-only xrdp setup.
 | `maxSessionsPerUser` | `8` | Simultaneous sessions of one user, integer 1–1000, clamped to `maxSessions`. |
 | `maxEngineMemoryMb` | Half of total host memory (or of the process/cgroup limit when lower), minimum 128 MiB | Total admission budget for live engines, integer 128–1048576 MiB. Uses the smaller of host RAM and the process/cgroup memory limit when Node reports one. Each new engine reserves 128 MiB, replaced by its larger measured usage. This budget does not include all MeshCentral/browser memory and is not an OS memory limit. |
 | `requireNla` | `false` | `true` requires CredSSP and refuses TLS-only negotiation before sending credentials. `false` permits TLS unless sticky NLA already requires CredSSP for the target. |
+| `sessionTag` | `false` | `true` sends a one-time session tag as the RDP client name instead of `MeshCentral`; see [SIEM / Wazuh](#siem--wazuh). Only the boolean `true` enables it. |
+| `auditLog` | Unset | Path of a file that gets one JSON line per session before the agent is told to connect; a relative path is inside `meshcentral-data`. See [SIEM / Wazuh](#siem--wazuh). |
+| `auditLogDelayMs` | `3000` with `auditLog` | Time between the audit line and the start of the RDP connection, integer 0–10000 ms. The agent tunnel is opened meanwhile. |
 | `isolation` | `"process"` | One Node child process per session. `"thread"` uses a worker thread in the MeshCentral process; see security limitations below. |
 | `engine` | Ignored | Obsolete compatibility key. All values are ignored. `"legacy"` logs one warning at startup; remove it. |
 
@@ -288,6 +291,189 @@ A blank image after a graphics failure can be retried with Classic bitmaps.
 If resize is unavailable, verify Display Control support and the Browser Size
 option; the browser may scale a fixed-size desktop instead. H.264 performance
 in a software-only browser can differ greatly from a hardware-decoded session.
+
+## SIEM / Wazuh
+
+A Web-RDP session through an agent reaches the RDP service of the workstation
+at `127.0.0.1:3389`. To a SIEM this is a reverse tunnel, and it is one. The Wazuh
+ruleset raises level 15 alerts for it:
+
+| Rule | Source | Condition |
+|---|---|---|
+| 92656 | Security 4624 | logon type 10, source address `127.0.0.1` or `::1` |
+| 92109 | Sysmon event 3 | port 3389, source and destination on loopback |
+
+Silencing these rules, or excepting the fixed client name `MeshCentral`, would
+hide every other tunnel as well: anyone can type that name into an RDP client.
+The session tag lets the SIEM lower the alert only for a logon that the
+MeshCentral server provably started.
+
+### How it works
+
+1. A user opens Web-RDP. The server draws a tag for this one session: `MC` and 12
+   random base32 characters (60 random bits), for example `MC7K2Q5XF4TAB3`.
+2. Before the agent is told to connect, the server appends one JSON line to the
+   audit file: tag, device, computer name, MeshCentral user, RDP account, time.
+   A log shipper on the MeshCentral host forwards the line to the SIEM.
+3. The server waits `auditLogDelayMs` (the agent tunnel is opened meanwhile) and
+   starts the RDP connection. The tag is the RDP client name and the NTLM
+   workstation name. Windows writes it into a logon event as the workstation name:
+   on Windows 10 into the network logon (type 3) of Network Level Authentication,
+   not into the RDP logon (type 10) that follows it.
+4. The SIEM lowers the alert only when the logon carries a tag that the
+   MeshCentral host reported in the last 20 seconds for the same computer, or
+   follows within 5 seconds a network logon of the same account that carries one.
+
+The tag is never sent to the browser and is not in the MeshCentral event log.
+Events are shown to every user who may see the device, and a tag can be paired
+while its window is open. With these settings the "Started Web-RDP session"
+event names the computer and the RDP account.
+
+### MeshCentral
+
+```json
+{
+  "settings": {
+    "webRdp": {
+      "sessionTag": true,
+      "auditLog": "webrdp-audit.json",
+      "auditLogDelayMs": 3000,
+      "requireNla": true
+    }
+  }
+}
+```
+
+Without `sessionTag` and `auditLog` nothing changes: the client name is
+`MeshCentral`, no file is written and no time is added. The file is created
+at startup, readable by its owner only. A line that cannot be written is
+reported on the console once and does not stop sessions: their logons stay
+unpaired and keep the level 15 alert. The file grows by about 400 bytes per
+session; rotate it with `copytruncate`.
+
+One line of the file (wrapped here):
+
+```json
+{"timestamp":"2026-11-12T07:30:00.000Z",
+ "meshcentral":{"action":"webrdp-start","tag":"MC7K2Q5XF4TAB3","nodeid":"node//…","device":"pc-01",
+   "hostname":"PC-01","userid":"user//alice","user":"alice","rdpuser":"jan","rdpdomain":"",
+   "target":"self","port":3389,"ip":"10.0.0.7"},
+ "win":{"eventdata":{"workstationName":"MC7K2Q5XF4TAB3"},"system":{"computer":"PC-01"}}}
+```
+
+`hostname` is the computer name the agent reported; it is empty when the session
+goes to another host than the device itself (`target` is then that address). The
+`win` object repeats the tag and the computer name under the field names Wazuh
+gives to Windows events: Wazuh pairs two events only on fields of the same name.
+
+### Wazuh agent on the MeshCentral host
+
+The audit file must reach the manager through the Wazuh agent of the MeshCentral
+host, not through an open syslog port: the rules accept a session start only from
+that agent, whose channel is authenticated. In the agent's `ossec.conf`:
+
+```xml
+<localfile>
+  <log_format>json</log_format>
+  <location>/opt/meshcentral/meshcentral-data/webrdp-audit.json</location>
+</localfile>
+```
+
+With MeshCentral in Docker, use the path of the `meshcentral-data` volume on
+the host. The agent polls files every 2 seconds: from the line to the alert the
+measured time was 0.7–2.5 s, which the default `auditLogDelayMs` of 3000 covers.
+With `logcollector.loop_timeout=1` in the agent's `local_internal_options.conf`
+it was 0.5–1.4 s, and `"auditLogDelayMs": 1800` is enough. A line that arrives after
+the logon event does not pair: the alert stays at level 15 (a false alarm, never
+a blind spot).
+
+### Wazuh rules
+
+Copy [`wazuh/meshcentral_webrdp_rules.xml`](wazuh/meshcentral_webrdp_rules.xml)
+to `/var/ossec/etc/rules/` on the manager, edit the `<location>` of rule 100500
+(agent name of the MeshCentral host and path of the audit file) and restart the manager.
+
+| Rule | Level | Meaning |
+|---|---|---|
+| 100500 | 3 | The MeshCentral server starts a Web-RDP session (who, to which device, as which RDP account, tag). |
+| 100501 | 5 | Child of 92656: the RDP logon carries a tag that 100500 reported within 20 s for the same computer. |
+| 100502 | 3 | The network logon (type 3) of NLA carries such a tag. |
+| 100503 | 5 | Child of 92656: RDP logon of the same account on the same computer within 5 s after 100502. |
+| 100505 | 5 | Child of 92109 (optional): the loopback connection was opened by `C:\Program Files\Mesh Agent\MeshAgent.exe`. |
+
+Rules 100501 and 100503 are two ways to the same result; which one fires depends
+on what Windows writes into the logon type 10 event. If it holds the RDP client
+name, 100501 pairs it directly. If it holds the computer's own name, the tag
+is only in the type 3 logon of NLA, and 100502 with 100503 form a chain. Windows 10
+Enterprise LTSC 21H2 (build 19044) does the latter: in a Web-RDP session the type 3
+logon carried the tag and the type 10 logon of the same account, 0.6 s later, the
+computer name. A reconnect to a disconnected session of the account is logged as
+type 7, also with the computer name; rule 92656 does not cover type 7.
+The tag only reaches Windows through NLA, so set `requireNla`: without it a
+TLS-only logon carries no tag and keeps its level 15 alert. The client always
+authenticates with NTLM, which fills the workstation name (Kerberos would not). The alert of 100501 and 100503 names the Windows
+account; the MeshCentral user is in the 100500 alert with the same tag.
+Change `level="5"` to 7 if these logons should show in the dashboard.
+
+Everything else keeps rule 92656 and level 15: a logon with the name `MeshCentral`
+or any other name, a tag the server never reported, a tag after its window, a tag
+reported for another computer, a session start sent by another agent or from
+another file.
+
+Rule 100505 says which process opened the tunnel, not who logged on. It matters
+only together with the tag rules. If Sysmon also logs the accepting side
+(`svchost.exe`, TermService), exclude that in the Sysmon configuration.
+
+### Check it on one workstation
+
+Open one Web-RDP session with the settings above, then read the logon events
+on the workstation (PowerShell as administrator):
+
+```powershell
+Get-WinEvent -FilterHashtable @{LogName='Security'; Id=4624; StartTime=(Get-Date).AddMinutes(-10)} | ForEach-Object {
+  $x = [xml]$_.ToXml(); $d = @{}; $x.Event.EventData.Data | ForEach-Object { $d[$_.Name] = $_.'#text' }
+  [pscustomobject]@{ Time = $_.TimeCreated.ToString('HH:mm:ss.fff'); Computer = $x.Event.System.Computer; Type = $d.LogonType
+    User = $d.TargetUserName; Workstation = $d.WorkstationName; Ip = $d.IpAddress; Package = $d.AuthenticationPackageName }
+} | Where-Object { $_.Type -in '3', '10' } | Format-Table -AutoSize
+```
+
+- `Workstation` of the type 10 line is the tag: rule 100501 applies. It is the
+  computer's name and the type 3 line has the tag: rules 100502 and 100503 apply.
+- `Computer` must equal `hostname` of the audit line exactly, letter case
+  included. On a domain member Windows writes the full DNS name; if the names
+  differ, remove `<same_field>win.system.computer</same_field>` from rules 100501
+  and 100502 (a tag is then accepted on any computer inside its window).
+- `Time` of the first tagged line must be later than `timestamp` of the audit
+  line by more than the delivery time above.
+
+### How it was checked
+
+The rules were loaded into a Wazuh 4.12.0 manager and fed with sample events
+through the manager's own decoders: MeshCentral sessions with the tag in the type 10
+logon and with the NLA chain, foreign tunnels, an expired tag, another computer's tag,
+another account, a late audit line, forged session starts, Sysmon. The Windows side
+was checked with a Web-RDP session to Windows 10 Enterprise LTSC 21H2 (local account,
+NLA): the order audit line, type 3 logon with the tag (2.4 s later with the default
+`auditLogDelayMs`), type 10 logon with the computer name (0.6 s later). Domain
+accounts and Windows Server were not checked.
+
+### Limits
+
+- A tag can pair more than once inside its 20 s window. Someone who reads it
+  during that time (Security log of the workstation, `query session`, the audit
+  file) and has a tunnel and an account on the same computer gets one lowered
+  alert. Wazuh rules cannot use up a match. The window is short, the audit file
+  is private and the tag is bound to the computer.
+- Rule 100503 lowers any loopback RDP logon of the same account on the same
+  computer within 5 s after a MeshCentral NLA logon.
+- A user of MeshCentral with desktop rights can open sessions; their logons are
+  lowered, with their name in the 100500 alert. Device rights and two-factor
+  authentication in MeshCentral guard this.
+- Whoever controls the MeshCentral server controls the workstations anyway.
+- Windows shows the tag as the client name (Task Manager, `query session`)
+  instead of `MeshCentral`.
+- The rules follow the Wazuh 4.12 ruleset. Other versions may use other rule
+  ids or field names.
 
 ## Security notes
 
