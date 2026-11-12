@@ -216,7 +216,9 @@ function shellQuote(word, platform) {
 }
 function buildLocalInstall(npmpath, npmproxy, tarball, platform) {
     const base = (typeof npmpath === 'string' && npmpath.length > 0) ? npmpath : 'npm';
-    return base + ' install --save-exact --no-audit ' + shellQuote(tarball, platform) + ((typeof npmproxy === 'string') ? (' --proxy ' + shellQuote(npmproxy, platform)) : '');
+    // --ignore-scripts: neither the package nor any dependency in its npm-shrinkwrap.json has an install script, so no
+    // lifecycle script of the downloaded tree has to run (and none can).
+    return base + ' install --save-exact --no-audit --ignore-scripts ' + shellQuote(tarball, platform) + ((typeof npmproxy === 'string') ? (' --proxy ' + shellQuote(npmproxy, platform)) : '');
 }
 
 // Version of the package.json inside a .tgz made by npm pack (entry package/package.json), read without extracting.

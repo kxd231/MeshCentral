@@ -43,7 +43,7 @@ account and no GitHub token are needed.
    from the pin aborts the update. It then reads `package/package.json` from the
    archive and refuses it unless the name is `meshcentral` and the version is the
    version of the release. Then it runs
-   `npm install --save-exact --no-audit '<path to the verified .tgz>'` in the folder that
+   `npm install --save-exact --no-audit --ignore-scripts '<path to the verified .tgz>'` in the folder that
    holds `node_modules`. The package inside is still named `meshcentral`, so
    `node_modules/meshcentral` keeps its path. After npm returns, the installed
    `node_modules/meshcentral/package.json` must show the same version, or the update is
@@ -109,8 +109,8 @@ Read this before relying on automatic updates.
   server that follows it.** With pins, a changed or new release is refused until an administrator pins it,
   so the pin is only as good as the check made before writing it. That means collaborators with write access, a leaked token with
   `contents:write`, and a compromised owner account. The package is installed by `npm`
-  as the user the MeshCentral service runs as (often root), and lifecycle scripts of the
-  package and its dependencies run. A server with `selfUpdate: true` takes a new release
+  as the user the MeshCentral service runs as (often root) with `--ignore-scripts`, so no
+  lifecycle script of the package or its dependencies runs, but its code runs when the server starts. A server with `selfUpdate: true` takes a new release
   within a day.
 - A TLS-intercepting proxy (a company root certificate in the system or
   `NODE_EXTRA_CA_CERTS` store) or a wrongly issued certificate can replace both the API
@@ -145,7 +145,7 @@ that GitHub access alone is not enough to ship code.
 
 `runOnServerUpdated` and `cleanNpmCacheOnUpdate` work as before.
 
-The install command quotes the package path and the proxy for the shell. On Linux and macOS a
+The install command quotes the package path and the proxy for the shell. Nothing from the GitHub API reaches it as text: the release tag must match the version pattern (digits, dots, `-custom.`, an optional leading `v`), the asset name must be exactly `meshcentral-<version>.tgz` built from that version, and the command only holds the local path `<data folder>/serverupdates/meshcentral-<version>.tgz`. On Linux and macOS a
 single quote or control character in the data folder path is refused; on Windows a
 double quote, `%`, `!` or `^` is refused (non-ASCII characters and spaces are fine). A refused
 path aborts the update with a log line and counts as a failure.
@@ -259,7 +259,7 @@ Put the file where later updates expect it first, because npm records the path:
 mkdir -p meshcentral-data/serverupdates
 cp meshcentral-1.3.1-custom.1.tgz meshcentral-data/serverupdates/
 cd <folder that holds node_modules>
-npm install --save-exact --no-audit ./meshcentral-data/serverupdates/meshcentral-1.3.1-custom.1.tgz
+npm install --save-exact --no-audit --ignore-scripts ./meshcentral-data/serverupdates/meshcentral-1.3.1-custom.1.tgz
 ```
 
 Restart the MeshCentral process or service afterwards.
