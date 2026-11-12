@@ -92,6 +92,20 @@ module.exports.CreateMeshRelay = function (parent, ws, req, domain, user, cookie
     }
 }
 
+// True when the agent would take this relayed message as a WebRTC offer. The agent parses control messages with
+// JSON.parse, which skips leading JSON whitespace and has no size limit, and starts WebRTC for any object whose type is
+// "offer". The check must be at least as broad, or a modified client could still open WebRTC in a recorded session.
+function isWebRtcOffer(data) {
+    if ((typeof data != 'string') && !Buffer.isBuffer(data)) return false;
+    var i = 0, len = data.length;
+    if (typeof data == 'string') { while ((i < len) && ((data[i] == ' ') || (data[i] == '\t') || (data[i] == '\n') || (data[i] == '\r'))) { i++; } if ((i >= len) || (data[i] != '{')) return false; }
+    else { while ((i < len) && ((data[i] == 32) || (data[i] == 9) || (data[i] == 10) || (data[i] == 13))) { i++; } if ((i >= len) || (data[i] != 123)) return false; }
+    var msg = null;
+    try { msg = JSON.parse(data.toString()); } catch (ex) { return false; }
+    return (msg != null) && (typeof msg == 'object') && (msg.type === 'offer');
+}
+module.exports.isWebRtcOffer = isWebRtcOffer;
+
 // Record a new entry in a recording log
 function recordingEntry (logfile, type, flags, data, func, tag) {
     try {
@@ -683,11 +697,7 @@ function CreateMeshRelayEx(parent, ws, req, domain, user, cookie) {
         if (this.peer != null) {
             //if (typeof data == 'string') { console.log('Relay: ' + data); } else { console.log('Relay:' + data.length + ' byte(s)'); }
             // If this session is recorded, drop WebRTC offers. WebRTC traffic bypasses the server and would leave the recording empty.
-            if ((this.logfile != null) && (data.length < 65536) && ((typeof data == 'string') ? (data[0] == '{') : (data[0] == 123))) {
-                var ctrlMsg = null;
-                try { ctrlMsg = JSON.parse(data.toString()); } catch (ex) { }
-                if ((ctrlMsg != null) && (ctrlMsg.type == 'offer') && (typeof ctrlMsg.sdp == 'string')) return;
-            }
+            if ((this.logfile != null) && isWebRtcOffer(data)) { parent.parent.debug('relay', 'Relay: dropped a WebRTC offer in a recorded session'); return; }
             if (this.peer.slowRelay == null) {
                 try {
                     this._socket.pause();
