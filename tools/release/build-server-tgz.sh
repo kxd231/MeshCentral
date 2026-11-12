@@ -106,7 +106,7 @@ fi
 
 echo "Checking package contents ..."
 tar -tzf "$WORK/out/$FILE" > "$WORK/list.txt"
-for required in package/package.json package/meshcentral.js package/serverupdates.js package/httpsdownloads.js package/agents/agent-defaults.json \
+for required in package/package.json package/meshcentral.js package/serverupdates.js package/httpsdownloads.js package/agents/agent-defaults.json package/npm-shrinkwrap.json package/meshcentral-config-schema.json \
         package/views/default.handlebars package/views/default-min.handlebars package/views/translations/default_pl.handlebars \
         package/emails/translations/account-invite_pl.html package/public/scripts/meshcentral-min.js; do
     grep -qx "$required" "$WORK/list.txt" || { echo "Missing $required in the package." >&2; exit 1; }

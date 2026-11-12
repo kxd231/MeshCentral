@@ -115,9 +115,13 @@ Read this before relying on automatic updates.
 - A TLS-intercepting proxy (a company root certificate in the system or
   `NODE_EXTRA_CA_CERTS` store) or a wrongly issued certificate can replace both the API
   answer (with its digest) and the file. The digest gives no protection against that; the local pin does.
-- Dependencies are not part of the package. `npm install` resolves them from the npm
-  registry within the ranges in `package.json`, so the exact dependency versions can
-  differ between servers and over time.
+- Dependencies are not part of the package, but the package carries `npm-shrinkwrap.json`
+  (the lockfile of the repository, with the exact version and integrity hash of every
+  dependency). `npm install` downloads exactly that tree from the npm registry, so the
+  dependencies of a pinned package are pinned too. Modules that the server installs at
+  startup for optional features (database drivers, SMTP, syslog ...) are not part of it.
+  A dependency fix arrives with a new release; until then an `overrides` entry in the
+  `package.json` of the folder that holds `node_modules` still applies.
 
 What to do: turn on two-factor authentication for every account with access to the
 repository, keep the number of collaborators and the scope of tokens (fine-grained,
@@ -128,8 +132,7 @@ off on servers where an unreviewed update is not acceptable, and update them by 
 
 Possible future work, not implemented: a detached signature asset
 (`meshcentral-<version>.tgz.sig`) checked against a public key built into the server, so
-that GitHub access alone is not enough to ship code; an `npm-shrinkwrap.json` in the package
-to pin the dependency tree.
+that GitHub access alone is not enough to ship code.
 
 ## Settings (`settings` section of config.json)
 
@@ -199,7 +202,7 @@ How to bump:
 
 - Next release on the same upstream base: increase `n` (`1.3.1-custom.1` to `1.3.1-custom.2`).
 - After merging a newer upstream release: `<new base>-custom.1` (for example `1.3.5-custom.1`).
-- Set `version` in `package.json` and `package-lock.json` (the first two `"version"` lines), commit,
+- Set `version` in `package.json` and `npm-shrinkwrap.json` (the first two `"version"` lines), commit,
   then build with `tools/release/build-server-tgz.sh <version>`, which checks that
   `package.json` at that commit has this version.
 

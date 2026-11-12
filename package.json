@@ -38,7 +38,8 @@
     "license.txt",
     "sample-config.json",
     "sample-config-advanced.json",
-    "meshcentral-config-schema.json"
+    "meshcentral-config-schema.json",
+    "npm-shrinkwrap.json"
   ],
   "dependencies": {
     "@seald-io/nedb": "4.1.2",
