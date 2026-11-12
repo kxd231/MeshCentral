@@ -52,7 +52,7 @@
     "ipcheck": "0.1.0",
     "minimist": "1.2.8",
     "multiparty": "4.3.0",
-    "node-forge": "1.4.0",
+    "node-forge": "1.4.3",
     "otplib": "13.4.1",
     "ua-client-hints-js": "0.1.2",
     "ua-parser-js": "1.0.40",
