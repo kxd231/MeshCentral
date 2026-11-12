@@ -549,6 +549,22 @@
               "maximum": 1048576,
               "description": "Total admission budget in MiB for live Web-RDP engines. A new session reserves 128 MiB per engine or its larger measured size; exceeding the budget refuses admission. Default: half of total host memory (or of the process/cgroup memory limit when lower and reported by Node), with a minimum of 128 MiB. This does not replace container memory limits or the fixed per-engine limits."
             },
+            "sessionTag": {
+              "type": "boolean",
+              "default": false,
+              "description": "Send a one-time session tag (MC and 12 random base32 characters, 60 random bits) as the RDP client name instead of the fixed name MeshCentral. Windows records the tag as the workstation name of the logon; together with auditLog a SIEM can prove that a logon was started by this server (docs/webrdp.md, SIEM / Wazuh). Only the boolean true enables it. The tag is never sent to the browser."
+            },
+            "auditLog": {
+              "type": "string",
+              "description": "Path of a file that receives one JSON line for every Web-RDP session, written before the agent is told to connect: session tag, device, computer name, MeshCentral user, RDP account and time. A relative path is inside meshcentral-data. The file is created readable by its owner only; a log shipper (for example a Wazuh agent with log_format json) forwards it to the SIEM. Unset: no file."
+            },
+            "auditLogDelayMs": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 10000,
+              "default": 3000,
+              "description": "With auditLog: milliseconds between the audit line and the start of the RDP connection, so the SIEM has the line before the logon event of the target. The agent tunnel is opened during this time. The default covers a log shipper that polls files every 2 seconds (Wazuh logcollector, measured 0.7 to 2.5 seconds from the line to the alert); 0 disables the wait."
+            },
             "requireNla": {
               "type": "boolean",
               "default": false,

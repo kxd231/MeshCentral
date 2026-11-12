@@ -2208,6 +2208,13 @@ function saveMstscCredentials(parent, domain, obj, d, u, p) {
 // Web-RDP with the JavaScript engine: no loopback TCP port, the engine runs
 // in its own process or worker thread (rdp/IPC.md), browser messages follow rdp/WIRE.md.
 const trustLateRegistered = new WeakSet();
+const sessionTagLib = require('./rdp/session-tag.js');
+var webRdpAuditLogWarned = false;
+// settings.webRdp.auditLog: an absolute path, or a path inside meshcentral-data
+function webRdpAuditLogPath(parent, settings) {
+    const path = require('path');
+    return path.isAbsolute(settings.auditLog) ? settings.auditLog : path.join(parent.parent.datapath, settings.auditLog);
+}
 function CreateMstscRelayJs(parent, db, ws, req, args, domain, settings) {
     const obj = { ws: ws, close: function () { ws.close(); } };
     const debugOn = (parent.parent.debugSources != null) && ((parent.parent.debugSources == '*') || (parent.parent.debugSources.indexOf('relay') >= 0));
@@ -2252,10 +2259,42 @@ function CreateMstscRelayJs(parent, db, ws, req, args, domain, settings) {
                         }
                         ctx.trust = trust;
                         obj.trustGen = trust.gen; // the generation of this device's entry the session starts in: a reset in between stops it from recording
+                        // settings.webRdp.sessionTag: a one-time RDP client name of this session, never sent to the browser (rdp/session-tag.js)
+                        if (settings.sessionTag === true) { obj.sessionTag = sessionTagLib.create(); ctx.clientName = obj.sessionTag; }
+                        // What the audit records of this session say about its target: the computer name only when the session goes to the device itself
+                        const self = obj.trustKey.startsWith('self/');
+                        obj.audit = {
+                            device: node.name, hostname: (self && (typeof node.rname == 'string')) ? node.rname : '',
+                            rdpUser: (typeof creds.username == 'string') ? creds.username : '', rdpDomain: (typeof creds.domain == 'string') ? creds.domain : '',
+                            target: self ? 'self' : obj.trustKey.slice(5, obj.trustKey.lastIndexOf('/')), port: Number(obj.tcpport)
+                        };
                         func(ctx);
                     });
                 });
             } catch (ex) { obj.close(); }
+        },
+        // settings.webRdp.auditLog: one JSON line per session, in the file before the agent is told to connect. The SIEM pairs it with
+        // the logon on the target (docs/webrdp.md "SIEM / Wazuh"). A line that cannot be written does not stop the session: the
+        // logon then stays unpaired and keeps its alert.
+        onStart: (settings.auditLog == null) ? null : function (done) {
+            const user = parent.users[obj.userid];
+            const a = obj.audit || {};
+            let line = null;
+            try {
+                line = sessionTagLib.auditRecord({
+                    time: Date.now(), tag: obj.sessionTag, nodeid: obj.nodeid, device: a.device, hostname: a.hostname, userid: obj.userid, user: (user != null) ? user.name : '',
+                    rdpUser: a.rdpUser, rdpDomain: a.rdpDomain, target: a.target, port: a.port, ip: req.clientIp
+                });
+            } catch (ex) { }
+            if (line == null) { done(0); return; }
+            sessionTagLib.appendAuditLine(webRdpAuditLogPath(parent, settings), line, function (err) {
+                if (err != null) {
+                    if (!webRdpAuditLogWarned) { webRdpAuditLogWarned = true; console.log('WARNING: Web-RDP: cannot write settings.webRdp.auditLog (' + (err.code || 'error') + '); sessions continue without audit lines'); }
+                    done(0); return;
+                }
+                webRdpAuditLogWarned = false;
+                done(settings.auditLogDelayMs);
+            });
         },
         onTrust: function (info, done) {
             const where = trustLib.describeKey(obj.trustKey);
@@ -2286,6 +2325,9 @@ function CreateMstscRelayJs(parent, db, ws, req, args, domain, settings) {
                 const user = parent.users[obj.userid];
                 const username = (user != null) ? user.name : null;
                 const event = { etype: 'relay', action: 'relaylog', domain: domain.id, nodeid: obj.nodeid, userid: obj.userid, username: username, sessionid: obj.sessionid, msgid: 150, msgArgs: [obj.sessionid], msg: "Started Web-RDP session \"" + obj.sessionid + "\".", protocol: PROTOCOL_WEBRDP };
+                // With the SIEM settings the event also names the computer and the RDP account. The tag itself is only in the audit file: an
+                // event reaches the browsers of every user who may see this device, while the tag can still be paired
+                if (((settings.sessionTag === true) || (settings.auditLog != null)) && (obj.audit != null)) { event.hostname = obj.audit.hostname; event.rdpuser = obj.audit.rdpUser; }
                 parent.parent.DispatchEvent(['*', obj.nodeid, obj.userid, obj.meshid], obj, event);
             } catch (ex) { console.log(ex); }
         },
@@ -2315,6 +2357,14 @@ module.exports.CheckWebRdpIsolation = function (parent) {
     const configured = parent.args.webrdp;
     if (configured && typeof configured.engine === 'string' && configured.engine.toLowerCase() === 'legacy') {
         console.warn('Web-RDP: settings.webRdp.engine="legacy" is obsolete and ignored; using the JavaScript engine. Remove the engine setting.');
+    }
+    // The audit file exists from the start (a log shipper can open it) and a path that cannot be written is reported once, here
+    if (settings.auditLog != null) {
+        const file = webRdpAuditLogPath({ parent: parent }, settings);
+        try { const fs = require('fs'); fs.closeSync(fs.openSync(file, 'a', 0o600)); }
+        catch (ex) { webRdpAuditLogWarned = true; console.log('WARNING: Web-RDP: cannot write settings.webRdp.auditLog "' + file + '" (' + (ex.code || 'error') + '); sessions continue without audit lines'); }
+    } else if (settings.sessionTag === true) {
+        console.log('WARNING: Web-RDP: settings.webRdp.sessionTag is on without settings.webRdp.auditLog: session tags are sent to the targets but recorded nowhere');
     }
     const report = require('./rdp/client.js').isolationReport(settings);
     if (report.warning != null) { console.log('WARNING: ' + report.warning); }

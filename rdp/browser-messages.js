@@ -9,6 +9,7 @@
 const LIMITS = require('./core/limits.js');
 const errors = require('./protocol/errors.js');
 const constants = require('../public/rdp/shared/constants.js');
+const sessionTag = require('./session-tag.js');
 
 const E = errors.names;
 const RdpError = errors.RdpError;
@@ -115,7 +116,8 @@ function validateInfos(o) {
 
 // start.config (rdp/IPC.md) from validated infos and the user's rights. Startup options only with full control.
 // security: settings.security ('nla' with settings.webRdp.requireNla, otherwise 'auto').
-function buildConfig(infos, level, serverName, debug, security) {
+// clientName: the session tag of settings.webRdp.sessionTag (rdp/session-tag.js), chosen by the server; anything else gives 'MeshCentral'.
+function buildConfig(infos, level, serverName, debug, security, clientName) {
     const o = infos.options;
     const gfxCapsets = [];
     if (o.gfx !== 'legacy') {
@@ -133,7 +135,7 @@ function buildConfig(infos, level, serverName, debug, security) {
         // RemoteFX through legacy Surface Commands: only in legacy mode, 32 bpp, when the browser reports the decoder (the caller applies the dev switch)
         surfaceCodecs: ((o.gfx === 'legacy') && (o.bpp === 32) && (o.browser.rfx === true)) ? ['rfx'] : [],
         perfFlags: o.flags, connectionType: 'lan', keyboardLayout: localeToKeyboardLayout(infos.locale),
-        clientName: 'MeshCentral', serverName: ((typeof serverName == 'string') && /^[A-Za-z0-9.-]{1,255}$/.test(serverName)) ? serverName : '',
+        clientName: sessionTag.isTag(clientName) ? clientName : 'MeshCentral', serverName: ((typeof serverName == 'string') && /^[A-Za-z0-9.-]{1,255}$/.test(serverName)) ? serverName : '',
         security: (security === 'nla') ? 'nla' : 'auto',
         alternateShell: full ? o.alternateShell : '', workingDir: full ? o.workingDir : '',
         debug: (debug === true)

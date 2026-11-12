@@ -100,7 +100,11 @@ const server = {
 
     // Main → engine acknowledgement queue (browser ack / gfx-ack), coalesced and bounded
     ACK_QUEUE_MAX_ENTRIES: 2 * (1024 + 1),      // gfx-acks for GFX_MAX_UNACKED_FRAMES frames, interleaved with coalesced acks
-    IPC_BACKLOG_MAX_MESSAGES: 64                // process mode: posted messages not yet written to the pipe before acks wait
+    IPC_BACKLOG_MAX_MESSAGES: 64,               // process mode: posted messages not yet written to the pipe before acks wait
+
+    // SIEM audit file (settings.webRdp.auditLog, rdp/session-tag.js)
+    AUDIT_LOG_DELAY_DEFAULT_MS: 3000,           // settings.webRdp.auditLogDelayMs: Wazuh logcollector (files polled every 2 s) delivers a line in 0.7 - 2.5 s
+    AUDIT_LOG_DELAY_MAX_MS: 10000
 };
 
 // Defaults merged with the shared limits. Shared names must not be redefined here.
@@ -109,7 +113,7 @@ const limits = Object.freeze(Object.assign({}, shared, server));
 
 // Settings that may be changed in config.json (settings.webRdp). Everything else is fixed.
 // MeshCentral lowercases config keys; only lowercase keys are read here.
-// Returns { maxSessions, maxSessionsPerUser, isolation, security, gfx, maxEngineMemoryMb }.
+// Returns { maxSessions, maxSessionsPerUser, isolation, security, gfx, h264, maxEngineMemoryMb, sessionTag, auditLog, auditLogDelayMs }.
 // The obsolete engine setting is ignored; apprelays.CheckWebRdpIsolation warns at startup for "legacy".
 // security: start.config.security (rdp/IPC.md): 'nla' when requireNla is true, otherwise 'auto'.
 // gfx (settings.webRdp.gfx): 'on' (default) lets the browser use GFX and H.264, with an automatic legacy fallback in the browser;
@@ -123,6 +127,9 @@ function resolveGfx(value) {
     return 'off';
 }
 
+// sessionTag (settings.webRdp.sessionTag): only the boolean true replaces the RDP client name 'MeshCentral' by a one-time tag per session.
+// auditLog (settings.webRdp.auditLog): path of the audit file (a relative path is resolved by the caller), null when unset.
+// auditLogDelayMs (settings.webRdp.auditLogDelayMs): with auditLog, the time between the audit line and the start of the RDP connection.
 // Engine memory budget (MiB) admitting sessions: settings.webRdp.maxEngineMemoryMb (config key maxenginememorymb) when valid,
 // otherwise half of the memory this process may use: process.constrainedMemory() when the OS limits it (Docker / cgroup, > 0),
 // else os.totalmem() (never below ENGINE_ADMISSION_BYTES, so one session is always possible).
@@ -140,7 +147,7 @@ function defaultEngineMemoryMb(mem) {
 }
 
 function resolveSettings(webRdp) {
-    const out = { maxSessions: limits.MAX_SESSIONS_DEFAULT, maxSessionsPerUser: limits.MAX_SESSIONS_PER_USER_DEFAULT, isolation: 'process', security: 'auto', gfx: 'on', h264: true, maxEngineMemoryMb: defaultEngineMemoryMb() };
+    const out = { maxSessions: limits.MAX_SESSIONS_DEFAULT, maxSessionsPerUser: limits.MAX_SESSIONS_PER_USER_DEFAULT, isolation: 'process', security: 'auto', gfx: 'on', h264: true, maxEngineMemoryMb: defaultEngineMemoryMb(), sessionTag: false, auditLog: null, auditLogDelayMs: 0 };
     const valid = (webRdp != null) && (typeof webRdp == 'object');
     if (valid) {
         const m = webRdp.maxsessions;
@@ -153,6 +160,13 @@ function resolveSettings(webRdp) {
         if (webRdp.h264 === false) { out.h264 = false; }      // only the boolean false switches H.264 (AVC420 / AVC444) off; every other value keeps the default
         const mem = webRdp.maxenginememorymb;
         if ((typeof mem == 'number') && Number.isInteger(mem) && (mem >= (limits.ENGINE_ADMISSION_BYTES / MiB)) && (mem <= (1024 * 1024))) { out.maxEngineMemoryMb = mem; }
+        if (webRdp.sessiontag === true) { out.sessionTag = true; }
+        const file = webRdp.auditlog;
+        if ((typeof file == 'string') && (file.length > 0) && (file.length <= 1024) && (file.indexOf('\u0000') < 0)) {
+            out.auditLog = file;
+            const d = webRdp.auditlogdelayms;
+            out.auditLogDelayMs = ((typeof d == 'number') && Number.isInteger(d) && (d >= 0) && (d <= limits.AUDIT_LOG_DELAY_MAX_MS)) ? d : limits.AUDIT_LOG_DELAY_DEFAULT_MS;
+        }
         const v = webRdp.gfx;
         if (!warnedInvalidGfx && (v != null) && (v !== false) && (out.gfx === 'off') && !((typeof v === 'string') && (v.toLowerCase() === 'off'))) {
             warnedInvalidGfx = true;

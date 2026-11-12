@@ -139,7 +139,8 @@ is fatal.
   colorDepth: 15 | 16 | 24 | 32, // legacy
   perfFlags, connectionType: 'lan',
   keyboardLayout,                // KLID from the locale (localeToKeyboardLayout)
-  clientName,                    // ≤ 15 chars, 'MeshCentral'
+  clientName,                    // ≤ 15 chars: 'MeshCentral', or the one-time session tag of settings.webRdp.sessionTag
+                                 //   (rdp/session-tag.js: 'MC' + 12 base32 chars), sent as the GCC client name and the NTLM workstation
   serverName,                    // target host name or '', for logs and the CredSSP SPN (TERMSRV/<host>)
   security: 'auto' | 'nla',      // 'nla': only CredSSP (PROTOCOL_HYBRID / HYBRID_EX) is requested and accepted; a
                                  //   server selecting TLS only ends with RDP_ERROR_SECURITY_NEGOTIATION before any

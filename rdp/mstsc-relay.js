@@ -39,13 +39,17 @@ function setMaxPayload(ws, n) {
 //   log(msg)                   server console (errors an administrator must see)
 //   authorize(infos, credentials, func(ctx | null))
 //                              apprelays: rights, relay cookie, server stored credentials (written into
-//                              credentials). ctx: { user, rights, relayUrl, serverName, trust }; null → not authorized.
+//                              credentials). ctx: { user, rights, relayUrl, serverName, trust, clientName }; null → not authorized.
+//                              clientName (optional): the session tag sent as the RDP client name instead of 'MeshCentral' (rdp/session-tag.js)
 //                              trust: { fingerprint256 | null, nlaSeen } of this device and port (rdp/trust.js, start.config.trust);
 //                              { error: RdpError } instead of a context when it cannot be loaded (the session is refused with that error)
 //   onTrust(info, done(conflict))   apprelays: the session connected (info.tls.fingerprint256, info.nla): pin on first use, remember NLA.
 //                              done(true): another session pinned a different certificate meanwhile, the session is ended
 //   onCertChanged(cert)        apprelays: the engine refused the session because of a changed certificate ({ expected, actual }), for the
 //                              administrator's accept action and the audit log
+//   onStart(done(waitMs))      optional, apprelays: the session is admitted and nothing has been sent towards the target yet (audit line
+//                              for a SIEM). The agent relay is opened after done(); the engine, and with it the RDP logon, starts no
+//                              earlier than waitMs after done()
 //   onConnect(saved)           apprelays: credential saving ({ domain, username, password } or null) and relaylog 150
 //   onEnd(bytesIn, bytesOut)   apprelays: relaylog 125 (only after onConnect)
 //   onClosed()                 apprelays: the relay object is gone
@@ -59,7 +63,7 @@ function create(o) {
     const L = Object.assign({}, LIMITS.limits, o.limits || testHooks.limits || {});
     const obj = { closed: false };
     let session = null, relay = null, releaseSlot = null, relayTimer = null, connected = false, ended = false;
-    let infosTimer = null, pingTimer = null, lastPong = Date.now(), lastPingAt = Date.now();
+    let infosTimer = null, pingTimer = null, lastPong = Date.now(), lastPingAt = Date.now(), startTimer = null;
 
     const proto = new bm.BrowserProtocol({
         infos: onInfos,
@@ -137,12 +141,38 @@ function create(o) {
                 if (v.infos.options.gfx === 'h264') { v.infos.options.gfx = 'gfx'; }
                 v.infos.options.browser.h264.ok = false; v.infos.options.browser.avc444.ok = false;
             }
-            const config = bm.buildConfig(v.infos, level, ctx.serverName, o.debug != null, o.settings.security);
+            const config = bm.buildConfig(v.infos, level, ctx.serverName, o.debug != null, o.settings.security, ctx.clientName);
             if (ctx.trust != null) { config.trust = { fingerprint256: ctx.trust.fingerprint256, nlaSeen: ctx.trust.nlaSeen === true }; }
             config.displayControl = o.displayControl !== false;
             config.displayControlEvenHeight = o.displayControlEvenHeight === true;
-            openRelay(ctx.relayUrl, function () { startSession(v.infos, credentials, config); });
+            beforeRelay(function (notBefore) {
+                openRelay(ctx.relayUrl, function () {
+                    // The agent is connected to the target, which has received nothing yet: the logon starts with the engine
+                    const wait = notBefore - Date.now();
+                    if (wait <= 0) { startSession(v.infos, credentials, config); return; }
+                    startTimer = setTimeout(function () {
+                        startTimer = null;
+                        // its close listeners were removed when the agent connected: a relay that went away during the wait is reported now
+                        if (relay.readyState !== 1) { close(new RdpError(E.RDP_ERROR_RELAY_FAILED, { phase: errors.PHASE.RELAY })); return; }
+                        startSession(v.infos, credentials, config);
+                    }, wait);
+                    startTimer.unref();
+                });
+            });
         });
+    }
+
+    // o.onStart (once per session): func(notBefore) with the time the engine may start at
+    function beforeRelay(func) {
+        if (typeof o.onStart != 'function') { func(0); return; }
+        let answered = false;
+        const done = function (waitMs) {
+            if (answered) { return; }
+            answered = true;
+            if (obj.closed) { return; }
+            func(((typeof waitMs == 'number') && (waitMs > 0)) ? (Date.now() + Math.min(waitMs, L.CONNECT_TIMEOUT_MS)) : 0);
+        };
+        try { o.onStart(done); } catch (ex) { done(0); }
     }
 
     function openRelay(url, func) {
@@ -237,6 +267,7 @@ function create(o) {
         proto.close();
         clearTimeout(infosTimer); clearInterval(pingTimer);
         if (relayTimer != null) { clearTimeout(relayTimer); relayTimer = null; }
+        if (startTimer != null) { clearTimeout(startTimer); startTimer = null; }
         if ((err != null) && !browserGone && (session == null)) { sendJson(['rdp-error', errors.toRdpError(err).toWire()]); }
         let bytesIn = 0, bytesOut = 0;
         try { bytesIn = ws._socket.bytesRead; bytesOut = ws._socket.bytesWritten; if (relay != null) { bytesIn += relay._socket.bytesRead; bytesOut += relay._socket.bytesWritten; } } catch (ex) { }
