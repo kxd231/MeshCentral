@@ -33,11 +33,14 @@ account and no GitHub token are needed.
    `serverupdate <version>` from the console or the web UI still refuses a downgrade, as
    before; only a version named in the configuration (`selfUpdate: "1.3.2"`) is installed
    even if it is older, because the administrator asked for exactly that.
-4. **Install.** The parent process downloads the asset to
-   `meshcentral-data/serverupdates/` with a size limit equal to the asset size from the
-   API and an overall time limit of 15 minutes, and compares its SHA-256 with the
-   `digest` field that GitHub reports for the asset (`sha256:<hex>`). A missing or
-   different digest aborts the update. It then reads `package/package.json` from the
+4. **Install.** The version must have a local pin in `meshcentral-data/serverupdate-pins.json`
+   (see [Local pins](#local-pins)); without one nothing is downloaded and the update stops with a
+   log line that names the file. The parent process downloads the asset to
+   `meshcentral-data/serverupdates/` with a size limit equal to the pinned size (which must equal
+   the asset size from the API) and an overall time limit of 15 minutes, compares its size and
+   SHA-384 with the pin and its SHA-256 with the `digest` field that GitHub reports for the asset
+   (`sha256:<hex>`). A missing pin, a missing or different digest, or a size or SHA-384 that differs
+   from the pin aborts the update. It then reads `package/package.json` from the
    archive and refuses it unless the name is `meshcentral` and the version is the
    version of the release. Then it runs
    `npm install --save-exact --no-audit '<path to the verified .tgz>'` in the folder that
@@ -45,7 +48,7 @@ account and no GitHub token are needed.
    `node_modules/meshcentral` keeps its path. After npm returns, the installed
    `node_modules/meshcentral/package.json` must show the same version, or the update is
    counted as failed.
-5. **Failures do not loop.** When an update fails (download, digest, wrong package, npm
+5. **Failures do not loop.** When an update fails (download, pin, digest, wrong package, npm
    error), nothing is installed, the server restarts on the current version and a marker
    `meshcentral-data/serverupdates/last-failure.json` (version, time, reason) is written.
    The automatic update (`selfUpdate`) does not try the same version again for 24 hours;
@@ -66,21 +69,52 @@ environment variables; `NO_PROXY` is ignored.
 Self-update only works when MeshCentral is installed as `node_modules/meshcentral` and is
 not a Windows service or a Docker image; otherwise update the installation by hand.
 
+## Local pins
+
+The server installs only a package whose size and SHA-384 the administrator wrote down on the server
+beforehand, in `meshcentral-data/serverupdate-pins.json` (the same idea as the size and SHA-384 pins of
+the agent files in `agents/agent-defaults.json`). The digest that GitHub reports comes from the same
+release as the file, so it cannot be the only check.
+
+```json
+{
+  "schemaVersion": 1,
+  "releases": [
+    { "version": "1.3.1-custom.2", "size": 69029801, "sha384": "<96 lower case hex characters>" }
+  ]
+}
+```
+
+- `version` is written like in the asset name, without `v`. `size` is in bytes. Several versions may be listed.
+- Take the values from a package you checked yourself, not from the release page alone: the output of
+  `tools/release/build-server-tgz.sh` (the build is reproducible, so a local build of the tag gives the same
+  file), or a download you verified another way, then `stat -c %s` and `sha384sum` of that file.
+- The file is read for every update, no restart is needed. A missing file means no version is pinned. A
+  file that is not valid (bad JSON, a hash that is not 96 lower case hex characters, a version listed twice)
+  stops every update with a log line.
+- `selfUpdate` skips a version without a pin with one log line and keeps the server running; it does not
+  restart for it. The Update button and `serverupdate` restart the server, which then logs
+  `Update failed, nothing was installed: ...` and starts again on the current version.
+- Pins apply to the `github` source. The `npm` source installs `meshcentral` from the npm registry
+  without a local pin (the previous upstream behavior).
+
 ## Trust model
 
 Read this before relying on automatic updates.
 
 - The SHA-256 digest comes from the same GitHub account as the file. It protects against a
   damaged or truncated download and a faulty CDN. It does **not** prove who built the package.
-- **Whoever can create or change releases in the repository runs code on every server that
-  follows it.** That means collaborators with write access, a leaked token with
+  The local pin is what ties an update to a package the administrator checked.
+- **Without a local pin, whoever can create or change releases in the repository would run code on every
+  server that follows it.** With pins, a changed or new release is refused until an administrator pins it,
+  so the pin is only as good as the check made before writing it. That means collaborators with write access, a leaked token with
   `contents:write`, and a compromised owner account. The package is installed by `npm`
   as the user the MeshCentral service runs as (often root), and lifecycle scripts of the
   package and its dependencies run. A server with `selfUpdate: true` takes a new release
   within a day.
 - A TLS-intercepting proxy (a company root certificate in the system or
   `NODE_EXTRA_CA_CERTS` store) or a wrongly issued certificate can replace both the API
-  answer (with its digest) and the file. The digest gives no protection against that.
+  answer (with its digest) and the file. The digest gives no protection against that; the local pin does.
 - Dependencies are not part of the package. `npm install` resolves them from the npm
   registry within the ranges in `package.json`, so the exact dependency versions can
   differ between servers and over time.

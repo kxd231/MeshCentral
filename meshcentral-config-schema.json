@@ -741,7 +741,7 @@
             "npm"
           ],
           "default": "github",
-          "description": "Where the server looks for new versions and installs them from (the Update button, the version check and selfUpdate). \"github\" uses the releases of serverUpdateRepository: a release is usable when it has an asset named meshcentral-<version>.tgz, the asset is verified against the sha256 digest published by GitHub before npm installs it. \"npm\" is the previous behavior and uses the meshcentral package of the npm registry. The value is not case sensitive. Any other value is logged and disables all server updates (checks, selfUpdate and the Update button); it never falls back to npm. A failed automatic update to a version is not retried for 24 hours."
+          "description": "Where the server looks for new versions and installs them from (the Update button, the version check and selfUpdate). \"github\" uses the releases of serverUpdateRepository: a release is usable when it has an asset named meshcentral-<version>.tgz, the asset is installed only when its size and SHA-384 match a pin in meshcentral-data/serverupdate-pins.json written by the administrator, and its SHA-256 matches the digest published by GitHub (see docs/fork-updates.md). \"npm\" is the previous behavior and uses the meshcentral package of the npm registry. The value is not case sensitive. Any other value is logged and disables all server updates (checks, selfUpdate and the Update button); it never falls back to npm. A failed automatic update to a version is not retried for 24 hours."
         },
         "serverUpdateRepository": {
           "type": "string",

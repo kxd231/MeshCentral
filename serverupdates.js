@@ -2,8 +2,10 @@
 
 // Server self-update from GitHub releases of the fork (settings.serverUpdateSource = "github", the default),
 // next to the original npm based update ("npm"). A release is usable when it carries an asset named exactly
-// meshcentral-<version>.tgz. The asset is downloaded in the parent process, checked against the sha256 digest
-// that the GitHub API reports for it and then handed to "npm install" as a local file.
+// meshcentral-<version>.tgz. The asset is downloaded in the parent process, checked against the size and SHA-384
+// that the administrator wrote into meshcentral-data/serverupdate-pins.json and against the sha256 digest that
+// the GitHub API reports for it, and then handed to "npm install" as a local file. A version without a local pin
+// is never installed: the digest from the release alone would trust whoever can publish the release.
 
 const fs = require('fs');
 const path = require('path');
@@ -17,6 +19,8 @@ const MAX_ASSET_BYTES = 256 * 1024 * 1024; // Hard ceiling on top of the size th
 const FOLDER_NAME = 'serverupdates';
 const FAILURE_FILE = 'last-failure.json';
 const FAILURE_RETRY_MS = 24 * 3600 * 1000; // An automatic update to a version that failed is not retried for this long
+const PINS_FILE = 'serverupdate-pins.json'; // In the data folder, written by the administrator
+const MAX_PINS_BYTES = 1024 * 1024;
 
 // Version scheme of the fork: <upstream base>-custom.<n>, e.g. 1.3.1-custom.1, 1.3.1-custom.2, later 1.3.5-custom.1.
 // Accepted forms, each with an optional leading "v" (tags only):
@@ -62,6 +66,37 @@ function parseDigest(digest) {
     if (typeof digest !== 'string') { return null; }
     const match = /^sha256:([A-Fa-f0-9]{64})$/.exec(digest);
     return (match == null) ? null : match[1].toLowerCase();
+}
+
+// Local pins of server packages, like agents/agent-defaults.json for agents:
+//   { "schemaVersion": 1, "releases": [ { "version": "1.3.1-custom.2", "size": 69029801, "sha384": "<96 lower case hex>" } ] }
+// version is the canonical text (as in the asset name, no "v"). Returns a Map version -> { version, size, sha384 }. A missing
+// file gives an empty map; a file that is not valid throws, so a typo never turns into "no check".
+function readPins(file) {
+    let stat;
+    try { stat = fs.lstatSync(file); } catch (ex) { if (ex.code === 'ENOENT') { return new Map(); } throw new Error('Unable to read ' + file + ': ' + ex.message); }
+    if (!stat.isFile() || (stat.size > MAX_PINS_BYTES)) { throw new Error(file + ' is not a regular file of at most 1 MiB.'); }
+    let data;
+    try { data = JSON.parse(fs.readFileSync(file, 'utf8')); } catch (ex) { throw new Error(file + ' is not valid JSON.'); }
+    if ((data == null) || (data.schemaVersion !== 1) || !Array.isArray(data.releases) || (data.releases.length > 256)) { throw new Error(file + ': expected { "schemaVersion": 1, "releases": [ ... ] }.'); }
+    const pins = new Map();
+    for (const entry of data.releases) {
+        const version = (entry != null) ? parseVersion(entry.version) : null;
+        if ((version == null) || (version.text !== entry.version)) { throw new Error(file + ': "' + String(entry && entry.version).substring(0, 40) + '" is not a release version (write it like the asset name, without "v").'); }
+        if (!Number.isInteger(entry.size) || (entry.size <= 0) || (entry.size > MAX_ASSET_BYTES)) { throw new Error(file + ': invalid size for ' + entry.version + '.'); }
+        if ((typeof entry.sha384 !== 'string') || !/^[a-f0-9]{96}$/.test(entry.sha384)) { throw new Error(file + ': invalid sha384 for ' + entry.version + ', expected 96 lower case hex characters.'); }
+        if (pins.has(entry.version)) { throw new Error(file + ': ' + entry.version + ' is listed twice.'); }
+        pins.set(entry.version, { version: entry.version, size: entry.size, sha384: entry.sha384 });
+    }
+    return pins;
+}
+
+function fileSha384(file) {
+    return new Promise(function (resolve, reject) {
+        const hash = crypto.createHash('sha384');
+        let size = 0;
+        fs.createReadStream(file).on('data', function (chunk) { size += chunk.length; hash.update(chunk); }).on('error', reject).on('end', function () { resolve({ size: size, sha384: hash.digest('hex') }); });
+    });
 }
 
 // Usable releases, newest first. A release is usable when it is published (not a draft), its tag is a version and it
@@ -229,6 +264,7 @@ function createServerUpdater(options) {
     const log = options.log || function (m) { console.log(m); };
     const now = options.now || Date.now;
     const folder = options.folder; // absolute path of the download folder
+    const pinsFile = options.pinsFile; // absolute path of serverupdate-pins.json
     const proxy = (options.args && (typeof options.args.npmproxy === 'string')) ? options.args.npmproxy : undefined;
     const client = options.client || httpsDownloads.createClient(undefined, undefined, proxy, 'MeshCentral-ServerUpdate');
     const loggedErrors = new Map();
@@ -264,10 +300,20 @@ function createServerUpdater(options) {
         return pending;
     }
 
+    // The local pin of an exact version (canonical text). Throws a readable error when there is none or the pins file is broken.
+    function pinFor(version) {
+        if (typeof pinsFile !== 'string') { throw new Error('No server update pins file is configured.'); }
+        const pin = readPins(pinsFile).get(version);
+        if (pin == null) { throw new Error('MeshCentral ' + version + ' has no local pin in ' + pinsFile + '. Add its size and sha384 there to allow this update (see docs/fork-updates.md).'); }
+        return pin;
+    }
+
     return {
         settings: settings,
         folder: folder,
+        pinsFile: pinsFile,
         getSelection: getSelection,
+        pinFor: pinFor,
 
         // cb(currentVersion, latestVersion | null)
         getLatest: function (current, callback) {
@@ -311,7 +357,7 @@ function createServerUpdater(options) {
             return release;
         },
 
-        // Download and verify the release asset. Resolves to { path, assetName, version, tag, sha256, size }.
+        // Download and verify the release asset against the local pin and the GitHub digest. Resolves to { path, assetName, version, tag, sha256, sha384, size }.
         // options.current: the installed version. Without a version ("newest") the release must be newer than it, and with
         // a version it must be newer too unless options.allowDowngrade (the administrator named that exact version).
         prepare: async function (version, options) {
@@ -324,6 +370,8 @@ function createServerUpdater(options) {
                 if (!newest && (order === 0)) { throw new Error('Release ' + release.version + ' is already installed.'); }
                 if (!newest && (order < 0) && !options.allowDowngrade) { throw new Error('Release ' + release.version + ' is older than the installed version ' + options.current + ', a downgrade is not done automatically.'); }
             }
+            const pin = pinFor(release.version);
+            if (pin.size !== release.asset.size) { throw new Error('Release ' + release.tag + ' has ' + release.asset.size + ' bytes in ' + release.asset.name + ', the local pin in ' + pinsFile + ' says ' + pin.size + ' bytes; nothing was downloaded.'); }
             if (release.asset.digest == null) { throw new Error('Release ' + release.tag + ' has no sha256 digest for ' + release.asset.name + ' in the GitHub API; it will not be installed.'); }
             if (typeof folder !== 'string') { throw new Error('No download folder.'); }
             await fs.promises.mkdir(folder, { recursive: true, mode: 0o700 });
@@ -331,9 +379,11 @@ function createServerUpdater(options) {
             const temp = path.join(folder, '.' + crypto.randomBytes(16).toString('hex') + '.tmp');
             const url = 'https://github.com/' + settings.repository + '/releases/download/' + encodeURIComponent(release.tag) + '/' + encodeURIComponent(release.asset.name);
             try {
-                const result = await client.download(url, temp, { limit: release.asset.size, signal: options.signal, sha256: release.asset.digest });
+                const result = await client.download(url, temp, { limit: pin.size, signal: options.signal, sha256: release.asset.digest });
                 if (result.size !== release.asset.size) { throw new Error('The downloaded size does not match the release (' + result.size + ' of ' + release.asset.size + ' bytes).'); }
                 if (result.sha256 !== release.asset.digest) { throw new Error('The downloaded SHA256 does not match the release digest.'); }
+                const local = await fileSha384(temp);
+                if ((local.size !== pin.size) || (local.sha384 !== pin.sha384)) { throw new Error('The downloaded ' + release.asset.name + ' does not match the local pin in ' + pinsFile + ' (' + local.size + ' bytes, sha384 ' + local.sha384 + '; pinned ' + pin.size + ' bytes, sha384 ' + pin.sha384 + ').'); }
                 // The package must be the version the release announces, or the server would update again and again
                 let inner;
                 try { inner = await readTgzPackageJson(temp); } catch (ex) { throw new Error('Unable to read package.json from ' + release.asset.name + ': ' + ex.message); }
@@ -343,7 +393,7 @@ function createServerUpdater(options) {
                 await fs.promises.chmod(temp, 0o600);
                 await fs.promises.rename(temp, target);
             } finally { await fs.promises.unlink(temp).catch(function () { }); }
-            return { path: target, assetName: release.asset.name, version: release.version, tag: release.tag, sha256: release.asset.digest, size: release.asset.size };
+            return { path: target, assetName: release.asset.name, version: release.version, tag: release.tag, sha256: release.asset.digest, sha384: pin.sha384, size: release.asset.size };
         },
 
         // Remove downloaded packages other than the one that is installed now. The installed one must stay: npm records it
@@ -383,6 +433,6 @@ function createServerUpdater(options) {
 }
 
 module.exports = {
-    DEFAULT_REPOSITORY, FOLDER_NAME, MAX_ASSET_BYTES, parseVersion, compareVersions, validRepository, assetNameFor, parseDigest,
+    DEFAULT_REPOSITORY, FOLDER_NAME, PINS_FILE, MAX_ASSET_BYTES, readPins, parseVersion, compareVersions, validRepository, assetNameFor, parseDigest,
     selectReleases, resolveSettings, updateNeeded, selfUpdateValid, selfUpdateIsCurrent, selfUpgradeRequest, npmCommandLine, buildLocalInstall, shellQuote, readTgzPackageJson, createServerUpdater, FAILURE_RETRY_MS
 };

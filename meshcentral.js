@@ -681,7 +681,7 @@ function CreateMeshCentralServer(config, args) {
                     var fileName = null;
                     updater.prepare(target, { current: getCurrentVersion(), allowDowngrade: pinned, signal: AbortSignal.timeout(15 * 60 * 1000) }).then(function (pkg) {
                         fileName = pkg.assetName;
-                        console.log('Installing MeshCentral ' + pkg.version + ' from ' + updater.settings.repository + ' (sha256 ' + pkg.sha256 + ')...');
+                        console.log('Installing MeshCentral ' + pkg.version + ' from ' + updater.settings.repository + ' (' + pkg.size + ' bytes, sha384 ' + pkg.sha384 + ' as pinned in ' + updater.pinsFile + ', sha256 ' + pkg.sha256 + ')...');
                         var finished = false;
                         const finish = function (code) {
                             if (finished) return; finished = true;
@@ -768,7 +768,7 @@ function CreateMeshCentralServer(config, args) {
     var serverUpdater = null;
     obj.getServerUpdater = function () {
         if (serverUpdater == null) {
-            serverUpdater = require('./serverupdates.js').createServerUpdater({ args: obj.args, folder: obj.path.resolve(obj.datapath, 'serverupdates'), log: function (m) { console.log(m); } });
+            serverUpdater = require('./serverupdates.js').createServerUpdater({ args: obj.args, folder: obj.path.resolve(obj.datapath, 'serverupdates'), pinsFile: obj.path.resolve(obj.datapath, require('./serverupdates.js').PINS_FILE), log: function (m) { console.log(m); } });
         }
         return serverUpdater;
     };
@@ -780,10 +780,16 @@ function CreateMeshCentralServer(config, args) {
     };
 
     // True when an automatic update to this version failed recently, so it is not tried again until the retry time has passed
-    // or an administrator starts the update by hand. The server keeps running on the current version meanwhile.
+    // or an administrator starts the update by hand, or when the version has no local pin (it would be refused anyway, so the
+    // server is not restarted for it). The server keeps running on the current version meanwhile.
     var serverUpdateBlockedLogged = null;
     obj.serverUpdateBlocked = function (version) {
         if (obj.getServerUpdater().settings.source !== 'github') { return false; }
+        const parsed = require('./serverupdates.js').parseVersion(String(version));
+        try { obj.getServerUpdater().pinFor((parsed != null) ? parsed.text : String(version)); } catch (ex) {
+            if (serverUpdateBlockedLogged !== version) { serverUpdateBlockedLogged = version; console.log('Automatic update to ' + version + ' skipped: ' + ex.message); }
+            return true;
+        }
         const marker = obj.getServerUpdater().failureBlocks(version);
         if (marker == null) { return false; }
         if (serverUpdateBlockedLogged !== version) { serverUpdateBlockedLogged = version; console.log('Automatic update to ' + version + ' skipped, it failed at ' + new Date(marker.time).toISOString() + ': ' + marker.reason + ' It is retried after ' + new Date(marker.time + require('./serverupdates.js').FAILURE_RETRY_MS).toISOString() + ' or when started by an administrator.'); }

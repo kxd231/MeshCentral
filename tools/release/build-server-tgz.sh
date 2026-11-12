@@ -126,11 +126,17 @@ fi
 
 cp -n "$WORK/out/$FILE" "$OUT_DIR/$FILE"
 SHA=$(sha256sum "$OUT_DIR/$FILE" | cut -d' ' -f1)
+SHA384=$(sha384sum "$OUT_DIR/$FILE" | cut -d' ' -f1)
+SIZE=$(wc -c < "$OUT_DIR/$FILE")
 echo
 echo "File:    $OUT_DIR/$FILE"
 echo "Commit:  $COMMIT"
-echo "Size:    $(wc -c < "$OUT_DIR/$FILE") bytes"
+echo "Size:    $SIZE bytes"
 echo "SHA256:  $SHA"
+echo "SHA384:  $SHA384"
+echo
+echo "Entry for meshcentral-data/serverupdate-pins.json on the servers that may install it (docs/fork-updates.md):"
+echo "  { \"version\": \"$VERSION\", \"size\": $SIZE, \"sha384\": \"$SHA384\" }"
 echo
 echo "Nothing was published."
 if [ "$CHECK_AGENTS" = 0 ]; then echo "Not checked: the default agent release files. Run again with --check-agents, or run agents/check-releases.js, before releasing."; fi
