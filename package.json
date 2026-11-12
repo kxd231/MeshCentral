@@ -37,7 +37,8 @@
     "readme.txt",
     "license.txt",
     "sample-config.json",
-    "sample-config-advanced.json"
+    "sample-config-advanced.json",
+    "meshcentral-config-schema.json"
   ],
   "dependencies": {
     "@seald-io/nedb": "4.1.2",
