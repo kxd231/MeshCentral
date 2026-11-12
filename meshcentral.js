@@ -660,15 +660,10 @@ function CreateMeshCentralServer(config, args) {
                     }
                 }
 
-                if (obj.getServerUpdater().settings.source === 'npm') {
-                    // always use --save-exact - https://stackoverflow.com/a/64507176/1210734
-                    const xxprocess = child_process.exec(serverUpdates.npmCommandLine(npmpath, obj.args.npmproxy, 'install', version), { maxBuffer: Infinity, cwd: obj.parentpath, env: env }, function (error, stdout, stderr) {
-                        if ((error != null) && (error != '')) { console.log('Update failed: ' + error); }
-                    });
-                    xxprocess.data = '';
-                    xxprocess.stdout.on('data', function (data) { xxprocess.data += data; });
-                    xxprocess.stderr.on('data', function (data) { xxprocess.data += data; });
-                    xxprocess.on('close', function (code) { finishUpdate(code); });
+                if (obj.getServerUpdater().settings.source !== 'github') {
+                    // Installing from the npm registry is blocked (performServerUpdate already refuses it); restart on the current version
+                    console.log('ERROR: ' + ((obj.getServerUpdater().settings.source === 'npm') ? serverUpdates.NPM_INSTALL_BLOCKED : 'Server update is disabled.'));
+                    setTimeout(function () { obj.launchChildServer(startArgs); }, 1000);
                 } else {
                     // GitHub release of the fork: download and verify meshcentral-<version>.tgz, then install that file with npm.
                     // The server stays on the current version when anything fails, and the failure is remembered so that the
@@ -867,6 +862,7 @@ function CreateMeshCentralServer(config, args) {
     obj.performServerUpdate = function (version) {
         if (obj.serverSelfWriteAllowed != true) return false;
         if (obj.getServerUpdater().settings.source === null) { console.log('Server update is disabled: ' + obj.getServerUpdater().settings.error); return false; } // Invalid serverUpdateSource or serverUpdateRepository
+        if (obj.getServerUpdater().settings.source === 'npm') { console.log('ERROR: ' + require('./serverupdates.js').NPM_INSTALL_BLOCKED); return false; } // No install without a local pin
         if ((version == null) || (version == '') || (typeof version != 'string')) { console.log('Starting self upgrade...'); } else { console.log('Starting self upgrade to: ' + version); }
         process.exit(200);
         return true;

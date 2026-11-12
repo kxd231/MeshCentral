@@ -21,6 +21,8 @@ const FAILURE_FILE = 'last-failure.json';
 const FAILURE_RETRY_MS = 24 * 3600 * 1000; // An automatic update to a version that failed is not retried for this long
 const PINS_FILE = 'serverupdate-pins.json'; // In the data folder, written by the administrator
 const MAX_PINS_BYTES = 1024 * 1024;
+// The npm source can still report versions, but installing from it is refused: the registry package has no local pin
+const NPM_INSTALL_BLOCKED = 'Server update from serverUpdateSource "npm" is blocked: a package from the npm registry has no local size and SHA-384 pin. Nothing was installed. Use serverUpdateSource "github" (the default) with a pin in meshcentral-data/' + PINS_FILE + ', or update by hand.';
 
 // Version scheme of the fork: <upstream base>-custom.<n>, e.g. 1.3.1-custom.1, 1.3.1-custom.2, later 1.3.5-custom.1.
 // Accepted forms, each with an optional leading "v" (tags only):
@@ -433,6 +435,6 @@ function createServerUpdater(options) {
 }
 
 module.exports = {
-    DEFAULT_REPOSITORY, FOLDER_NAME, PINS_FILE, MAX_ASSET_BYTES, readPins, parseVersion, compareVersions, validRepository, assetNameFor, parseDigest,
+    DEFAULT_REPOSITORY, FOLDER_NAME, PINS_FILE, NPM_INSTALL_BLOCKED, MAX_ASSET_BYTES, readPins, parseVersion, compareVersions, validRepository, assetNameFor, parseDigest,
     selectReleases, resolveSettings, updateNeeded, selfUpdateValid, selfUpdateIsCurrent, selfUpgradeRequest, npmCommandLine, buildLocalInstall, shellQuote, readTgzPackageJson, createServerUpdater, FAILURE_RETRY_MS
 };

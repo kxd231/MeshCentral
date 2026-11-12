@@ -25,7 +25,7 @@ account and no GitHub token are needed.
    prerelease that is newer than `latest` is shown as the tag `prerelease`. `npmTag`
    limits the tags like it does for npm (`latest`, `stable` or `prerelease`).
 3. **The decision is made once.** `selfUpdate: true` only updates to a version that is
-   **newer** than the installed one (the npm source still updates on any difference). The
+   **newer** than the installed one. The
    server process passes the exact version to the parent process (the one that restarts
    the server), and the parent installs exactly that version. `serverupdate` without a
    version installs the newest release only if it is newer than the installed version, so
@@ -95,8 +95,8 @@ release as the file, so it cannot be the only check.
 - `selfUpdate` skips a version without a pin with one log line and keeps the server running; it does not
   restart for it. The Update button and `serverupdate` restart the server, which then logs
   `Update failed, nothing was installed: ...` and starts again on the current version.
-- Pins apply to the `github` source. The `npm` source installs `meshcentral` from the npm registry
-  without a local pin (the previous upstream behavior).
+- Pins apply to the `github` source. Installing from the `npm` source is blocked, because a package
+  from the npm registry has no local pin.
 
 ## Trust model
 
@@ -127,8 +127,7 @@ What to do: turn on two-factor authentication for every account with access to t
 repository, keep the number of collaborators and the scope of tokens (fine-grained,
 no `contents:write` for automation you do not need) minimal, and enable GitHub's
 **immutable releases** for the repository, so that the assets of a published release can
-no longer be replaced or deleted. Use `"serverUpdateSource": "npm"` or turn `selfUpdate`
-off on servers where an unreviewed update is not acceptable, and update them by hand.
+no longer be replaced or deleted. Turn `selfUpdate` off on servers where an unreviewed update is not acceptable, and update them by hand.
 
 Possible future work, not implemented: a detached signature asset
 (`meshcentral-<version>.tgz.sig`) checked against a public key built into the server, so
@@ -138,7 +137,7 @@ that GitHub access alone is not enough to ship code.
 
 | Setting | Default | Meaning |
 | --- | --- | --- |
-| `serverUpdateSource` | `"github"` | `"github"`: releases of `serverUpdateRepository`. `"npm"`: the previous upstream behavior (`npm view meshcentral ...`, `npm install meshcentral@<ver>`), code path unchanged. The value is not case sensitive. Any other value logs an error and disables **all** server updates (checks, `selfUpdate`, the Update button); it never falls back to npm. |
+| `serverUpdateSource` | `"github"` | `"github"`: releases of `serverUpdateRepository`. `"npm"`: versions are read from the npm registry (`npm view meshcentral ...`) as upstream does, but **installing is blocked**: the Update button, `serverupdate` and `selfUpdate` log `Server update from serverUpdateSource "npm" is blocked ...` and the server keeps running on its version. The value is not case sensitive. Any other value logs an error and disables **all** server updates (checks, `selfUpdate`, the Update button); it never falls back to npm. |
 | `serverUpdateRepository` | `"kxd231/MeshCentral"` | `owner/repo` of a public GitHub repository. Strictly validated; an invalid value is logged once and disables the GitHub update checks. |
 | `npmPath`, `npmProxy` | unchanged | `npmPath` is a command line run by the shell, as before (it may hold quotes, `node /path/npm-cli.js`, variables); it is used for both sources. `npmProxy` is also used for the GitHub requests. |
 | `npmTag` | unset | Show only that tag (`latest`, `stable` or `prerelease`). |
@@ -267,12 +266,11 @@ Restart the MeshCentral process or service afterwards.
 
 ## Switching back to npm
 
-Set `"serverUpdateSource": "npm"` in `settings` and **restart the MeshCentral process or
-service**: the parent process that installs updates keeps the settings it started with, and
-the restart inside the web UI restarts only the child. Updates then use the upstream
-`meshcentral` package exactly as before. Installing it replaces the fork's code with upstream's.
-The `file:` entry that earlier GitHub updates left for `meshcentral` in `package.json` is
-overwritten by the first `npm install meshcentral@<version>`.
+The server no longer installs from the npm registry (`"serverUpdateSource": "npm"` only shows
+the versions there). To go back to the upstream package, install it by hand in the folder that
+holds `node_modules` (`npm install --save-exact meshcentral@<version>`) and restart the service.
+This replaces the fork's code with upstream's and overwrites the `file:` entry that GitHub
+updates left for `meshcentral` in `package.json`.
 
 ## Related
 
