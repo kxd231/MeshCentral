@@ -65,11 +65,13 @@ fi
 
 echo "Installing the translate tools from the lockfile - the only step that uses the network ..."
 cp "$REPO_DIR/tools/release/translate-tools/package.json" "$REPO_DIR/tools/release/translate-tools/package-lock.json" "$WORK/tools/"
+# Fixed Math.random() seed for the minifier, so the package is reproducible (tools/release/seeded-random.js)
+cp "$REPO_DIR/tools/release/seeded-random.js" "$WORK/tools/"
 docker run --rm "${DOCKER_USER[@]}" -v "$WORK/tools:/tools" -w /tools "$NODE_IMAGE" npm ci --ignore-scripts >/dev/null
 
 echo "Generating minified and translated pages (translate.js minifyall, translateall) ..."
 for command in minifyall translateall; do
-    docker run --rm --network none "${DOCKER_USER[@]}" -e NODE_PATH=/tools/node_modules -v "$WORK/src:/src" -v "$WORK/tools:/tools:ro" -w /src/translate "$NODE_IMAGE" node translate.js "$command" > "$WORK/translate-$command.log" 2>&1
+    docker run --rm --network none "${DOCKER_USER[@]}" -e NODE_PATH=/tools/node_modules -v "$WORK/src:/src" -v "$WORK/tools:/tools:ro" -w /src/translate "$NODE_IMAGE" node --require /tools/seeded-random.js translate.js "$command" > "$WORK/translate-$command.log" 2>&1
     if grep -Eq 'Unable to|Cannot find module|ERROR|Error:|Failed|Missing' "$WORK/translate-$command.log"; then
         echo "translate.js $command reported a problem:" >&2; grep -E 'Unable to|Cannot find module|ERROR|Error:|Failed|Missing' "$WORK/translate-$command.log" | head -10 >&2; exit 1
     fi
