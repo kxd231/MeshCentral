@@ -30,7 +30,7 @@ jobs:
       
     # Initializes the CodeQL tools for scanning.
     - name: Initialize CodeQL
-      uses: github/codeql-action/init@9418214df1f2c4b8128c770156c409013b07d6b9 # v3.39.3
+      uses: github/codeql-action/init@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
       # JavaScript only: the one C file (tools/avc444-simd, built in containers into an embedded WebAssembly module)
       # has no build here, and automatic detection of C/C++ without a build makes the analysis fail
       with:
