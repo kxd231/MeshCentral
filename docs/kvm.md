@@ -14,7 +14,7 @@ frames immediately; the mobile interface has the same lists.
 
 | Setting | Values | Notes |
 |---|---|---|
-| Frame rate | High (16 ms, about 60 frames/s), Medium (33 ms, about 30 frames/s, default), Low (50 ms, 20 frames/s), Slow (100 ms, 10 frames/s) | The same list for JPEG and H.264. High needs an agent that accepts intervals below 20 ms (the Windows x64 agent of this fork); older agents run at 20 ms instead. The server does not limit the interval. A saved rate that is not in the list (400 or 1000 ms) becomes Slow. Settings saved before this list (Very fast, Fast, Medium 50 ms, Slow) are moved once by name: the old Medium (50 ms) becomes Medium (33 ms), Fast (20 ms) and Very fast (16 ms) become High, Slow stays. The saved setting then carries `frameratever`, so a Low chosen afterwards stays Low. The shared desktop pages use the same list and now start at Medium (33 ms); before, the default was 100 ms (browser page) or 50 ms (mobile page), and a saved 100, 400 or 1000 there becomes Slow. Thumbnails of the multi desktop view keep their own slow rate. |
+| Frame rate | High (16 ms, about 60 frames/s), Medium (33 ms, about 30 frames/s, default), Low (50 ms, 20 frames/s), Slow (100 ms, 10 frames/s), Auto | Auto chooses 60, 30, 20, 15 or 10 frames/s during the session: the Windows x64 agent of this fork does it itself with H.264, otherwise the browser chooses from what it receives; `?kvmauto=0` or `localStorage.kvmAuto = '0'` makes Auto behave as Medium. The same list for JPEG and H.264. High needs an agent that accepts intervals below 20 ms (the Windows x64 agent of this fork); older agents run at 20 ms instead. The server does not limit the interval. A saved rate that is not in the list (400 or 1000 ms) becomes Slow. Settings saved before this list (Very fast, Fast, Medium 50 ms, Slow) are moved once by name: the old Medium (50 ms) becomes Medium (33 ms), Fast (20 ms) and Very fast (16 ms) become High, Slow stays. The saved setting then carries `frameratever`, so a Low chosen afterwards stays Low. The shared desktop pages use the same list and now start at Medium (33 ms); before, the default was 100 ms (browser page) or 50 ms (mobile page), and a saved 100, 400 or 1000 there becomes Slow. Thumbnails of the multi desktop view keep their own slow rate. |
 | Bandwidth limit | No limit (default), 20, 10, 6, 4, 2, 1 Mbit/s | Upper limit for the picture data the agent sends. Supported by the Windows x64 agent of this fork; other agents ignore it. It does not apply to PNG. |
 | Encoding | JPEG (default), PNG (lossless), H.264 (video) | Agents have no WebP encoder and browsers do not decode TIFF, so those choices were removed; a saved WebP or TIFF setting becomes JPEG. H.264 (video) is described [below](#h264-video). It is listed only when the browser can decode H.264 and the server allows it. |
 | Quality, Scaling | as in upstream | |
@@ -33,7 +33,8 @@ Experimental, chosen per user: **Encoding: H.264 (video)** in the desktop settin
 areas of the screen that are moving (video, scrolling, window drags) as H.264 and keeps sending everything else as
 JPEG. When the picture has been still for a moment the agent sends the moving areas once more as JPEG, so text and
 icons are as sharp as in JPEG mode. The aim is a smoother picture at the same or a lower bandwidth, especially on
-slow links; it has not been measured on real machines yet, which is why it is an option and not the default. The
+slow links. It has been tried on a few computers only (AMD and NVIDIA graphics, virtual machines), which is why it is
+an option and not the default. The
 bandwidth limit is meant to apply to it. Nothing changes for users who keep JPEG.
 
 Requirements:
@@ -114,8 +115,8 @@ off by default until it has been measured; choosing H.264 turns it on for that s
 
 ## Windows agent of the fork
 
-The default Windows x64 agent (`MeshService64.exe`) comes from the `dxgi` release of
-[kxd231/MeshAgent](https://github.com/kxd231/MeshAgent/releases/tag/dxgi) (pinned with size and SHA-384 in
+The default Windows x64 agent (`MeshService64.exe`) comes from the `h264-v1` release of
+[kxd231/MeshAgent](https://github.com/kxd231/MeshAgent/releases/tag/h264-v1) (pinned with size and SHA-384 in
 `agents/agent-defaults.json`); all other agent files are the upstream ones. Windows x64 agents connected to the
 server update to it like to any new default agent. Compared with the upstream agent it:
 
@@ -123,7 +124,11 @@ server update to it like to any new default agent. Compared with the upstream ag
   fallback (Windows 7, several monitors in one picture, rotated screens, errors);
 - removes the software cursor that some virtual machines draw into the captured image;
 - encodes tiles with libjpeg-turbo, adapts the JPEG quality to motion and congestion and sharpens still areas;
-- honours the viewer's bandwidth limit and frame intervals down to 10 ms.
+- honours the viewer's bandwidth limit and frame intervals down to 10 ms;
+- sends moving areas as H.264 when the viewer asks for it (Media Foundation), on the graphics card when a self test in
+  a separate process has shown that its encoder works, else in software; an encoder that fails in a session is
+  replaced by the software encoder at once and remembered. Tested on AMD and NVIDIA graphics, not yet on Intel;
+- chooses the frame rate itself when the viewer selects Auto.
 
 Switches in the environment of the agent service (registry
 `HKLM\SYSTEM\CurrentControlSet\Services\<service name>\Environment`, `REG_MULTI_SZ`, `NAME=value` per line,
@@ -134,7 +139,10 @@ then restart the service):
 | `MESH_KVM_FORCE_GDI=1` | Capture with GDI instead of DXGI. |
 | `MESH_KVM_ADAPT=0` | Turn off the adaptive quality, the bandwidth limit and the motion frame limit. |
 | `MESH_KVM_BUDGET_KBPS=<kbit/s>` | Bandwidth limit when the viewer sets none (the viewer's choice wins). |
-| `MESH_KVM_STATS_LOG=1` | Write the diagnostic log `<agent exe name>-kvm.log` next to the agent (at most 1 MB). Off by default. |
+| `MESH_KVM_VIDEO=0` | No H.264 on this computer: the viewer gets JPEG. |
+| `MESH_KVM_VIDEO_HW=0` | Never use the graphics card encoder. The file `<agent exe name>-kvmhw-mode.txt` next to the agent with the word `sw` does the same without a restart (read at every session). |
+| `MESH_KVM_AUTO=0` | The agent does not choose the frame rate for Auto; the browser does. |
+| `MESH_KVM_STATS_LOG=1` | Write the diagnostic log `<agent exe name>-kvm.log` next to the agent (at most about 2 MB, then it rotates). Off by default. |
 
 Technical details and measurements: `meshcore/KVM/Windows/README-kvm-perf.md` in the agent repository.
 
