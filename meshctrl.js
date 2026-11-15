@@ -2701,6 +2701,7 @@ function serverConnect() {
                 break;
             }
             case 'loginTokens': {
+                if (data.result != null) { console.log(data.result); process.exit(); } // The server refuses (a login token session cannot manage login tokens)
                 if (args.json) {
                     console.log(data.loginTokens);
                 } else {

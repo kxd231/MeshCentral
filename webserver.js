@@ -3182,6 +3182,7 @@ module.exports.CreateWebServer = function (parent, db, args, certificates, doneF
                     // Login success
                     parent.debug('web', 'handleRootRequest: user/pass in URL auth ok.');
                     req.session.userid = userid;
+                    setSessionTokenUser(req, loginOptions); // a login token in the address makes a login token session, like the login form
                     delete req.session.currentNode;
                     req.session.ip = req.clientIp; // Bind this session to the IP address of the request
                     setSessionRandom(req);
@@ -11198,12 +11199,15 @@ module.exports.CreateWebServer = function (parent, db, args, certificates, doneF
         }
     }
 
-    // A WebSocket session that was logged in with a login token (control.ashx with x-meshauth or user and pass in the query, or the userAuth command)
-    // keeps the name of the token in the session, so the checks of the server can tell it from a login with a password.
+    // A session that was logged in with a login token (the login form, the address of the home page with user and pass, control.ashx with x-meshauth or user and
+    // pass in the query, or the userAuth command) is marked the way the login form does it (loginToken and expire), so that every check of the server, the ones
+    // of upstream included, treats it as a login token session whatever the way in was. tokenUser and tokenName are for the events.
     function setSessionTokenUser(req, loginOptions) {
         if ((req != null) && (req.session != null) && (loginOptions != null) && (loginOptions.tokenName != null) && (loginOptions.tokenUser != null)) {
             req.session.tokenUser = loginOptions.tokenUser;
             req.session.tokenName = loginOptions.tokenName;
+            req.session.loginToken = loginOptions.tokenUser;
+            if (loginOptions.expire != null) { req.session.expire = loginOptions.expire; }
         }
     }
 

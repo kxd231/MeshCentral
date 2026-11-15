@@ -96,6 +96,11 @@ request is answered with `{ action: 'serverupdate', result: 'error', code, messa
 (also on a WebSocket, e.g. meshctrl) "Sign in with your password, not a login token, to start a server update.",
 and for a domain whose `myServer` settings forbid the upgrade "Server updates are turned off for your account (My Server rights).".
 
+**Login tokens.** A session that was logged in with a login token has the same restrictions whatever way it came in: the login form, the address of the home page
+(`/?user=...&pass=...`), `control.ashx` with `x-meshauth` or `user` and `pass` in the query (meshctrl, scripts), or the `userAuth` command. Such a session cannot change the
+account, the second factor or the login tokens, has no server console and cannot start a server update, and it ends when its token is removed or expires. `meshctrl LoginTokens`
+(also `--add` and `--remove`) is refused for a login token and answers `Access denied`: manage tokens with a password login (with its second factor) or in the web interface.
+
 The `print` command of the control socket (it writes text to the output of the server process, which the parent process reads) is only for a full
 administrator of the default domain, and the parent process starts an update only when the server process ended with the exit code 200 that
 the update uses; text alone, from anybody, cannot start one.

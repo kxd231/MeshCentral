@@ -5376,7 +5376,7 @@ module.exports.CreateMeshUser = function (parent, db, ws, req, args, domain, use
                 break;
             }
             case 'loginTokens': { // Respond with the list of currently valid login tokens
-                if (req.session.loginToken != null) break; // Do not allow this command when logged in using a login token
+                if (req.session.loginToken != null) { try { ws.send(JSON.stringify({ action: 'loginTokens', responseid: command.responseid, result: 'Access denied' })); } catch (ex) { } break; } // Do not allow this command when logged in using a login token (answer, so that a client does not wait)
                 if ((typeof domain.passwordrequirements == 'object') && (domain.passwordrequirements.logintokens == false)) break; // Login tokens are not supported on this server
 
                 // If remove is an array or strings, we are going to be removing these and returning the results.
