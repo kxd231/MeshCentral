@@ -19,6 +19,29 @@ const driveType = { 0: "Unknown", 1: "No Root Directory", 2: "Removable Disk", 3
 const conversionStatus = { "-1": "Unknown", 0: "Fully Decrypted", 1: "Fully Encrypted", 2: "Encryption In Progress", 3: "Decryption In Progress", 4: "Encryption Paused", 5: "Decryption Paused" };
 const protectionStatus = { 0: "Off", 1: "On", 2: "Locked"};
 
+// The tunnel request of a browser (command type 'tunnel', value = the address the agent connects to) and the desktop multiplexor.
+// Whenever the multiplexor applies (p=2), the address of the agent connection is not taken from the browser: the server builds it from the three values the agent
+// needs (nodeid, id, rauth), with exactly one p=2, so that the server itself decides where the connection goes. The rights decision (removeViewOnlyLimitation,
+// the multiplexor enforces view-only itself) and the mark soptions.desktopMux, which meshcore trusts, follow from that address. Requests with a repeated 'p', other
+// than plain parameter names, or more than 64 parameters are refused.
+// → null: the request is not routed; otherwise { value, p, mux }
+module.exports.prepareTunnelRequest = function (value, nodeid, domainUrl, muxEnabled) {
+    if ((typeof value != 'string') || (value.length > 4096) || (value.indexOf('#') >= 0) || (typeof nodeid != 'string')) { return null; }
+    var url = null;
+    try { url = new URL(value, 'http://localhost'); } catch (ex) { }
+    if (url == null) { return null; }
+    var n = 0;
+    for (var e of url.searchParams) { if ((++n > 64) || (/^[A-Za-z0-9_]+$/.test(e[0]) == false)) { return null; } } // plain parameter names only, at most 64 parameters
+    if (url.searchParams.getAll('p').length > 1) { return null; } // 'p' must be given at most once
+    var p = url.searchParams.get('p');
+    if ((muxEnabled !== true) || (p !== '2')) { return { value: value, p: p, mux: false }; }
+    var ids = url.searchParams.getAll('id'), rauths = url.searchParams.getAll('rauth');
+    if ((ids.length != 1) || (ids[0].length < 1) || (ids[0].length > 256) || (rauths.length > 1) || ((rauths.length == 1) && (rauths[0].length > 2048)) || (typeof domainUrl != 'string')) { return null; }
+    var v = '*' + domainUrl + 'meshrelay.ashx?p=2&nodeid=' + encodeURIComponent(nodeid) + '&id=' + encodeURIComponent(ids[0]);
+    if ((rauths.length == 1) && (rauths[0] != '')) { v += ('&rauth=' + encodeURIComponent(rauths[0])); }
+    return { value: v, p: '2', mux: true };
+};
+
 // Construct a MeshAgent object, called upon connection
 module.exports.CreateMeshUser = function (parent, db, ws, req, args, domain, user) {
     const fs = require('fs');
@@ -1051,8 +1074,12 @@ module.exports.CreateMeshUser = function (parent, db, ws, req, args, domain, use
                         else if ((url.searchParams.get('p') == '5') || (url.searchParams.get('p') == '10')) { requiredNonRights = MESHRIGHT_NOFILES; }
                         else if (url.searchParams.get('p') == '6') { requiredNonRights = MESHRIGHT_NOSOFTWARE; }
 
-                        // If we are using the desktop multiplexor, remove the VIEWONLY limitation. The multiplexor will take care of enforcing that limitation when needed.
-                        if (((parent.parent.config.settings.desktopmultiplex === true) || (domain.desktopmultiplex === true)) && (url.searchParams.get('p') == '2')) { routingOptions = { removeViewOnlyLimitation: true }; }
+                        // If we are using the desktop multiplexor, the address of the agent connection is built here (see prepareTunnelRequest) and the VIEWONLY limitation is removed:
+                        // the multiplexor will take care of enforcing that limitation when needed.
+                        var prepared = module.exports.prepareTunnelRequest(command.value, command.nodeid, domain.url, ((parent.parent.config.settings.desktopmultiplex === true) || (domain.desktopmultiplex === true)));
+                        if (prepared == null) break; // the address is not accepted
+                        command.value = prepared.value;
+                        if (prepared.mux) { routingOptions = { removeViewOnlyLimitation: true }; }
 
                         // Add server TLS cert hash
                         var tlsCertHash = null;
@@ -1087,6 +1114,9 @@ module.exports.CreateMeshUser = function (parent, db, ws, req, args, domain, use
                             if (typeof domain.notificationmessages.files == 'string') { command.soptions.notifyMsgFiles = domain.notificationmessages.files; }
                         }
                         if (typeof domain.terminaluservariable == 'string') { command.soptions.terminalUserVariable = domain.terminaluservariable; }
+
+                        // Mark the tunnel of the desktop multiplexor. The mark is set here and only here, after soptions was rebuilt above.
+                        if (prepared.mux) { command.soptions.desktopMux = true; }
 
                         // Add userid
                         command.userid = user._id;
