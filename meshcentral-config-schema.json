@@ -2830,6 +2830,11 @@
                 "type": "boolean",
                 "description": "When set to true, the 'Connect All','Disconnect All' and 'Auto' buttons are removed from the desktop tab.",
                 "default": "false"
+              },
+              "h264": {
+                "type": "boolean",
+                "description": "When set to false, H.264 video in the remote desktop is refused (the desktop multiplexer answers a request for video with 'disabled'; without the multiplexer the browser does not offer or ask for it). The picture stays JPEG, the end-to-end acknowledgement for JPEG is not affected.",
+                "default": "true"
               }
             }
           },
@@ -3356,6 +3361,11 @@
                 "type": "integer",
                 "default": null,
                 "description": "Maximum number of recordings in megabytes. Once exceed, remove the oldest recordings."
+              },
+              "maxSessionRecordingSizeMegabytes": {
+                "type": "number",
+                "default": null,
+                "description": "Maximum size in megabytes of ONE recording file (not the total of all recordings, that is maxRecordingSizeMegabytes). Off when not set or 0; a value below 1 is raised to 1. Viewers are warned at 80% and 95% of the limit; when it is reached the session ends and the file is closed so that it plays. Connecting again starts a new recording."
               },
               "protocols": {
                 "type": "array",

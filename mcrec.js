@@ -27,6 +27,9 @@ function indexFile(infile) {
     state.indexTime = 10; // Interval between indexes in seconds
     state.lastIndex = 0; // Last time an index was writen in seconds
     state.indexes = [];
+    state.indexIdr = []; // For each index: pointer of the last H.264 key frame (243 with the IDR flag) before it, or null; the player decodes from there when it seeks
+    state.idrPtr = null; // Last key frame seen since the last screen size (pointer relative to basePtr) and its time in milliseconds from the first block
+    state.idrTime = 0;
     state.width = 0;
     state.height = 0;
     state.basePtr = null;
@@ -38,7 +41,10 @@ function indexFile(infile) {
     });
 }
 
-function createIndex(state, ptr) {
+// The key frame belongs to an index only when it is at most this old: a recording is untrusted data and the player decodes all blocks between the key frame and the index
+var IDR_MAX_AGE_MS = 60000;
+
+function createIndex(state, ptr, atMs) {
     var index = [];
     for (var i in state.screen) { if (index.indexOf(state.screen[i]) == -1) { index.push(state.screen[i]); } }
     index.sort(function (a, b) { return a - b });
@@ -46,6 +52,7 @@ function createIndex(state, ptr) {
     index.unshift(state.width);
     index.unshift(ptr - state.basePtr);
     state.indexes.push(index); // Index = [ Ptr, Width, Height, Block Pointers... ]
+    state.indexIdr.push(((state.idrPtr != null) && (state.idrPtr < index[0]) && ((atMs - state.idrTime) <= IDR_MAX_AGE_MS)) ? state.idrPtr : null);
     //log('Index', state.lastIndex, index.length);
     //log('Index', index);
     state.lastIndex += 10;
@@ -79,7 +86,7 @@ function processBlock(state, block, err) {
     if ((state.basePtr == null) && (block.type == 2)) { state.basePtr = block.ptr; state.startTime = block.time; }
 
     // Check if we need to create one or more indexes
-    while (((state.lastIndex + state.indexTime) * 1000) < elapseMilliSeconds) { createIndex(state, block.ptr); }
+    while (((state.lastIndex + state.indexTime) * 1000) < elapseMilliSeconds) { createIndex(state, block.ptr, (state.lastIndex + state.indexTime) * 1000); }
 
     if (block.type == 1) {
         // Metadata
@@ -150,7 +157,11 @@ function processBlock(state, block, err) {
                         if (Math.floor(state.swidth) != state.swidth) { state.swidth = Math.floor(state.swidth) + 1; }
                         if (Math.floor(state.sheight) != state.sheight) { state.sheight = Math.floor(state.sheight) + 1; }
                         state.screen = {};
+                        state.idrPtr = null; // the decoder starts again at the next key frame
                         //log("ScreenSize", state.width, state.height, state.swidth, state.sheight, state.swidth * state.sheight);
+                        break;
+                    case 243: // H.264 frame: remember the last key frame (flags at +12 of the command: bit 0 IDR, bit 1 marker)
+                        if ((block.data.length >= 14) && ((block.data[12] & 3) == 1)) { state.idrPtr = (block.ptr - state.basePtr); state.idrTime = elapseMilliSeconds; }
                         break;
                 }
 
@@ -179,6 +190,7 @@ function writeIndex(state, func) {
     extraMetadata.indexInterval = state.indexTime;
     extraMetadata.indexStartTime = state.startTime;
     extraMetadata.indexes = state.indexes;
+    if (state.indexIdr.some(function (x) { return x != null; })) { extraMetadata.indexIdr = state.indexIdr; }
     recordingEntry(state.recFile, 4, 0, state.lastTimeStamp, JSON.stringify(extraMetadata), function (state, len) {
         recordingEntry(state.recFile, 3, 0, state.recFileSize - 32, 'MeshCentralMCNDX', function (state) {
             func(state);

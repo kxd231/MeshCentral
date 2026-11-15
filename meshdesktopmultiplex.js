@@ -13,6 +13,8 @@
 /*jshint esversion: 6 */
 "use strict";
 
+const meshrelay = require('./meshrelay.js'); // size limit of one recording (recordingLimitBytes, recordingLimitCheck, recordingLimitMessage)
+
 
 /*
 --- KVM Commands ---
@@ -58,6 +60,10 @@ MNG_ERROR = 65,
 MNG_ENCAPSULATE_AGENT_COMMAND = 70,
 MNG_KVM_DISPLAY_INFO = 82
 MNG_KVM_VIEWER_ACK = 0x4B41             // Viewer -> multiplexor only, never forwarded. 0x4B40-0x4B4F are terminated by the multiplexor.
+MNG_KVM_VIDEO_CTRL = 240                // Viewer, multiplexor, meshcore -> agent: video and end-to-end ACK control
+MNG_KVM_STREAM_ACK = 241                // Viewer -> agent: end-to-end ACK of a stream position
+MNG_KVM_VIDEO_STATE = 242               // Agent (or multiplexor) -> viewer: what the agent offers and does
+MNG_KVM_VIDEO_FRAME = 243               // Agent -> viewer, always in a MNG_JUMBO: a video frame or a marker
 */
 
 /*
@@ -81,6 +87,69 @@ const KVM_ACK_MAX_REQUESTS = 8;         // kvmack control messages per connectio
 const KVM_ACK_MAX_ACTIVATIONS = 4;      // activations per connection
 const KVM_ACK_COOLDOWN = 30000;         // ms between a timeout and a new activation
 const KVM_ACK_MAX_REQUEST_LENGTH = 256;
+
+// ---- End-to-end ACK and H.264 video: the multiplexor validates 242 and 243 from the agent and 240 and 241 from viewers ----
+// It never decodes anything. Video entries (243, and 242 for one viewer) sit in the image list but cover no screen cell and belong to one viewer, the target.
+const KVM_VIDEO_MAX_FRAME = 8 * 1024 * 1024;        // largest 243 (the inner command)
+const KVM_VIDEO_TARGET_ENTRIES = 1024;              // pending video entries of the target; more and they are all dropped (with a repair request to the agent)
+const KVM_VIDEO_TARGET_BYTES = 8 * 1024 * 1024;     // same for their bytes
+const KVM_VIDEO_CTRL_RATE = 5;                      // 240 per second per viewer (token bucket rate)
+const KVM_VIDEO_CTRL_BURST = 10;                    // and its capacity
+const KVM_VIDEO_ACK_RATE = 100;                     // 241 per second per viewer (token bucket rate and capacity)
+const KVM_VIDEO_KEYFRAME_MS = 30000;                // key frame request while a session is recorded; the player decodes from the last key frame to the target of a seek (mcrec.js records its pointer)
+const KVM_VIDEO_MUX_BIT = 0x80;                     // caps bit 7 of a 242 that the multiplexor makes up itself: not an entry of the list, not counted by viewer ACK
+const KVM_VETO_MESHCORE = 1, KVM_VETO_MUX = 2;
+const MNG_KVM_VIDEO_CTRL_CMD = 240, MNG_KVM_STREAM_ACK_CMD = 241;      // sources of the veto (flags of 240 op 5 and op 6)
+
+// 240, 241 and 242: one message is one command (protocol 4.1). Returns null or the rejection code.
+function kvmH264CheckCtrl(cmd, b) {
+    if ((b == null) || (b.length < 4)) return 'TRUNCATED';
+    if (b.readUInt16BE(2) !== 16) return 'BAD_SIZE';
+    if (b.length < 16) return 'TRUNCATED';
+    if (b.length > 16) return 'BAD_SIZE';
+    if (((cmd === 240) || (cmd === 242)) && (b[4] !== 1)) return 'BAD_VERSION';
+    if (cmd === 240) {
+        const op = b[5], flags = b[6];
+        if ((op < 1) || (op > 6)) return 'BAD_OP';
+        if (((op === 1) && ((flags & 7) === 0)) || ((op === 3) && ((flags & 3) === 0)) || (((op === 5) || (op === 6)) && ((flags & 3) === 0))) return 'BAD_FLAGS';
+        if ((op === 1) && ((b.readUInt16BE(8) > 8192) || (b.readUInt16BE(10) > 8192))) return 'BAD_LIMIT';
+    } else if (cmd === 241) {
+        if (b.readUInt32BE(4) === 0) return 'BAD_SEQ';
+    } else if (cmd === 242) {
+        if ((b[5] > 1) || (b[6] > 1) || ((b[5] === 1) && (b[6] === 0))) return 'BAD_FIELD';
+    }
+    return null;
+}
+
+// 243 as it comes from the agent: the whole MNG_JUMBO message (protocol 4.2, steps 1 to 10). screenW and screenH come from the last command 7 (0 = none yet).
+function kvmH264CheckFrame(b, screenW, screenH) {
+    if ((b == null) || (b.length < 12) || (b.readUInt16BE(0) !== 27) || (b.readUInt16BE(2) !== 8)) return 'BAD_SIZE';
+    const n = b.readUInt32BE(4);
+    if (n > KVM_VIDEO_MAX_FRAME) return 'FRAME_TOO_BIG';
+    if (n < 20) return 'BAD_SIZE';
+    if (b.length < (8 + n)) return 'TRUNCATED';
+    if (b.readUInt16BE(8) !== 243) return 'NOT_243';
+    if (b.readUInt32BE(12) === 0) return 'BAD_SEQ';
+    const flags = b[20], codedW = b.readUInt16BE(22), codedH = b.readUInt16BE(24), nRects = b.readUInt16BE(26);
+    if ((flags & 3) === 3) return 'BAD_MARKER';
+    if ((flags & 2) !== 0) return ((n !== 20) || (nRects !== 0) || (codedW !== 0) || (codedH !== 0)) ? 'BAD_MARKER' : null;
+    if ((nRects < 1) || (nRects > 256)) return 'BAD_RECT_COUNT';
+    if ((20 + (8 * nRects)) > n) return 'TRUNCATED';
+    if ((screenW === 0) || (screenH === 0)) return 'NO_SCREEN';
+    const padW = Math.ceil(screenW / 32) * 32, padH = Math.ceil(screenH / 32) * 32;
+    if ((codedW !== padW) || (codedH !== padH) || (codedW < 32) || (codedH < 32) || (codedW > 8192) || (codedH > 8192)) return 'CODED_SIZE';
+    for (var i = 0; i < nRects; i++) {
+        const o = 28 + (i * 8), x = b.readUInt16BE(o), y = b.readUInt16BE(o + 2), w = b.readUInt16BE(o + 4), h = b.readUInt16BE(o + 6);
+        if ((w < 1) || (h < 1) || ((x + w) > screenW) || ((y + h) > screenH)) return 'BAD_RECT';
+    }
+    if ((n - 20 - (8 * nRects)) < 5) return 'NO_PAYLOAD';
+    return null;
+}
+
+// 240 for the agent (the multiplexor's own: veto, key frames, repair)
+function kvmVideoCtrl(op, flags) { const b = Buffer.alloc(16); b.writeUInt16BE(240, 0); b.writeUInt16BE(16, 2); b[4] = 1; b[5] = op; b[6] = flags; return b; }
+// 242 that the multiplexor makes up (veto, switch off): caps bit 7 marks it as outside the image list
+function kvmVideoState(video, ack, reason, caps, gen) { const b = Buffer.alloc(16); b.writeUInt16BE(242, 0); b.writeUInt16BE(16, 2); b[4] = 1; b[5] = video; b[6] = ack; b[7] = reason; b[14] = (caps & 0x7F) | KVM_VIDEO_MUX_BIT; b[15] = gen; return b; }
 
 // Next value of a u32 counter that never uses 0
 function kvmAckNext(x) { return (x >= 0xFFFFFFFF) ? 1 : (x + 1); }
@@ -174,18 +243,35 @@ function CreateDesktopMultiplexor(parent, domain, nodeid, id, func) {
     obj.imageType = 1;                  // Current image type, 1 = JPEG, 2 = PNG, 3 = TIFF, 4 = WebP
     obj.imageCompression = 50;          // Current image compression, this is the highest value of all viewers.
     obj.imageScaling = 1024;            // Current image scaling, this is the highest value of all viewers.
-    obj.imageFrameRate = 50;            // Current framerate setting, this is the lowest values of all viewers.
+    obj.imageFrameRate = 33;            // Current framerate setting (ms), this is the lowest value of all viewers. 33 is Medium in the viewer.
     obj.imageBudget = null;             // Current bandwidth budget in units of 100 kbit/s (0 = no limit): the smallest non-zero one of the viewers that sent one, 0 if they all sent 0, null if none did.
+    obj.compressionSent = false;        // True once the agent got a command 5 from this multiplexor: the first one of a viewer is always sent, even if it equals the defaults above (an agent starts with its own default rate).
     obj.protocolOptions = null;         // Set to the protocol options of the first viewer that connected.
     obj.viewerConnected = false;        // Set to true if one viewer attempted to connect to the agent.
     obj.recordingFile = null;           // Present if we are recording to file.
     obj.recordingFileSize = 0;          // Current size of the recording file.
     obj.recordingFileWriting = false;   // Set to true is we are in the process if writing to the recording file.
+    obj.recordingPending = 0;           // Agent messages whose recording block is not written yet (recordingFileWriting is true while there are any).
+    obj.recordingQueue = [];            // Blocks waiting for the file: one fs.write at a time, so the blocks and the last record are in the file in the order they were made.
+    obj.recordingQueueBusy = false;
+    obj.recordingLimit = 0;             // Size limit of this recording in bytes, 0 = none (domain.sessionrecording.maxSessionRecordingSizeMegabytes).
+    obj.recordingWarned = 0;            // The warning level (80 or 95 percent of the limit) that was reached, 0 = none.
+    obj.recordingLimitHit = false;      // The limit was reached: nothing more is written, the session ends.
+    obj.recordingLimitEnding = false;   // The end because of the limit is under way (once).
     obj.startTime = null;               // Starting time of the multiplex session.
     obj.userIds = [];                   // List of userid's that have intertracted with this session.
     //obj.autoLock = false;               // Automatically lock the remote device once disconnected
     obj.kvmAck = kvmAckConfig((parent.parent && parent.parent.config) ? parent.parent.config.settings : null); // Viewer ACK settings, null = disabled
     obj.kvmAckTimer = null;             // Timeout check, runs while at least one viewer is in ACK mode
+    obj.target = null;                  // The viewer whose 240 (op 1 or 4) the agent got: the only one that receives video entries and may send 241.
+    obj.vetoSent = false;               // The veto of the multiplexor (source bit 1) as the agent knows it.
+    obj.vetoLocal = false;              // The veto holds in the multiplexor (it answers and drops by it even when the agent does not speak the protocol).
+    obj.agentSpeaks = false;            // The agent sent a valid 242: it knows commands 240-243. Only then is anything of them written to it (an old agent gets nothing new).
+    obj.agentAck = 0;                   // ack of the agent's last 242.
+    obj.videoActive = false;            // The agent's last 242 said video = 1 (and no veto since): key frames of a recording make sense.
+    obj.agentCaps = 0;                  // caps and gen of the agent's last 242, for the 242 that the multiplexor makes up.
+    obj.agentGen = 0;
+    obj.recordingKeyTimer = null;       // Key frame request every 10 s while the session is recorded.
     obj.badFramesLogged = 0;            // Malformed agent frames written to the debug log (the first 10)
     obj.now = function () { return Date.now(); };
 
@@ -219,6 +305,15 @@ function CreateDesktopMultiplexor(parent, domain, nodeid, id, func) {
             peer.paused = false;
             peer.startTime = Date.now();
             peer.kvmAck = null;             // Viewer ACK state, null for a viewer that never asked
+            peer.recordingWarned = 0;       // The warning level of the recording size limit that this viewer was told.
+            peer.video = false;             // The viewer sent a valid 240 on this connection: it takes part in the 240-243 protocol and gets 242 from the agent.
+            peer.videoEntries = 0;          // Video entries waiting in the image list for this viewer (it is their target) and their bytes.
+            peer.videoBytes = 0;
+            peer.videoCtrlBucket = { tokens: KVM_VIDEO_CTRL_BURST, time: obj.now() };
+            peer.videoAckBucket = { tokens: KVM_VIDEO_ACK_RATE, time: obj.now() };
+
+            // A second live viewer ends video and end-to-end ACK for everybody (the agent is told, the picture is refreshed as JPEG)
+            vetoSync();
 
             // Add the user to the userids list if needed
             if ((peer.user != null) && (obj.userIds.indexOf(peer.user._id) == -1)) { obj.userIds.push(peer.user._id); }
@@ -272,6 +367,9 @@ function CreateDesktopMultiplexor(parent, domain, nodeid, id, func) {
                 // Indicated we are connected
                 obj.sendToViewer(peer, obj.recordingFile ? 'cr' : 'c');
 
+                // A viewer that joins after the recording passed a warning level is told too
+                recordingLimitWarn();
+
                 // If the agent sent display information or console message, send it to the viewer
                 if (obj.lastDisplayInfoData != null) { obj.sendToViewer(peer, obj.lastDisplayInfoData); }
                 if (obj.lastDisplayLocationData != null) { obj.sendToViewer(peer, obj.lastDisplayLocationData); }
@@ -299,11 +397,13 @@ function CreateDesktopMultiplexor(parent, domain, nodeid, id, func) {
             peer.paused = false;
 
             // Indicated we are connected and send connection options and protocol if needed
-            obj.sendToAgent(obj.recordingFile?'cr':'c');
+            obj.sendToAgent('c'); // never 'cr': meshcore would start its own key frame timer for this tunnel, the multiplexor has one (recordingStarted)
             if (obj.viewerConnected == true) {
                 if (obj.protocolOptions != null) { obj.sendToAgent(JSON.stringify(obj.protocolOptions)); } // Send connection options
                 obj.sendToAgent('2'); // Send remote desktop connect
             }
+            obj.vetoSent = false; obj.agentSpeaks = false;
+            vetoSync(); // the agent starts without a veto; a veto that holds is told to it after its first 242
         }
 
         // Log multiplex session start
@@ -332,8 +432,25 @@ function CreateDesktopMultiplexor(parent, domain, nodeid, id, func) {
         return ((r == null) && (obj.imageBudget != null)) ? 0 : r;
     }
 
+    // What the viewers that sent command 5 ask for together: the same rule as in the handler of command 5 (the shortest interval, the highest quality, the largest scale, JPEG when the types differ).
+    // null when none of them has sent one. Used when a viewer leaves: the interval of that viewer, shorter than the others', must not stay with the agent (a viewer in Auto went to 60 frames/s)
+    function commonCompression() {
+        var r = null;
+        for (var i in obj.viewers) {
+            var v = obj.viewers[i];
+            if ((v.compressionAsked !== true) || (typeof v.imageFrameRate !== 'number') || (typeof v.imageCompression !== 'number') || (typeof v.imageScaling !== 'number')) { continue; }      // a viewer that never sent command 5 only has the defaults of addPeer
+            if (r == null) { r = { type: v.imageType, compression: v.imageCompression, scaling: v.imageScaling, frameRate: v.imageFrameRate }; continue; }
+            if (v.imageType != r.type) { r.type = 1; }
+            if (v.imageCompression > r.compression) { r.compression = v.imageCompression; }
+            if (v.imageScaling > r.scaling) { r.scaling = v.imageScaling; }
+            if (v.imageFrameRate < r.frameRate) { r.frameRate = v.imageFrameRate; }
+        }
+        return r;
+    }
+
     // Send the current common compression settings to the agent as command 5: 10 bytes, or 12 with the bandwidth budget once one is known.
     function sendCompressionToAgent() {
+        obj.compressionSent = true;
         var cmd = Buffer.alloc((obj.imageBudget == null) ? 10 : 12);
         cmd.writeUInt16BE(5, 0); // Command 5, compression
         cmd.writeUInt16BE(cmd.length, 2); // Command size
@@ -352,7 +469,8 @@ function CreateDesktopMultiplexor(parent, domain, nodeid, id, func) {
         if (peer == obj.agent) {
             //console.log('removePeer-agent', obj.nodeid);
             // Agent has disconnected, disconnect everyone.
-            if (obj.viewers != null) { for (var i in obj.viewers) { obj.viewers[i].close(); } }
+            // (a copy: closing a viewer removes it from the list)
+            if (obj.viewers != null) { var closing = obj.viewers.slice(); for (var i = 0; i < closing.length; i++) { closing[i].close(); } }
 
             // Clean up the agent
             obj.agent = null;
@@ -367,6 +485,10 @@ function CreateDesktopMultiplexor(parent, domain, nodeid, id, func) {
                 if (i == -1) return false;
                 obj.viewers.splice(i, 1);
             }
+
+            // Whatever is queued for this viewer as its target goes with it
+            dropVideoEntries(peer);
+            if (obj.target === peer) { obj.target = null; obj.videoActive = false; }
 
             // Resume flow control if this was the peer that was limiting traffic (because it was the fastest one).
             if (peer.overflow == true) {
@@ -430,6 +552,7 @@ function CreateDesktopMultiplexor(parent, domain, nodeid, id, func) {
             delete peer.imageCompression;
             delete peer.imageScaling;
             delete peer.imageFrameRate;
+            delete peer.compressionAsked;
             delete peer.imageBudget;
             delete peer.lastImageNumberSent;
             delete peer.dataPtr;
@@ -438,13 +561,27 @@ function CreateDesktopMultiplexor(parent, domain, nodeid, id, func) {
             delete peer.sendQueue;
             delete peer.startTime;
             delete peer.kvmAck;
+            delete peer.recordingWarned;
+            delete peer.video;
+            delete peer.videoEntries;
+            delete peer.videoBytes;
+            delete peer.videoCtrlBucket;
+            delete peer.videoAckBucket;
 
             // If this is the last viewer, disconnect the agent
             if ((obj.viewers != null) && (obj.viewers.length == 0) && (obj.agent != null)) { obj.agent.close(); dispose(); return true; }
 
-            // The budget follows the viewers that are left (only the budget: the other settings keep their value, as before)
-            var leftBudget = commonBudget();
-            if (leftBudget !== obj.imageBudget) { obj.imageBudget = leftBudget; sendCompressionToAgent(); }
+            // One viewer left: the multiplexor's veto ends (the agent answers with 242 reason 10 and the viewer asks again)
+            vetoSync();
+
+            // The settings follow the viewers that are left: the budget as before, and now the interval, the quality and the scale too (the agent kept those of the viewer that left, e.g. 16 ms of a viewer
+            // in Auto while the one that stayed asked for 100 ms)
+            var leftBudget = commonBudget(), leftSettings = commonCompression(), leftChanged = false;
+            if (leftBudget !== obj.imageBudget) { obj.imageBudget = leftBudget; leftChanged = true; }
+            if ((leftSettings != null) && ((obj.imageFrameRate !== leftSettings.frameRate) || (obj.imageCompression !== leftSettings.compression) || (obj.imageScaling !== leftSettings.scaling) || (obj.imageType !== leftSettings.type))) {
+                obj.imageType = leftSettings.type; obj.imageCompression = leftSettings.compression; obj.imageScaling = leftSettings.scaling; obj.imageFrameRate = leftSettings.frameRate; leftChanged = true;
+            }
+            if (leftChanged) { sendCompressionToAgent(); }
 
             // Send an updated list of all peers to all viewers
             obj.sendSessionMetadata();
@@ -457,6 +594,8 @@ function CreateDesktopMultiplexor(parent, domain, nodeid, id, func) {
         if (obj.viewers == null) return;
         //console.log('dispose', obj.nodeid);
         if (obj.kvmAckTimer != null) { clearInterval(obj.kvmAckTimer); obj.kvmAckTimer = null; }
+        if (obj.recordingKeyTimer != null) { clearInterval(obj.recordingKeyTimer); obj.recordingKeyTimer = null; }
+        obj.target = null;
         delete obj.viewers;
         delete obj.imagesCounters;
         delete obj.images;
@@ -650,10 +789,12 @@ function CreateDesktopMultiplexor(parent, domain, nodeid, id, func) {
             }
             checkViewerOverflow(viewer);
         } else {
+            if (viewer.dataPtr != null) skipOtherViewersEntries(viewer); // video entries of another viewer are not ours to send
             if (viewer.dataPtr != null) {
                 // Send the next image
                 //if ((viewer.lastImageNumberSent != null) && ((viewer.lastImageNumberSent + 1) != (viewer.dataPtr))) { console.log('SVIEW-S1', viewer.lastImageNumberSent, viewer.dataPtr); } // DEBUG
-                var image = obj.images[viewer.dataPtr];
+                var imageId = viewer.dataPtr;
+                var image = obj.images[imageId];
                 if ((viewer.kvmAck != null) && (viewer.kvmAck.state === 1) && (kvmAckAdmit(viewer, image) == false)) {
                     // The ACK window of this viewer is full: hold the image stream (control frames still go out) until an ACK arrives
                     viewer.sending = false;
@@ -663,6 +804,8 @@ function CreateDesktopMultiplexor(parent, domain, nodeid, id, func) {
                 viewer.lastImageNumberSent = viewer.dataPtr;
                 //if ((image.next != null) && ((viewer.dataPtr + 1) != image.next)) { console.log('SVIEW-S2', viewer.dataPtr, image.next); } // DEBUG
                 viewer.dataPtr = image.next;
+                if (image.target != null) { unlinkVideoEntry(imageId); } // a video entry is for one viewer and leaves the list when it is sent
+                if (viewer.dataPtr != null) skipOtherViewersEntries(viewer);
                 if (viewer.slowRelay) {
                     setTimeout(function () { try { viewer.ws.send(image.data, function () { sendViewerNext(viewer); }); } catch (ex) { } }, viewer.slowRelay);
                 } else {
@@ -682,14 +825,39 @@ function CreateDesktopMultiplexor(parent, domain, nodeid, id, func) {
         }
     }
 
+    // Only command 243 is checked before the recording; everything else is written as before. Processing of a message waits for the write of its recording block,
+    // so obj.width and obj.height may be older than the messages that already arrived: the screen size is taken from the newest command 7 at arrival (a valid one only).
+    function recordableAgentData(data) {
+        if (!Buffer.isBuffer(data) || (data.length < 4)) return true;
+        var cmd = data.readUInt16BE(0);
+        if (cmd == 7) {
+            if ((data.length >= 8) && (viewerFrameOk(data) == 7)) { obj.arrivalWidth = data.readUInt16BE(4); obj.arrivalHeight = data.readUInt16BE(6); }
+            return true;
+        }
+        if (obj.recordingFile == null) return true;
+        if ((cmd == 27) && (data.readUInt16BE(2) == 8) && (data.length >= 12)) { if (data.readUInt16BE(8) != 243) return true; }
+        else if (cmd != 243) return true;
+        return kvmH264CheckFrame(data, (obj.arrivalWidth != null) ? obj.arrivalWidth : obj.width, (obj.arrivalHeight != null) ? obj.arrivalHeight : obj.height) == null;
+    }
+
     // Process data coming from the agent or any viewers
     obj.processData = function (peer, data) {
         if (obj.viewers == null) return;
         if (peer == obj.agent) {
+            if (obj.recordingLimitHit) return; // The recording is full: the session is ending, nothing more is written or shown
+            if (!recordableAgentData(data)) {
+                // A 243 that the validation refuses is not written to the recording: a hostile agent could fill the disk with them. It is counted like any malformed frame.
+                stat('badFrames');
+                if (obj.badFramesLogged < 10) { obj.badFramesLogged++; debug('dropped malformed agent frame cmd 243 before recording, length ' + data.length); }
+                return;
+            }
+            if (!recordingLimitAllows(data)) return;
+            obj.recordingPending++;
             obj.recordingFileWriting = true;
             recordData(true, data, function () {
                 if (obj.viewers == null) return;
-                obj.recordingFileWriting = false;
+                obj.recordingFileWriting = (--obj.recordingPending > 0);
+                if (obj.recordingLimitHit) { if (!obj.recordingFileWriting) { recordingLimitEnd(); } return; } // the limit was reached while this block was on its way to the file
                 if ((obj.viewersOverflowCount < obj.viewers.length) && obj.agent && (obj.agent.paused == true)) { obj.agent.paused = false; obj.agent.ws._socket.resume(); }
                 obj.processAgentData(data);
             });
@@ -731,6 +899,7 @@ function CreateDesktopMultiplexor(parent, domain, nodeid, id, func) {
         if (data.length < 4) return; // Ignore all control traffic for now (WebRTC)
         var command = data.readUInt16BE(0);
         var cmdsize = data.readUInt16BE(2);
+        if ((command == MNG_KVM_VIDEO_CTRL_CMD) || (command == MNG_KVM_STREAM_ACK_CMD)) { processViewerVideoCommand(viewer, command, data); return; } // checked against the protocol, not only against its own length
         if (data.length != cmdsize) return; // Invalid command length
 
         //console.log('ViewerData', data.length, command, cmdsize);
@@ -743,6 +912,7 @@ function CreateDesktopMultiplexor(parent, domain, nodeid, id, func) {
                 break;
             case 5: // Compression
                 if (data.length < 10) return;
+                viewer.compressionAsked = true;
                 viewer.imageType = data[4]; // Image type: 1 = JPEG, 2 = PNG, 3 = TIFF, 4 = WebP
                 viewer.imageCompression = data[5];
                 viewer.imageScaling = data.readUInt16BE(6);
@@ -762,7 +932,7 @@ function CreateDesktopMultiplexor(parent, domain, nodeid, id, func) {
                     if ((viewersimageFrameRate == null) || (obj.viewers[i].imageFrameRate < viewersimageFrameRate)) { viewersimageFrameRate = obj.viewers[i].imageFrameRate; };
                 }
                 var viewersimageBudget = commonBudget();
-                if ((obj.imageCompression != viewersimageCompression) || (obj.imageScaling != viewersimageScaling) || (obj.imageFrameRate != viewersimageFrameRate) || (obj.imageBudget !== viewersimageBudget)) {
+                if ((obj.compressionSent === false) || (obj.imageCompression != viewersimageCompression) || (obj.imageScaling != viewersimageScaling) || (obj.imageFrameRate != viewersimageFrameRate) || (obj.imageBudget !== viewersimageBudget)) {
                     // Update and send to agent new compression settings
                     obj.imageType = viewersimageType;
                     obj.imageCompression = viewersimageCompression;
@@ -896,12 +1066,12 @@ function CreateDesktopMultiplexor(parent, domain, nodeid, id, func) {
                             obj.imagesBytes -= d.data.length;
                             //console.log('Removing Image', oi, obj.images[oi].prev, obj.images[oi].next);
                             obj.images[d.prev].next = d.next;
-                            obj.images[d.next].prev = d.prev;
+                            if (d.next != null) { obj.images[d.next].prev = d.prev; } else { obj.lastData = d.prev; } // a video entry may be last, a tile never is, but do not rely on it
                             delete obj.images[oi];
                             delete obj.imagesCounters[oi];
 
                             // If any viewers are currently on image "oi" must be moved to "d.next"
-                            for (var l in obj.viewers) { const v = obj.viewers[l]; if (v.dataPtr == oi) { v.dataPtr = d.next; } }
+                            for (var l in obj.viewers) { const v = obj.viewers[l]; if (v.dataPtr == oi) { v.dataPtr = d.next; skipOtherViewersEntries(v); } }
                         }
                     }
                 }
@@ -946,6 +1116,7 @@ function CreateDesktopMultiplexor(parent, domain, nodeid, id, func) {
                 obj.images[obj.counter] = { next: null, prev: null, data: data };
                 obj.firstData = obj.counter;
                 obj.lastData = obj.counter;
+                for (var i in obj.viewers) { obj.viewers[i].videoEntries = 0; obj.viewers[i].videoBytes = 0; } // the list is new: no video entry survives
                 
                 // Add viewers must be set to start at "obj.counter"
                 for (var i in obj.viewers) {
@@ -996,10 +1167,172 @@ function CreateDesktopMultiplexor(parent, domain, nodeid, id, func) {
                 // Send this to all viewers right away
                 obj.sendToAllInputViewers(data);
                 break;
+            case 242: // Video state: the agent's answer to 240 and its own announcements. Only a viewer that sent a valid 240 gets it, and only while it is the only viewer.
+                if (kvmH264CheckCtrl(242, data) != null) { badFrame(242, cmdsize, data.length); break; }
+                obj.agentCaps = data[14] & 0x7F; obj.agentGen = data[15]; obj.agentAck = data[6];
+                obj.videoActive = (data[5] == 1) && !vetoWanted();
+                if (!obj.agentSpeaks) { obj.agentSpeaks = true; vetoSync(); } // the first 242: from now on the agent may be told about the veto
+                if ((obj.viewers.length == 1) && (obj.viewers[0].video === true)) {
+                    var state = Buffer.from(data); state[14] &= 0x7F; // an agent cannot pass itself off as the multiplexor
+                    addVideoEntry(obj.viewers[0], state);
+                }
+                break;
+            case 243: // Video frame or marker (always jumbo): validated here, queued for the target only, covers no screen cell
+                var verr = kvmH264CheckFrame(jumboData, obj.width, obj.height);
+                if (verr != null) { badFrame(243, cmdsize, jumboData.length); break; }
+                if ((obj.target != null) && (obj.viewers.indexOf(obj.target) >= 0) && (obj.viewers.length == 1) && (obj.target.video === true)) { addVideoEntry(obj.target, jumboData); }
+                break;
             default:
                 console.log('Un-handled agent command: ' + command + ', length: ' + cmdsize);
                 break;
         }
+    }
+
+    // ---- End-to-end ACK and video ----
+
+    // The server switch: domains.<id>.desktop.h264 = false refuses video (op 1, answered with reason 6). The end-to-end ACK for JPEG (op 4) is not affected.
+    function h264Allowed() { return !((typeof domain.desktop == 'object') && (domain.desktop != null) && (domain.desktop.h264 === false)); }
+    // Video and end-to-end ACK need exactly one live viewer. A recording is not a viewer. The switch does not veto: it only refuses op 1 (video), ACK for JPEG stays.
+    function vetoWanted() { return (obj.viewers == null) || (obj.viewers.length > 1); }
+    obj.vetoWanted = vetoWanted;
+
+    // Send a 242 that the multiplexor makes up to a viewer, outside the image list
+    function sendVideoState(viewer, video, ack, reason) { obj.sendToViewer(viewer, kvmVideoState(video, ack, reason, obj.agentCaps, obj.agentGen)); }
+
+    // The veto of the multiplexor (source bit 1) follows the number of live viewers. In the multiplexor it takes effect at once: what is queued for the target goes, the target is
+    // told reason 5, requests are answered. The agent is told only after its first 242 (an agent that does not speak the protocol gets nothing new), once per change. A refresh
+    // is asked for only when video was running: only then can the canvas of a viewer have video painted on it that the memory of the multiplexor does not have.
+    function vetoSync() {
+        if (obj.viewers == null) return;
+        const want = vetoWanted();
+        var refresh = false;
+        if (want !== obj.vetoLocal) {
+            obj.vetoLocal = want;
+            if (want) {
+                const old = obj.target;
+                refresh = obj.videoActive;
+                dropVideoEntries(null);
+                obj.target = null; obj.videoActive = false;
+                if ((old != null) && (old.video === true) && (obj.viewers.indexOf(old) >= 0)) { sendVideoState(old, 0, 0, 5); }
+            }
+        }
+        if ((obj.agent != null) && obj.agentSpeaks && (want !== obj.vetoSent)) {
+            obj.vetoSent = want;
+            if (want) {
+                obj.sendToAgent(kvmVideoCtrl(5, KVM_VETO_MUX));
+                if (refresh) { obj.sendToAgent(Buffer.from([0, 6, 0, 4])); }
+            } else {
+                obj.sendToAgent(kvmVideoCtrl(6, KVM_VETO_MUX));
+            }
+        }
+    }
+
+    // An entry of the image list is of one viewer when it has a target. Skip those of another viewer (dataPtr never rests on one).
+    function skipOtherViewersEntries(viewer) {
+        while (viewer.dataPtr != null) {
+            const e = obj.images[viewer.dataPtr];
+            if (e == null) { viewer.dataPtr = null; return; }
+            if ((e.target != null) && (e.target !== viewer)) { viewer.dataPtr = e.next; } else { return; }
+        }
+    }
+
+    // Take a video entry out of the list. It may be lastData and viewers may wait on it.
+    function unlinkVideoEntry(id) {
+        const e = obj.images[id];
+        if (e == null) return;
+        if (e.prev != null) { obj.images[e.prev].next = e.next; }
+        if (e.next != null) { obj.images[e.next].prev = e.prev; } else { obj.lastData = e.prev; }
+        delete obj.images[id];
+        obj.imagesCount--;
+        obj.imagesBytes -= e.data.length;
+        const t = e.target;
+        if ((t != null) && (t.videoEntries != null)) { t.videoEntries--; t.videoBytes -= e.data.length; }
+        for (var i in obj.viewers) { const v = obj.viewers[i]; if (v.dataPtr == id) { v.dataPtr = e.next; skipOtherViewersEntries(v); } }
+    }
+
+    // Drop the video entries of one viewer, or all of them (viewer == null)
+    function dropVideoEntries(viewer) {
+        if ((obj.images == null) || (obj.firstData == null)) return;
+        var id = obj.firstData;
+        while (id != null) {
+            const e = obj.images[id];
+            if (e == null) break;
+            const next = e.next;
+            if ((e.target != null) && ((viewer == null) || (e.target === viewer))) { unlinkVideoEntry(id); }
+            id = next;
+        }
+        if (viewer != null) { if (viewer.videoEntries != null) { viewer.videoEntries = 0; viewer.videoBytes = 0; } }
+        else { for (var i in obj.viewers) { obj.viewers[i].videoEntries = 0; obj.viewers[i].videoBytes = 0; } }
+    }
+    obj.dropVideoEntries = dropVideoEntries;
+
+    // Queue a 242 or 243 for its target, in arrival order with the tiles. Too much waiting for one target: all of it goes and the agent repairs the picture.
+    function addVideoEntry(viewer, buf) {
+        if ((obj.lastData == null) || (viewer.dataPtr === undefined)) return;
+        obj.counter++;
+        obj.images[obj.counter] = { next: null, prev: obj.lastData, data: buf, target: viewer }; // no imagesCounters entry and no screen cell: nothing pushes it out
+        obj.images[obj.lastData].next = obj.counter;
+        obj.lastData = obj.counter;
+        obj.imagesCount++;
+        obj.imagesBytes += buf.length;
+        viewer.videoEntries++;
+        viewer.videoBytes += buf.length;
+        if ((viewer.videoEntries > KVM_VIDEO_TARGET_ENTRIES) || (viewer.videoBytes > KVM_VIDEO_TARGET_BYTES)) {
+            dropVideoEntries(viewer);
+            stat('videoOverflow');
+            obj.sendToAgent(kvmVideoCtrl(3, 3)); // key frame and repair of the tiles that were video
+            return;
+        }
+        if (viewer.dataPtr == null) { viewer.dataPtr = obj.counter; if (viewer.sending == false) { sendViewerNext(viewer); } }
+        if (obj.images != null && cachePressure()) { for (var i in obj.viewers) { checkViewerOverflow(obj.viewers[i]); } }
+    }
+
+    // A token bucket on a viewer field; true when a token was taken
+    function takeToken(bucket, rate, capacity) {
+        const now = obj.now();
+        bucket.tokens = Math.min(capacity, bucket.tokens + (((now - bucket.time) * rate) / 1000));
+        bucket.time = now;
+        if (bucket.tokens < 1) return false;
+        bucket.tokens -= 1;
+        return true;
+    }
+
+    // 240 and 241 from a viewer (protocol 6.2)
+    function processViewerVideoCommand(viewer, command, data) {
+        if (kvmH264CheckCtrl(command, data) != null) { stat('videoBadCommands'); return; }
+        if (command == MNG_KVM_STREAM_ACK_CMD) {
+            // The acknowledgement of a stream position: only from the target, only without a veto
+            if ((viewer !== obj.target) || vetoWanted()) { stat('videoAckRejected'); return; }
+            if (!takeToken(viewer.videoAckBucket, KVM_VIDEO_ACK_RATE, KVM_VIDEO_ACK_RATE)) { stat('videoAckFlood'); return; }
+            obj.sendToAgent(data);
+            return;
+        }
+        if (!takeToken(viewer.videoCtrlBucket, KVM_VIDEO_CTRL_RATE, KVM_VIDEO_CTRL_BURST)) { stat('videoCtrlFlood'); return; }
+        const op = data[5];
+        if ((op == 5) || (op == 6)) { stat('videoVetoFromViewer'); return; } // the veto is the multiplexor's and meshcore's, never a viewer's
+        viewer.video = true;
+        if ((op == 1) || (op == 4)) {
+            if (vetoWanted()) { sendVideoState(viewer, 0, 0, 5); return; }
+            if ((op == 1) && !h264Allowed()) { sendVideoState(viewer, 0, obj.agentAck, 6); return; } // the switch refuses video only; ACK for JPEG (op 4) goes through
+            obj.target = viewer;
+            obj.sendToAgent(data);
+            return;
+        }
+        if ((viewer === obj.target) && !vetoWanted()) { obj.sendToAgent(data); } // op 2 and 3
+    }
+
+    // A recorded session gets a key frame every 30 s. A recording is not a viewer and sets no veto.
+    function recordingStarted() {
+        if ((obj.recordingKeyTimer == null) && (obj.viewers != null)) {
+            obj.recordingKeyTimer = setInterval(obj.recordingKeyFrameTick, KVM_VIDEO_KEYFRAME_MS);
+            if (obj.recordingKeyTimer.unref) { obj.recordingKeyTimer.unref(); }
+        }
+        // Recording that starts while video already runs: a refresh gives the recording whole JPEG, then the first frame after it is a key frame
+        if ((obj.agent != null) && obj.videoActive) { obj.sendToAgent(Buffer.from([0, 6, 0, 4])); obj.sendToAgent(kvmVideoCtrl(3, 3)); }
+    }
+    obj.recordingKeyFrameTick = function () {
+        if ((obj.viewers == null) || (obj.recordingFile == null) || (obj.agent == null) || !obj.videoActive) return;
+        obj.sendToAgent(kvmVideoCtrl(3, 1)); // key frame only; the agent postpones it to the next picture with motion and limits it to one per second
     }
 
     // ---- Viewer ACK ----
@@ -1170,7 +1503,17 @@ function CreateDesktopMultiplexor(parent, domain, nodeid, id, func) {
             try { parent.parent.fs.mkdirSync(parent.parent.recordpath); } catch (e) { }
             recFullFilename = parent.parent.path.join(parent.parent.recordpath, recFilename);
         }
-        parent.parent.fs.open(recFullFilename, 'w', function (err, fd) {
+        // A file that exists is never overwritten: a session that follows another one of the same device within a second (for example after the size limit ended it) gets a number in its name
+        var openAttempt = 0, recBaseFilename = recFullFilename;
+        function openRecording() {
+            if (openAttempt > 0) { recFullFilename = recBaseFilename.substring(0, recBaseFilename.length - 6) + '-' + openAttempt + '.mcrec'; }
+            parent.parent.fs.open(recFullFilename, 'wx', function (err, fd) {
+                if ((err != null) && (err.code == 'EEXIST') && (openAttempt < 100)) { openAttempt++; openRecording(); return; }
+                openedRecording(err, fd);
+            });
+        }
+        openRecording();
+        function openedRecording(err, fd) {
             delete obj.pendingRecording;
             if (err != null) {
                 parent.parent.debug('relay', 'Relay: Unable to record to file: ' + recFullFilename);
@@ -1184,9 +1527,11 @@ function CreateDesktopMultiplexor(parent, domain, nodeid, id, func) {
             recordingEntry(fd, 1, 0, firstBlock, function () {
                 obj.recordingFile = { fd: fd, filename: recFullFilename };
                 obj.recordingFileWriting = false;
+                obj.recordingLimit = meshrelay.recordingLimitBytes(domain);
+                recordingStarted();
                 func(true);
             });
-        });
+        }
     }
 
     // Here, we check if we have to record the device, regardless of what user is looking at it.
@@ -1211,6 +1556,46 @@ function CreateDesktopMultiplexor(parent, domain, nodeid, id, func) {
         startRecording(domain, record, func);
     }
 
+    // Size limit of one recording. Called before a block of the agent is written. Returns false when the block does not fit: it is neither written nor shown, and the session ends
+    // (the file is closed by dispose() like any other, with its last record, so it plays). At 80 % and 95 % the viewers are told once.
+    function recordingLimitAllows(data) {
+        if ((obj.recordingFile == null) || (obj.recordingLimit <= 0)) return true;
+        const block = 16 + ((typeof data == 'string') ? Buffer.byteLength(data) : data.length);
+        const r = meshrelay.recordingLimitCheck(obj.recordingLimit, obj.recordingFileSize, block, 32, obj.recordingWarned);
+        if (r.allow === false) {
+            obj.recordingLimitHit = true;
+            stat('recordingLimit');
+            parent.parent.debug('relay', 'DesktopRelay: recording size limit of ' + obj.recordingLimit + ' bytes reached: ' + obj.recordingFile.filename);
+            if (!obj.recordingFileWriting) { recordingLimitEnd(); } // else the callback of the write in flight does it
+            return false;
+        }
+        if (r.warn > 0) { obj.recordingWarned = r.warn; recordingLimitWarn(); }
+        return true;
+    }
+
+    // Tell every viewer that has not heard of the current warning level yet (one message per viewer and level)
+    function recordingLimitWarn() {
+        if ((obj.recordingWarned <= 0) || (obj.viewers == null)) return;
+        const message = meshrelay.recordingLimitMessage(obj.recordingWarned, obj.recordingLimit, obj.recordingFileSize);
+        for (var i in obj.viewers) {
+            var v = obj.viewers[i];
+            if (v.recordingWarned < obj.recordingWarned) { v.recordingWarned = obj.recordingWarned; obj.sendToViewer(v, message); }
+        }
+    }
+
+    // The end: log it, tell the viewers (straight to the socket: whatever waits in their queue is not going to be sent), close the agent's tunnel. Closing the tunnel
+    // closes the viewers and disposes the multiplexor, which writes the last record and closes the file. Reconnecting starts a new multiplexor and a new file.
+    function recordingLimitEnd() {
+        if ((obj.viewers == null) || (obj.recordingLimitEnding === true)) return;
+        obj.recordingLimitEnding = true;
+        var event = { etype: 'relay', action: 'relaylog', domain: domain.id, nodeid: obj.nodeid, msg: "Desktop recording size limit of " + Math.round(obj.recordingLimit / 1048576 * 10) / 10 + " MB reached, closed desktop multiplex session \"" + obj.id + "\"", filename: parent.parent.path.basename(obj.recordingFile.filename), size: obj.recordingFileSize, limit: obj.recordingLimit, protocol: 2, multiplex: true };
+        const targets = ['*', obj.nodeid, obj.meshid];
+        parent.parent.DispatchEvent(targets, obj, event);
+        const message = meshrelay.recordingLimitMessage(100, obj.recordingLimit, obj.recordingFileSize);
+        for (var i in obj.viewers) { try { obj.viewers[i].ws.send(message); } catch (ex) { } }
+        if (obj.agent != null) { obj.agent.close(); } else { dispose(); }
+    }
+
     // Record data to the recording file
     function recordData(isAgent, data, func) {
         try {
@@ -1224,6 +1609,24 @@ function CreateDesktopMultiplexor(parent, domain, nodeid, id, func) {
     }
 
     // Record a new entry in a recording log
+    // Writes of the recording go to the file one at a time, in the order they were asked for: several fs.write calls in flight at once may finish
+    // (and even land in the file) in any order, and the last record (MeshCentralMCREC) and the closing of the file must come after every block.
+    function recordingWrite(fd, block, func) {
+        obj.recordingQueue.push({ fd: fd, block: block, func: func });
+        if (!obj.recordingQueueBusy) { recordingWriteNext(); }
+    }
+    function recordingWriteNext() {
+        const w = obj.recordingQueue.shift();
+        if (w == null) { obj.recordingQueueBusy = false; return; }
+        obj.recordingQueueBusy = true;
+        try {
+            parent.parent.fs.write(w.fd, w.block, 0, w.block.length, function () {
+                try { w.func(); } catch (ex) { console.log(ex); }
+                recordingWriteNext();
+            });
+        } catch (ex) { console.log(ex); try { w.func(); } catch (ex2) { console.log(ex2); } recordingWriteNext(); }
+    }
+
     function recordingEntry(fd, type, flags, data, func, tag) {
         try {
             if (typeof data == 'string') {
@@ -1234,8 +1637,8 @@ function CreateDesktopMultiplexor(parent, domain, nodeid, id, func) {
                 header.writeInt32BE(blockData.length, 4); // Size
                 header.writeIntBE(new Date(), 10, 6); // Time
                 var block = Buffer.concat([header, blockData]);
-                parent.parent.fs.write(fd, block, 0, block.length, function () { func(fd, tag); });
                 obj.recordingFileSize += block.length;
+                recordingWrite(fd, block, function () { func(fd, tag); });
             } else {
                 // Binary write
                 var header = Buffer.alloc(16); // Header: Type (2) + Flags (2) + Size(4) + Time(8)
@@ -1244,8 +1647,8 @@ function CreateDesktopMultiplexor(parent, domain, nodeid, id, func) {
                 header.writeInt32BE(data.length, 4); // Size
                 header.writeIntBE(new Date(), 10, 6); // Time
                 var block = Buffer.concat([header, data]);
-                parent.parent.fs.write(fd, block, 0, block.length, function () { func(fd, tag); });
                 obj.recordingFileSize += block.length;
+                recordingWrite(fd, block, function () { func(fd, tag); });
             }
         } catch (ex) { console.log(ex); func(fd, tag); }
     }
@@ -1315,6 +1718,8 @@ module.exports.CreateDesktopMultiplexor = CreateDesktopMultiplexor;
 module.exports.viewerFrameOk = viewerFrameOk;
 module.exports.kvmAckNext = kvmAckNext;
 module.exports.kvmAckConfig = kvmAckConfig;
+module.exports.kvmH264CheckCtrl = kvmH264CheckCtrl;
+module.exports.kvmH264CheckFrame = kvmH264CheckFrame;
 
 module.exports.CreateMeshRelay = function (parent, ws, req, domain, user, cookie) {
     if ((cookie != null) && (typeof cookie.nid == 'string') && (typeof cookie.pid == 'string')) {
@@ -1678,7 +2083,7 @@ function CreateMeshRelayEx2(parent, ws, req, domain, user, cookie) {
                 const rcookieData = { nodeid: node._id, sessionExpire: req.session && req.session.expire };
                 if (user != null) { rcookieData.ruserid = user._id; } else if (obj.nouser === true) { rcookieData.nouser = 1; }
                 const rcookie = parent.parent.encodeCookie(rcookieData, parent.parent.loginCookieEncryptionKey);
-                const command = { nodeid: node._id, action: 'msg', type: 'tunnel', value: '*/meshrelay.ashx?p=2&id=' + obj.id + '&rauth=' + rcookie + '&nodeid=' + node._id, soptions: {}, usage: 2, rights: cookie.r, guestuserid: user._id, guestname: cookie.gn, consent: cookie.cf, remoteaddr: cleanRemoteAddr(obj.req.clientIp) };
+                const command = { nodeid: node._id, action: 'msg', type: 'tunnel', value: '*/meshrelay.ashx?p=2&id=' + obj.id + '&rauth=' + rcookie + '&nodeid=' + node._id, soptions: { desktopMux: true }, usage: 2, rights: cookie.r, guestuserid: user._id, guestname: cookie.gn, consent: cookie.cf, remoteaddr: cleanRemoteAddr(obj.req.clientIp) };
                 if (typeof domain.terminaluservariable == 'string') { command.soptions.terminalUserVariable = domain.terminaluservariable; }
                 if (typeof domain.consentmessages == 'object') {
                     if (typeof domain.consentmessages.title == 'string') { command.soptions.consentTitle = domain.consentmessages.title; }

@@ -3636,6 +3636,7 @@ module.exports.CreateWebServer = function (parent, db, args, certificates, doneF
         if (domain.sitestyle === 3) { features2 |= 0x80000000; } // Indicates that Modern UI is forced (siteStyle = 3)
         if ((typeof domain.desktop == 'object') && (domain.desktop.disableconnectall == true)) { features3 += 0x00000001; } // Disable "Connect All" button when multiple sessions are active on a device
         if (domain.upninsteadofuser === true) { features3 += 0x00000002; } // Show UPN instead of username in General tab
+        if ((typeof domain.desktop == 'object') && (domain.desktop != null) && (domain.desktop.h264 === false)) { features3 += 0x40000000; } // Fork only: H.264 video in the remote desktop is turned off (the option is not offered). A high bit on purpose, so that bits added to features3 by upstream do not collide with it
         return { features: features, features2: features2, features3: features3 };
     }
 
@@ -10295,7 +10296,7 @@ module.exports.CreateWebServer = function (parent, db, args, certificates, doneF
     const acceptableUserWebStateDesktopStrings = [
         'encoding', 'showfocus', 'showmouse', 'quality', 'scaling', 'framerate', 'agentencoding', 'swapmouse',
         'rmw', 'remotekeymap', 'autoclipboard', 'autolock', 'localkeymap', 'kvmrmw', 'rdpsize', 'rdpsmb',
-        'rdprmw', 'rdpautoclipboard', 'rdpflags', 'budget'
+        'rdprmw', 'rdpautoclipboard', 'rdpflags', 'budget', 'frameratever'
     ];
     obj.filterUserWebState = function (state) {
         if (typeof state == 'string') { try { state = JSON.parse(state); } catch (ex) { return null; } }

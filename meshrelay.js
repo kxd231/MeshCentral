@@ -172,6 +172,48 @@ function recordingEntry (logfile, type, flags, data, func, tag) {
 }
 module.exports.recordingEntry = recordingEntry;
 
+// ---- Size limit of ONE session recording (domain.sessionrecording.maxSessionRecordingSizeMegabytes, off by default) ----
+// Not the retention settings (maxRecordings, maxRecordingDays, maxRecordingSizeMegabytes): those delete old finished files, this one stops a session whose own file would grow past the limit.
+// The final record of a file (type 3) is 32 bytes in the binary format, a text recording (messenger) ends with a line of at most about 128 bytes: the limit counts the file as it ends up.
+const RECORDING_LIMIT_WARN = [80, 95];        // percent of the limit at which viewers are told (once each)
+const RECORDING_LIMIT_MIN = 1048576;           // the smallest limit that is applied: 1 MB
+const RECORDING_END_RESERVE = 32;
+const RECORDING_END_RESERVE_TEXT = 128;
+const RECORDING_LIMIT_PROTOCOLS = [1, 2, 5, 6, 8, 9]; // tunnels of the web interface that show console messages of the server (terminal, desktop, files)
+
+// The limit in bytes, 0 = none
+function recordingLimitBytes(domain) {
+    if ((domain == null) || (typeof domain.sessionrecording != 'object') || (domain.sessionrecording == null)) return 0;
+    const mb = domain.sessionrecording.maxsessionrecordingsizemegabytes;
+    if ((typeof mb != 'number') || !isFinite(mb) || (mb <= 0)) return 0;
+    return Math.max(RECORDING_LIMIT_MIN, Math.floor(mb * 1048576)); // a smaller value would end every session at its first picture
+}
+module.exports.recordingLimitBytes = recordingLimitBytes;
+
+// Can a block of blockSize bytes still be written to a file of size bytes, and which warning does that write reach for the first time (0, 80 or 95; warned = the one that was sent already)?
+function recordingLimitCheck(limit, size, blockSize, reserve, warned) {
+    if ((size + blockSize + reserve) > limit) return { allow: false, warn: 0 };
+    const percent = ((size + blockSize) * 100) / limit;
+    var warn = 0;
+    for (var i = 0; i < RECORDING_LIMIT_WARN.length; i++) { if ((percent >= RECORDING_LIMIT_WARN[i]) && (RECORDING_LIMIT_WARN[i] > warned)) { warn = RECORDING_LIMIT_WARN[i]; } }
+    return { allow: true, warn: warn };
+}
+module.exports.recordingLimitCheck = recordingLimitCheck;
+
+function recordingLimitMB(bytes) { const mb = bytes / 1048576; return (mb >= 10) ? Math.round(mb) : ((mb >= 1) ? (Math.round(mb * 10) / 10) : (Math.round(mb * 100) / 100)); }
+
+// The console message for the viewers (agent-redir-ws: type "console", shown in the desktop, terminal and files windows). msg is complete English text for viewers that
+// do not know the id; msgid and msgargs let the page translate it. kind: 80 or 95 (warning), 100 (the end).
+function recordingLimitMessage(kind, limit, size) {
+    const limitMB = recordingLimitMB(limit);
+    if (kind >= 100) {
+        return JSON.stringify({ ctrlChannel: '102938', type: 'console', msg: 'The recording of this session reached its size limit of ' + limitMB + ' MB, so the session has ended. Connect again to start a new recording.', msgid: 'rec-limit-end', msgargs: [limitMB] });
+    }
+    const left = recordingLimitMB(Math.max(0, limit - size));
+    return JSON.stringify({ ctrlChannel: '102938', type: 'console', msg: 'The recording of this session has reached ' + kind + '% of its size limit, ' + left + ' MB of ' + limitMB + ' MB are left. The session ends when the limit is reached; connecting again starts a new recording.', msgid: 'rec-limit-warn', msgargs: [kind, left, limitMB], timeout: 30 });
+}
+module.exports.recordingLimitMessage = recordingLimitMessage;
+
 function CreateMeshRelayEx(parent, ws, req, domain, user, cookie) {
     const currentTime = Date.now();
     if (cookie) {
@@ -560,7 +602,7 @@ function CreateMeshRelayEx(parent, ws, req, domain, user, cookie) {
 
                                     if (xdevicename2 != null) { metadata.devicename = xdevicename2; }
                                     var firstBlock = JSON.stringify(metadata);
-                                    var logfile = { fd: fd, lock: false, filename: recFullFilename, startTime: Date.now(), size: 0, text: xtextSession };
+                                    var logfile = { fd: fd, lock: false, filename: recFullFilename, startTime: Date.now(), size: 0, text: xtextSession, limit: recordingLimitBytes(domain), warned: 0 };
                                     if (node != null) { logfile.nodeid = node._id; logfile.meshid = node.meshid; logfile.name = node.name; logfile.icon = node.icon; }
                                     recordingEntry(logfile, 1, 0, firstBlock, function () {
                                         try { relayinfo.peer1.ws.logfile = ws.logfile = logfile; } catch (ex) {
@@ -698,6 +740,8 @@ function CreateMeshRelayEx(parent, ws, req, domain, user, cookie) {
             //if (typeof data == 'string') { console.log('Relay: ' + data); } else { console.log('Relay:' + data.length + ' byte(s)'); }
             // If this session is recorded, drop WebRTC offers. WebRTC traffic bypasses the server and would leave the recording empty.
             if ((this.logfile != null) && isWebRtcOffer(data)) { parent.parent.debug('relay', 'Relay: dropped a WebRTC offer in a recorded session'); return; }
+            // Size limit of one recording: the block that does not fit is not written and not relayed, the session ends
+            if ((this.logfile != null) && (this.logfile.limit > 0) && recordingLimitStop(this.logfile, data)) return;
             if (this.peer.slowRelay == null) {
                 try {
                     this._socket.pause();
@@ -785,6 +829,44 @@ function CreateMeshRelayEx(parent, ws, req, domain, user, cookie) {
                 obj.expireTimer = setTimeout(closeBothSides, timeToExpire);
             }
         }
+    }
+
+    // Size limit of one recording (see recordingLimitBytes). Returns true when the data must not be written or relayed because the limit was reached; the session is ended then.
+    // The browser side gets a console message at 80 % and 95 % and when the session ends, where its page shows them: not for messenger and Intel AMT sessions.
+    function recordingLimitStop(logfile, data) {
+        if (logfile.full === true) return true; // the end is decided, whatever still arrives is dropped
+        // A text recording (messenger) writes strings only, with a date in front of every line; binary data is not written at all
+        const block = logfile.text ? ((typeof data == 'string') ? (Buffer.byteLength(data) + 64) : 0) : (16 + ((typeof data == 'string') ? Buffer.byteLength(data) : data.length));
+        const r = recordingLimitCheck(logfile.limit, logfile.size, block, logfile.text ? RECORDING_END_RESERVE_TEXT : RECORDING_END_RESERVE, logfile.warned);
+        if (r.allow === false) {
+            logfile.full = true;
+            parent.parent.debug('relay', 'Relay: recording size limit of ' + logfile.limit + ' bytes reached: ' + logfile.filename);
+            var ended = false; // the session is closed once the message has left (a compressed websocket sends it later), or after 2 seconds
+            var endSession = function () { if (ended) return; ended = true; closeBothSides(); };
+            var event = { etype: 'relay', action: 'relaylog', domain: domain.id, nodeid: logfile.nodeid, msg: 'Recording size limit of ' + recordingLimitMB(logfile.limit) + ' MB reached, session \"' + obj.id + '\" was ended', protocol: ((obj.req && obj.req.query) ? obj.req.query.p : null), filename: parent.parent.path.basename(logfile.filename), size: logfile.size, limit: logfile.limit };
+            var evuser = user ? user : ((obj.peer && obj.peer.user) ? obj.peer.user : null);
+            if (evuser) { event.userid = evuser._id; event.username = evuser.name; }
+            parent.parent.DispatchEvent(['*', logfile.nodeid, logfile.meshid], obj, event);
+            if (recordingLimitTell(logfile, recordingLimitMessage(100, logfile.limit, logfile.size), endSession)) { setTimeout(endSession, 2000); } else { endSession(); }
+            return true;
+        }
+        if (r.warn > 0) {
+            logfile.warned = r.warn;
+            recordingLimitTell(logfile, recordingLimitMessage(r.warn, logfile.limit, logfile.size + block));
+        }
+        return false;
+    }
+
+    // Send a console message to the browser side of a recorded session, when that side takes it
+    // Returns true when a message was sent (done is called after it was written)
+    function recordingLimitTell(logfile, message, done) {
+        if (logfile.text) return false;
+        var browser = null;
+        if ((obj.req != null) && (obj.req.query != null) && obj.req.query.browser) { browser = ws; }
+        else if ((obj.peer != null) && (obj.peer.req != null) && (obj.peer.req.query != null) && obj.peer.req.query.browser) { browser = obj.peer.ws; }
+        const p = (obj.req && obj.req.query) ? obj.req.query.p : null;
+        if ((browser == null) || (RECORDING_LIMIT_PROTOCOLS.indexOf(p) < 0)) return false;
+        try { browser.send(message, done); return true; } catch (ex) { return false; }
     }
 
     // Close both our side and the peer side.

@@ -399,6 +399,155 @@ function destopLockHelper_pipe(httprequest) {
     }
 }
 
+//
+// KVM end-to-end ACK and H.264 video. All tunnels of this device share one KVM process, so the video state is one per device.
+// Two or more tunnels on the KVM stream: video and the end-to-end ACK are switched off for everybody (command 240, op 5, source bit 0 = meshcore) and come back
+// when one is left (op 6). A tunnel that the server records ('cr') is not another viewer; it only asks for a key frame every 30 s, so the recording can be searched.
+// Commands are 16 bytes: type 240, size 16, version 1, op, flags.
+//
+// Who may write what into the shared KVM input: a tunnel of a browser never writes 240 op 5 or op 6 (the veto is global to the device: a viewer must not be
+// able to set or lift a veto that outlives its own session). The only exception is the one tunnel of the desktop multiplexor, which the server marks itself in the
+// tunnel request (soptions.desktopMux, set in meshuser.js and never taken from the browser): it may write op 5 and op 6 with source bit 1 (flags 2) and no other flags.
+// An unmarked tunnel (a server without the mark) therefore passes no op 5/6 at all; the veto of meshcore (source bit 0) is unaffected. All other 240 of a tunnel are limited
+// to a token bucket per tunnel, so a flood of valid commands cannot fill the small command queue of the agent in front of the veto commands of meshcore.
+//
+// None of this is done unless the agent says it speaks the protocol: the desktop stream object of the agent has the property kvmVideoProtocol >= 1 (set by agentcore.c
+// of an agent with commands 240-243). For any other agent the input of a tunnel is piped to the KVM exactly as it always was and nothing is written to it.
+//
+function kvmVideoProtocol(kvm) { return (kvm != null) && (typeof kvm.kvmVideoProtocol == 'number') && (kvm.kvmVideoProtocol >= 1); }
+function kvmVideoCtrl(op, flags)
+{
+    var b = Buffer.alloc(16);
+    b[1] = 240; b[3] = 16; b[4] = 1; b[5] = op; b[6] = flags;
+    return b;
+}
+var KVM_VETO_RETRY_MS = 2000, KVM_VETO_OFF_RETRIES = 3;
+function kvmVetoWrite(kvm, want)
+{
+    try { kvm.write(kvmVideoCtrl(want ? 5 : 6, 1)); } catch (ex) { sendConsoleText('KVM: the video veto could not be written, ' + ex); }
+}
+// The veto of meshcore follows the number of tunnels. The command queue of the agent can refuse a command when it is full and meshcore gets no answer, so the command is not
+// taken as delivered: while two or more tunnels are on the stream op 5 is written again every KVM_VETO_RETRY_MS, and after the count falls to one op 6 is written
+// KVM_VETO_OFF_RETRIES more times. Both are idempotent in the agent (op 5 sets the bit, op 6 clears it, a stray op 6 changes nothing).
+function kvmVetoTimer(kvm)
+{
+    if (kvm.kvmVetoTimer != null) { return; }
+    kvm.kvmVetoTimer = setInterval(function ()
+    {
+        var want = (kvm.connectionCount >= 2);
+        if (want) { kvmVetoWrite(kvm, true); return; }
+        if ((kvm.kvmVetoOffLeft > 0) && (kvm.connectionCount >= 1)) { --kvm.kvmVetoOffLeft; kvmVetoWrite(kvm, false); }
+        if (!(kvm.kvmVetoOffLeft > 0) || !(kvm.connectionCount >= 1)) { clearInterval(kvm.kvmVetoTimer); kvm.kvmVetoTimer = null; }
+    }, KVM_VETO_RETRY_MS);
+}
+function kvmVetoSync(kvm)
+{
+    if (!kvmVideoProtocol(kvm)) { return; }
+    var want = (kvm.connectionCount >= 2);
+    if (want == (kvm.kvmVetoSent === true)) { return; }
+    kvm.kvmVetoSent = want;
+    kvm.kvmVetoOffLeft = want ? 0 : KVM_VETO_OFF_RETRIES;
+    kvmVetoWrite(kvm, want);
+    kvmVetoTimer(kvm);
+}
+// The input of one tunnel as whole commands. The agent reads its stdin as one stream of commands (type, size), keeps an unfinished command between reads and steps over a size
+// of 1 to 3, so a filter that looks at each message alone can be fooled by a command split over two messages or hidden behind a short size, and an unfinished command of a
+// tunnel would swallow what meshcore writes next. state.pending holds the unfinished tail (at most KVM_STDIN_MAX_CMD - 1 bytes). Returns the whole commands to write,
+// or null. Left out: 240 op 5 and op 6 unless state.mux (the tunnel of the multiplexor, marked by the server) writes them with flags 2 (source bit 1) exactly, and 240 over the
+// token bucket of the tunnel (KVM_CTRL_RATE per second, KVM_CTRL_BURST at most). A size below 4 or above KVM_STDIN_MAX_CMD ends the stream of that tunnel: the rest of the message and what is pending are
+// dropped. A message that is exactly one whole command is returned as it is.
+// The agent frames its stdin by the same limits (kvm_stdin.h): for a size below 4 it skips the 4 header bytes, for a size above KVM_STDIN_MAX_CMD it skips the whole declared
+// length, and its parent tracker does the same. Meshcore passes neither kind on, so the agent never has to resync on a frame whose content this filter has not seen as commands.
+var KVM_STDIN_MAX_CMD = 30000;
+var KVM_CTRL_RATE = 20, KVM_CTRL_BURST = 20;
+function kvmCtrlAllowed(state, d, p)
+{
+    if ((d[p + 5] == 5) || (d[p + 5] == 6)) { return ((state.mux === true) && (d[p + 6] == 2)); } // the veto of the multiplexor does not use the tokens of the tunnel
+    var now = Date.now();
+    if (state.tokens == null) { state.tokens = KVM_CTRL_BURST; state.last = now; }
+    if (now > state.last) { state.tokens = Math.min(KVM_CTRL_BURST, state.tokens + (((now - state.last) * KVM_CTRL_RATE) / 1000)); }
+    state.last = now;
+    if (state.tokens < 1) { return false; }
+    state.tokens -= 1;
+    return true;
+}
+function kvmInputFeed(state, chunk)
+{
+    if ((chunk == null) || (typeof chunk != 'object')) { return null; }
+    var data = chunk;
+    if (state.pending != null)
+    {
+        data = Buffer.alloc(state.pending.length + chunk.length);
+        state.pending.copy(data, 0);
+        chunk.copy(data, state.pending.length);
+        state.pending = null;
+    }
+    var p = 0, ranges = [];
+    while ((data.length - p) >= 4)
+    {
+        var cmdsize = (data[p + 2] << 8) + data[p + 3];
+        if ((cmdsize < 4) || (cmdsize > KVM_STDIN_MAX_CMD)) { p = data.length; break; }
+        if ((p + cmdsize) > data.length) { break; }
+        if ((data[p] == 0) && (data[p + 1] == 240) && (cmdsize == 16) && !kvmCtrlAllowed(state, data, p)) { /* not for this tunnel: the command is left out */ }
+        else if ((ranges.length > 0) && (ranges[ranges.length - 1] == p)) { ranges[ranges.length - 1] = p + cmdsize; }
+        else { ranges.push(p); ranges.push(p + cmdsize); }
+        p += cmdsize;
+    }
+    if (p < data.length)
+    {
+        state.pending = Buffer.alloc(data.length - p);
+        data.copy(state.pending, 0, p, data.length);
+    }
+    if (ranges.length == 0) { return null; }
+    if ((ranges.length == 2) && (ranges[0] == 0) && (ranges[1] == data.length)) { return data; }
+    var total = 0, i, out, o = 0;
+    for (i = 0; i < ranges.length; i += 2) { total += (ranges[i + 1] - ranges[i]); }
+    out = Buffer.alloc(total);
+    for (i = 0; i < ranges.length; i += 2) { data.copy(out, o, ranges[i], ranges[i + 1]); o += (ranges[i + 1] - ranges[i]); }
+    return out;
+}
+// The sink between a tunnel (or its WebRTC channel) and the KVM input. One per tunnel. The tunnel of the multiplexor is the one the server marked in the tunnel request.
+function kvmInputSink(ws)
+{
+    if (ws.kvmInput == null)
+    {
+        ws.kvmInput = new writable(
+            {
+                'write': function (chunk, flush)
+                {
+                    var data = kvmInputFeed(this.framer, chunk);
+                    if ((data != null) && (data.length > 0)) { this.kvm.write(data); }
+                    flush();
+                    return (true);
+                },
+                'final': function (flush) { flush(); }
+            });
+        ws.kvmInput.kvm = ws.httprequest.desktop.kvm;
+        ws.kvmInput.framer = { pending: null, mux: ((ws.httprequest.soptions != null) && (ws.httprequest.soptions.desktopMux === true)), tokens: null, last: 0 };
+    }
+    return ws.kvmInput;
+}
+// Where the input of a tunnel goes: the KVM itself, as always, unless the agent speaks the video protocol
+function kvmInputTarget(ws)
+{
+    var kvm = ws.httprequest.desktop.kvm;
+    return kvmVideoProtocol(kvm) ? kvmInputSink(ws) : kvm;
+}
+// A tunnel that the server records (1-to-1 relay) asks for a key frame every 30 s. Only the agent decides whether there is video; without it the command does nothing.
+// In a session through the multiplexor the multiplexor does this (it sends the agent 'c', not 'cr').
+function kvmRecordingKeyFrames(ws)
+{
+    if ((ws.httprequest.recording !== true) || (ws.kvmKeyTimer != null) || !kvmVideoProtocol(ws.httprequest.desktop.kvm)) { return; }
+    ws.kvmKeyTimer = setInterval(function ()
+    {
+        try { ws.httprequest.desktop.kvm.write(kvmVideoCtrl(3, 1)); } catch (ex) { }
+    }, 30000);
+}
+function kvmRecordingKeyFramesStop(ws)
+{
+    if (ws.kvmKeyTimer != null) { clearInterval(ws.kvmKeyTimer); ws.kvmKeyTimer = null; }
+}
+
 var obj = { serverInfo: {} };
 var agentFileHttpRequests = {}; // Currently active agent HTTPS GET requests from the server.
 var agentFileHttpPendingRequests = []; // Pending HTTPS GET requests from the server.
@@ -3057,6 +3206,8 @@ function terminal_promise_consent_resolved()
 function tunnel_kvm_end()
 {
     --this.desktop.kvm.connectionCount;
+    kvmRecordingKeyFramesStop(this);
+    kvmVetoSync(this.desktop.kvm);
 
     // Remove ourself from the list of remote desktop session
     var i = this.desktop.kvm.tunnels.indexOf(this);
@@ -3086,6 +3237,7 @@ function tunnel_kvm_end()
     // Unpipe the web socket
     try
     {
+        if (this.kvmInput != null) { this.unpipe(this.kvmInput); }
         this.unpipe(this.httprequest.desktop.kvm);
         this.httprequest.desktop.kvm.unpipe(this);
     } catch (ex) { }
@@ -3095,6 +3247,7 @@ function tunnel_kvm_end()
     {
         try
         {
+            if (this.kvmInput != null) { this.rtcchannel.unpipe(this.kvmInput); }
             this.rtcchannel.unpipe(this.httprequest.desktop.kvm);
             this.httprequest.desktop.kvm.unpipe(this.rtcchannel);
         }
@@ -3555,6 +3708,7 @@ function onTunnelData(data)
     if (this.httprequest.state == 0) {
         // Check if this is a relay connection
         if ((data == 'c') || (data == 'cr')) {
+            this.httprequest.recording = (data == 'cr'); // the server records this session
             this.httprequest.state = 1;
             //sendConsoleText("Tunnel #" + this.httprequest.index + " now active", this.httprequest.sessionid);
         }
@@ -3768,11 +3922,13 @@ function onTunnelData(data)
                     this.httprequest.desktop.kvm.rusers = [this.httprequest.realname];
                     this.httprequest.desktop.kvm.users = [this.httprequest.username];
                 }
+                kvmVetoSync(this.httprequest.desktop.kvm); // the second tunnel ends video and end-to-end ACK for all of them
+                kvmRecordingKeyFrames(this);
 
                 if ((this.httprequest.desktopviewonly != true) && ((this.httprequest.rights == 0xFFFFFFFF) || (((this.httprequest.rights & MESHRIGHT_REMOTECONTROL) != 0) && ((this.httprequest.rights & MESHRIGHT_REMOTEVIEW) == 0))))
                 {
                     // If we have remote control rights, pipe the KVM input
-                    this.pipe(this.httprequest.desktop.kvm, { dataTypeSkip: 1, end: false }); // 0 = Binary, 1 = Text. Pipe the Browser --> KVM input.
+                    this.pipe(kvmInputTarget(this), { dataTypeSkip: 1, end: false }); // 0 = Binary, 1 = Text. Pipe the Browser --> KVM input (through the filter for the veto commands when the agent speaks the video protocol).
                 }
                 else
                 {
@@ -4425,6 +4581,7 @@ function tunnel_webrtc_onEnd()
     {
         try
         {
+            if (this.websocket.kvmInput != null) { this.unpipe(this.websocket.kvmInput); }
             this.unpipe(this.websocket.desktop.kvm);
             this.websocket.httprequest.desktop.kvm.unpipe(this);
         } catch (ex) { }
@@ -4572,10 +4729,11 @@ function onTunnelControlData(data, ws) {
             else if (ws.httprequest.protocol == 2)
             { // Desktop
                 // Switch the user input from websocket to webrtc at this point.
+                if (ws.kvmInput != null) { ws.unpipe(ws.kvmInput); }
                 ws.unpipe(ws.httprequest.desktop.kvm);
                 if ((ws.httprequest.desktopviewonly != true) && ((ws.httprequest.rights == 0xFFFFFFFF) || (((ws.httprequest.rights & MESHRIGHT_REMOTECONTROL) != 0) && ((ws.httprequest.rights & MESHRIGHT_REMOTEVIEW) == 0)))) {
                     // If we have remote control rights, pipe the KVM input
-                    try { ws.webrtc.rtcchannel.pipe(ws.httprequest.desktop.kvm, { dataTypeSkip: 1, end: false }); } catch (ex) { sendConsoleText('EX2'); } // 0 = Binary, 1 = Text.
+                    try { ws.webrtc.rtcchannel.pipe(kvmInputTarget(ws), { dataTypeSkip: 1, end: false }); } catch (ex) { sendConsoleText('EX2'); } // 0 = Binary, 1 = Text.
                 } else {
                     // We need to only pipe non-mouse & non-keyboard inputs.
                     // sendConsoleText('Warning: No Remote Desktop Input Rights.');
