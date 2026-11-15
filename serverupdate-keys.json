@@ -1,5 +1,18 @@
 {
   "schemaVersion": 1,
-  "keys": [],
+  "keys": [
+    {
+      "keyId": "0a82b09e6cee98fa",
+      "algorithm": "ed25519",
+      "publicKey": "ZEEwlMcXZS41xVeuHqAXUqMozJBNv67ou3tDSALcxkk",
+      "comment": "primary"
+    },
+    {
+      "keyId": "0264269372b7353d",
+      "algorithm": "ed25519",
+      "publicKey": "pCg8Xp692NT0UFRzarfSVKv5MgH91bY6iThingRNGgg",
+      "comment": "backup"
+    }
+  ],
   "revoked": []
 }
