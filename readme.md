@@ -106,9 +106,10 @@ Configuration, databases, TLS, reverse proxies, users and everything else not li
 ## Updating
 
 - **From 1.3.1-custom.3 on:** the Update button in the web interface, or `selfUpdate`, as described above.
-- **From 1.3.1-custom.2 or older, once:** these versions do not know the signing key yet. Add the entry from the
-  release notes to `meshcentral-data/serverupdate-pins.json`, start the update in the web interface and restart the
-  service when it is done. Later versions need nothing by hand.
+- **From 1.3.1-custom.2 or older, once:** these versions do not know the signing key yet. Add the pin of the new
+  version to `meshcentral-data/serverupdate-pins.json` (the release notes show it; your own build of the tag with
+  `tools/release/build-server-tgz.sh` prints the same), start the update in the web interface and restart the service
+  when it is done. Later versions need nothing by hand.
 - **From the upstream npm package:** install the fork once by hand as above.
 - **Back to upstream:** install the upstream package by hand (`npm install --save-exact meshcentral@<version>`) and
   restart the service. The fork does not install npm packages by itself.
