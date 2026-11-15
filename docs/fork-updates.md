@@ -67,7 +67,31 @@ apply. The proxy is `npmProxy`, or when that is not set the `HTTPS_PROXY`/`HTTP_
 environment variables; `NO_PROXY` is ignored.
 
 Self-update only works when MeshCentral is installed as `node_modules/meshcentral` and is
-not a Windows service or a Docker image; otherwise update the installation by hand.
+not a Windows service or a Docker image; otherwise update the installation by hand. The
+server checks this at start (and the parent process again before it installs anything).
+When it is blocked, the version dialog shows why, the update button and the check boxes are
+off, the console command `serverupdate` answers `Server self-update not possible.`, and
+`selfUpdate` does not restart the server. The reasons and their messages:
+
+| Reason | Message |
+|---|---|
+| `windows-service` (a `daemon` folder next to `meshcentral.js`) | MeshCentral runs as a Windows service and cannot update itself. Update it by hand. |
+| `container` (`MESHCENTRAL_CONTAINER=1`, set by the Docker images of this repository) | MeshCentral runs in a container. Update the container image to install a new version. |
+| `not-package` (the code is not in a folder `node_modules/meshcentral`, for example a git clone) | MeshCentral is not installed as node_modules/meshcentral, so it cannot update itself. Update it by hand (see docs/fork-updates.md). |
+| `not-writable` (`meshcentral-data/serverstate.txt` cannot be written) | The server cannot write to its data folder, so it cannot update itself. |
+
+The reason is checked this strictly because `npm install <tarball>` in another layout
+succeeds without replacing the running code, which would look like a successful update.
+
+**Who may start an update.** Only a full administrator of the default domain, who is not
+signed in with a login token, and only when the `myServer` settings of the domain allow the
+upgrade (no `myServer` setting, `true`, or `upgrade: true`). The same rule applies to the
+update button, the web socket command `serverupdate` and the feature flag that enables the
+button; the console command already needs a full administrator and now also refuses other
+domains. Users with only the "Server Updates" right can still see the versions. A refused
+request is answered with `{ action: 'serverupdate', result: 'error', code, message }`. The text is
+"Only a full administrator of the default domain can start a server update.", and for a login token
+(also on a WebSocket, e.g. meshctrl) "Sign in with your password, not a login token, to start a server update."
 
 ## Local pins
 

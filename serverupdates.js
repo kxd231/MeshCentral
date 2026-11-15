@@ -185,6 +185,55 @@ function resolveSettings(args) {
     return { source: 'github', repository: repository, error: null };
 }
 
+// ---- install layout and permission (who may update, and where) ----
+const LAYOUT_MESSAGES = {
+    'windows-service': 'MeshCentral runs as a Windows service and cannot update itself. Update it by hand.',
+    'container': 'MeshCentral runs in a container. Update the container image to install a new version.',
+    'not-package': 'MeshCentral is not installed as node_modules/meshcentral, so it cannot update itself. Update it by hand (see docs/fork-updates.md).'
+};
+const PERMISSION_MESSAGE = 'Only a full administrator of the default domain can start a server update.';
+const LOGIN_TOKEN_MESSAGE = 'Sign in with your password, not a login token, to start a server update.';
+
+// Whether this installation can update itself. "npm install <tarball>" puts the new code in <parentpath>/node_modules/meshcentral,
+// so the running code must be that very folder; in a container or a git clone the install would succeed but change nothing.
+// dirname: __dirname of meshcentral.js; env: process.env; daemon: true when <dirname>/daemon exists (Windows service).
+// Returns { allowed, reason, message }.
+function installLayout(options) {
+    options = options || {};
+    const env = options.env || {};
+    if (options.daemon === true) { return { allowed: false, reason: 'windows-service', message: LAYOUT_MESSAGES['windows-service'] }; }
+    if (env.MESHCENTRAL_CONTAINER === '1') { return { allowed: false, reason: 'container', message: LAYOUT_MESSAGES['container'] }; }
+    if ((typeof options.dirname !== 'string') || !/[\\/]node_modules[\\/]meshcentral[\\/]?$/.test(options.dirname)) { return { allowed: false, reason: 'not-package', message: LAYOUT_MESSAGES['not-package'] }; }
+    return { allowed: true, reason: null, message: null };
+}
+
+// Whether the exit of the server process is a server update: it announced one in its output (xrestart 3) and ended with the exit code of
+// performServerUpdate (200). The output alone is not enough: text printed by anything that reaches the console must not turn a crash into an update.
+function isUpdateExit(xrestart, error) { return (xrestart === 3) && (error != null) && (error.code === 200); }
+
+// The login token of a session, or null for a login with a password. A login with the form sets loginToken; a login of a WebSocket
+// (meshctrl with a token, scripts) sets tokenUser. Both mean "signed in with a login token".
+function sessionLoginToken(session) {
+    if (session == null) { return null; }
+    if (session.loginToken != null) { return session.loginToken; }
+    if (session.tokenUser != null) { return session.tokenUser; }
+    return null;
+}
+
+// Who may start a server update: a full administrator of the default domain, not signed in with a login token, in a domain
+// whose My Server settings allow the upgrade (true, an object with upgrade === true, or no setting at all).
+// Returns { allowed, reason, message }.
+function updatePermission(options) {
+    options = options || {};
+    const refuse = function (reason) { return { allowed: false, reason: reason, message: (reason === 'login-token') ? LOGIN_TOKEN_MESSAGE : PERMISSION_MESSAGE }; };
+    if (options.loginToken != null) { return refuse('login-token'); }
+    if (options.siteadmin !== 0xFFFFFFFF) { return refuse('not-full-admin'); }
+    if (options.domainId !== '') { return refuse('not-default-domain'); }
+    const myserver = options.myserver;
+    if ((myserver === false) || ((myserver != null) && (myserver !== true) && (myserver.upgrade !== true))) { return refuse('myserver'); }
+    return { allowed: true, reason: null, message: null };
+}
+
 // ---- npm command lines (source "npm"), exactly the strings the server always used ----
 function npmProxyFlag(npmproxy) { return (typeof npmproxy === 'string') ? (' --proxy ' + npmproxy) : ''; }
 function npmCommandLine(npmpath, npmproxy, kind, version) {
@@ -438,5 +487,5 @@ function createServerUpdater(options) {
 
 module.exports = {
     DEFAULT_REPOSITORY, FOLDER_NAME, PINS_FILE, NPM_INSTALL_BLOCKED, MAX_ASSET_BYTES, readPins, parseVersion, compareVersions, validRepository, assetNameFor, parseDigest,
-    selectReleases, resolveSettings, updateNeeded, selfUpdateValid, selfUpdateIsCurrent, selfUpgradeRequest, npmCommandLine, buildLocalInstall, shellQuote, readTgzPackageJson, createServerUpdater, FAILURE_RETRY_MS
+    selectReleases, resolveSettings, installLayout, updatePermission, sessionLoginToken, isUpdateExit, updateNeeded, selfUpdateValid, selfUpdateIsCurrent, selfUpgradeRequest, npmCommandLine, buildLocalInstall, shellQuote, readTgzPackageJson, createServerUpdater, FAILURE_RETRY_MS
 };

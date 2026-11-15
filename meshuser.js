@@ -7206,7 +7206,11 @@ module.exports.CreateMeshUser = function (parent, db, ws, req, args, domain, use
         });
     }
 
-    function serverCommandPrint(command) { console.log(command.value); }
+    // Writes text to the console of the server process. The parent process reads that output for its own commands, so only a full administrator of the default domain may do it.
+    function serverCommandPrint(command) {
+        if ((user.siteadmin !== SITERIGHT_ADMIN) || (domain.id !== '') || (typeof command.value != 'string')) { return; }
+        console.log(command.value);
+    }
 
     function serverCommandRemovePhone(command) {
         // Do not allow this command when logged in using a login token
@@ -7418,24 +7422,43 @@ module.exports.CreateMeshUser = function (parent, db, ws, req, args, domain, use
     }
 
     function serverCommandServerUpdate(command) {
-        // Do not allow this command when logged in using a login token
-        if (req.session.loginToken != null) return;
+        const reply = r => { try { obj.send(Object.assign({ action: 'serverupdate', responseid: command.responseid }, r)); } catch (ex) { } };
 
-        // Perform server update
-        if (userHasSiteUpdate() && domainHasMyServerUpgrade() && !((command.version != null) && (typeof command.version != 'string')))
-            parent.parent.performServerUpdate(command.version);
+        // Only a full administrator of the default domain, not signed in with a login token, may start a server update
+        const perm = serverUpdatePermission();
+        if (!perm.allowed) { reply({ result: 'error', code: perm.reason, message: perm.message }); return; }
+        if ((command.version != null) && ((typeof command.version != 'string') || (command.version.length > 40))) { reply({ result: 'error', code: 'version', message: 'Invalid version.' }); return; }
+
+        // Perform server update. When it starts, the server exits and restarts, so there is no reply.
+        if (parent.parent.performServerUpdate(command.version) === false) {
+            const avail = parent.parent.getServerUpdateAvailability();
+            reply({ result: 'error', code: avail.reason || 'disabled', message: avail.message || 'Server self-update not possible.' });
+        }
+    }
+
+    // Whether this user may start a server update, see serverupdates.js
+    function serverUpdatePermission() {
+        return require('./serverupdates.js').updatePermission({ siteadmin: user.siteadmin, domainId: domain.id, loginToken: require('./serverupdates.js').sessionLoginToken(req && req.session), myserver: domain.myserver });
+    }
+
+    // What the "update" field of a serverversion reply says: the first reason that blocks an update, the server side before the user side
+    function serverUpdateStatus() {
+        const avail = parent.parent.getServerUpdateAvailability(), perm = serverUpdatePermission();
+        // A user who may not start updates at all (another domain, a login token) is not told how this installation looks
+        const first = (!perm.allowed && ((perm.reason === 'not-default-domain') || (perm.reason === 'login-token'))) ? perm : (avail.allowed ? perm : avail);
+        return { allowed: (avail.allowed && perm.allowed), reason: first.reason, message: first.message };
     }
 
     function serverCommandServerVersion(command) {
-        // Check the server version
+        // Check the server version. The update field is next to tags, not inside it, because meshctrl prints the tags.
         if (command.responseid != null) {
             if (userHasSiteUpdate() && domainHasMyServerUpgrade()) {
-                parent.parent.getServerTags(function (tags, err) { obj.send({ action: 'serverversion', responseid: command.responseid, result: 'OK', tags: tags }); });
+                parent.parent.getServerTags(function (tags, err) { obj.send({ action: 'serverversion', responseid: command.responseid, result: 'OK', tags: tags, update: serverUpdateStatus() }); });
             }
             else { obj.send({ action: 'serverversion', responseid: command.responseid, result: 'Permission denied' }); }
         }
         else if (userHasSiteUpdate() && domainHasMyServerUpgrade()) {
-            parent.parent.getServerTags(function (tags, err) { obj.send({ action: 'serverversion', tags: tags }); });
+            parent.parent.getServerTags(function (tags, err) { obj.send({ action: 'serverversion', tags: tags, update: serverUpdateStatus() }); });
         }
     }
 
@@ -8103,6 +8126,11 @@ module.exports.CreateMeshUser = function (parent, db, ws, req, args, domain, use
     }
 
     function serverUserCommandServerUpdate(cmdData) {
+        // The same rule as the button and the web socket command: a full administrator of the default domain, not with a login token, in a domain that allows the upgrade
+        const perm = serverUpdatePermission();
+        if (!perm.allowed) { cmdData.result = 'Server self-update not possible. ' + perm.message; return; }
+        // Why it is not possible (the layout of the installation, a Windows service ...), for the administrator at the console
+        const notPossible = function () { const avail = parent.parent.getServerUpdateAvailability(); return 'Server self-update not possible.' + (avail.message ? (' ' + avail.message) : ''); };
         cmdData.result = 'Performing server update...';
         var version = null;
 
@@ -8118,7 +8146,7 @@ module.exports.CreateMeshUser = function (parent, db, ws, req, args, domain, use
                         if (parent.parent.performServerUpdate(version) == false) { 
                             try { 
                                 ws.send(JSON.stringify({ action: 'serverconsole',
-                                                         value: 'Server self-update not possible.'}));
+                                                         value: notPossible() }));
                             } catch (ex) { }
                         }
                     } else {
@@ -8130,12 +8158,12 @@ module.exports.CreateMeshUser = function (parent, db, ws, req, args, domain, use
                 });
             } else {
                 if (parent.parent.performServerUpdate(version) == false) { 
-                    cmdData.result = 'Server self-update not possible.';
+                    cmdData.result = notPossible();
                 }
             }  
         } else {
             if (parent.parent.performServerUpdate(version) == false) { 
-                cmdData.result = 'Server self-update not possible.';
+                cmdData.result = notPossible();
             }
         }
     }

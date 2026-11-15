@@ -27,6 +27,8 @@ So for another quick example: if you want to get a released version with a Mongo
 So for another quick example: if you want a very slim image with the latest code and only a local database: `ghcr.io/ylianst/meshcentral:master-slim`<br>
 So as a last example: if you want to get a MariaDB/MySQL backend with MeshCentral version 1.1.53: `ghcr.io/ylianst/meshcentral:1.1.53-mysql`
 
+The images built from the Dockerfiles in this folder set `MESHCENTRAL_CONTAINER=1`, which turns the server self-update through the web interface off. Update the container by pulling a new image.
+
 ## Persistency
 
 The Docker image has since recently removed its default creation of volumes. It might not be what you want.<br>

@@ -3167,6 +3167,10 @@
                     }
                     break;
                 }
+                case 'serverupdate': {
+                    if (message.result == 'error') { messagebox("MeshCentral Version", EscapeHtml(message.message)); }
+                    break;
+                }
                 case 'serverbackupready': {
                     server_backupReady(message);
                     break;
@@ -3177,12 +3181,14 @@
                         if (!message.tags.current) { message.tags.current = "Unknown"; }
                         if (!message.tags.stable) { message.tags.stable = "Unknown"; }
                         if (!message.tags.latest) { message.tags.latest = "Unknown"; }
+                        var updateBlocked = (message.update && !message.update.allowed); // The server says why an update is not possible
                         x += addHtmlValue2("Current Version", '<b>' + EscapeHtml(message.tags.current) + '</b>');
                         x += '<hr />';
-                        x += addHtmlValue2('<label><input id=d2updateCheck1 type=checkbox onclick=server_showVersionDlgUpdate()' + (((message.tags.stable == "Unknown") || (message.tags.current == message.tags.stable) || ((features & 2048) == 0))?' disabled':'') + ' /> ' + "Stable Version" + '</label>', '<b>' + EscapeHtml(message.tags.stable) + '</b>');
-                        x += addHtmlValue2('<label><input id=d2updateCheck2 type=checkbox onclick=server_showVersionDlgUpdate()' + (((message.tags.latest == "Unknown") || (message.tags.current == message.tags.latest) || ((features & 2048) == 0))?' disabled':'') + ' /> ' + "Latest Version" + '</label>', '<b>' + EscapeHtml(message.tags.latest) + '</b>');
+                        x += addHtmlValue2('<label><input id=d2updateCheck1 type=checkbox onclick=server_showVersionDlgUpdate()' + (((message.tags.stable == "Unknown") || (message.tags.current == message.tags.stable) || ((features & 2048) == 0) || updateBlocked)?' disabled':'') + ' /> ' + "Stable Version" + '</label>', '<b>' + EscapeHtml(message.tags.stable) + '</b>');
+                        x += addHtmlValue2('<label><input id=d2updateCheck2 type=checkbox onclick=server_showVersionDlgUpdate()' + (((message.tags.latest == "Unknown") || (message.tags.current == message.tags.latest) || ((features & 2048) == 0) || updateBlocked)?' disabled':'') + ' /> ' + "Latest Version" + '</label>', '<b>' + EscapeHtml(message.tags.latest) + '</b>');
+                        if (updateBlocked) { x += '<div class=dialogText>' + EscapeHtml(message.update.message) + '</div>'; }
                         x += '</div>';
-                        if (((message.tags.current == message.tags.latest) && (message.tags.current == message.tags.stable)) || ((features & 2048) == 0)) {
+                        if (((message.tags.current == message.tags.latest) && (message.tags.current == message.tags.stable)) || ((features & 2048) == 0) || updateBlocked) {
                             setDialogMode(2, "MeshCentral Version", 1, null, x);
                         } else {
                             x += '<hr />' + "Check and click OK to start server self-update.";

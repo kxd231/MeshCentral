@@ -84,6 +84,7 @@ COPY --from=dep-compiler /opt/meshcentral/meshcentral /opt/meshcentral/meshcentr
 
 # environment variables
 ENV NODE_ENV="production" \
+    MESHCENTRAL_CONTAINER="1" \
     CONFIG_FILE="/opt/meshcentral/meshcentral-data/config.json" \
     DYNAMIC_CONFIG="false"
 

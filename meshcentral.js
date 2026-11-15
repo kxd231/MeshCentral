@@ -623,8 +623,9 @@ function CreateMeshCentralServer(config, args) {
             } else if (childProcess.xrestart == 2) {
                 console.log('Expected exit...');
                 process.exit(); // User CTRL-C exit.
-            } else if (childProcess.xrestart == 3) {
-                // Server self-update exit
+            } else if (require('./serverupdates.js').isUpdateExit(childProcess.xrestart, error)) {
+                // Server self-update exit: the server process announced it in its output and ended with the code 200 (performServerUpdate). The text alone is not enough,
+                // it can be printed by anything that reaches the console output, and then a crash would start an update.
                 var version = '';
                 const serverUpdates = require('./serverupdates.js');
                 const updateSource = obj.getServerUpdater().settings.source;
@@ -673,6 +674,9 @@ function CreateMeshCentralServer(config, args) {
                     const pinned = configVersion; // Version named in the configuration: that exact version is wanted, also if older
                     const restart = function () { setTimeout(function () { obj.launchChildServer(startArgs); }, 5000); };
                     const giveUp = function (v, message) { console.log('Update failed, nothing was installed: ' + message); if (v != null) { updater.recordFailure(v, message); } restart(); };
+                    // Without node_modules/meshcentral as the running folder, "npm install" would succeed and change nothing
+                    const layout = serverUpdates.installLayout({ dirname: __dirname, env: process.env, daemon: obj.fs.existsSync(obj.path.join(__dirname, 'daemon')) });
+                    if (!layout.allowed) { return giveUp(target, layout.message); }
                     var fileName = null;
                     updater.prepare(target, { current: getCurrentVersion(), allowDowngrade: pinned, signal: AbortSignal.timeout(15 * 60 * 1000) }).then(function (pkg) {
                         fileName = pkg.assetName;
@@ -683,7 +687,7 @@ function CreateMeshCentralServer(config, args) {
                             if (code != 0) { updater.recordFailure(pkg.version, 'npm install exited with code ' + code + '.'); return finishUpdate(code); }
                             // The installed package must be the version that was announced, or the next check would install it again
                             var installed = null;
-                            try { installed = JSON.parse(obj.fs.readFileSync(obj.path.join(obj.parentpath, 'node_modules', 'meshcentral', 'package.json'), 'utf8')).version; } catch (ex) { }
+                            try { installed = JSON.parse(obj.fs.readFileSync(obj.path.join(__dirname, 'package.json'), 'utf8')).version; } catch (ex) { }
                             if (installed !== pkg.version) {
                                 console.log('ERROR: The installed MeshCentral version is ' + installed + ', not ' + pkg.version + ' as announced by the release.');
                                 updater.recordFailure(pkg.version, 'The installed version is ' + installed + ' instead of ' + pkg.version + '.');
@@ -720,7 +724,7 @@ function CreateMeshCentralServer(config, args) {
             if (data.indexOf('Updating settings folder...') >= 0) { childProcess.xrestart = 1; }
             else if (data.indexOf('Updating server certificates...') >= 0) { childProcess.xrestart = 1; }
             else if (data.indexOf('Server Ctrl-C exit...') >= 0) { childProcess.xrestart = 2; }
-            else if (data.indexOf('Starting self upgrade...') >= 0) { childProcess.xrestart = 3; }
+            else if (data.indexOf('Starting self upgrade...') >= 0) { childProcess.xrestart = 3; delete obj.args.specificupdate; } // No version: a version left by an earlier line must not count
             else if (data.indexOf('Server restart...') >= 0) { childProcess.xrestart = 1; }
             else if (data.indexOf('Starting self upgrade to: ') >= 0) {
                 const specificupdate = data.substring(data.indexOf('Starting self upgrade to: ') + 26).split('\r')[0].split('\n')[0];
@@ -856,6 +860,18 @@ function CreateMeshCentralServer(config, args) {
                 (code == 0) ? callback(xxprocess.data) : callback('{}');
             });
         } catch (ex) { callback('{}'); }
+    };
+
+    // Whether this server can update itself at all: { allowed, reason, message }. The reason is the first thing that blocks it.
+    obj.getServerUpdateAvailability = function () {
+        const updater = obj.getServerUpdater();
+        if (updater.settings.source === null) { return { allowed: false, reason: 'disabled', message: updater.settings.error }; }
+        if (updater.settings.source === 'npm') { return { allowed: false, reason: 'npm', message: require('./serverupdates.js').NPM_INSTALL_BLOCKED }; }
+        if (obj.serverSelfWriteAllowed !== true) {
+            const blocked = obj.serverUpdateUnavailable || { reason: 'not-writable', message: 'The server cannot write to its data folder, so it cannot update itself.' };
+            return { allowed: false, reason: blocked.reason, message: blocked.message };
+        }
+        return { allowed: true, reason: null, message: null };
     };
 
     // Initiate server self-update
@@ -1551,8 +1567,13 @@ function CreateMeshCentralServer(config, args) {
         // Start CrowdSec bouncer if needed: https://www.crowdsec.net/
         if (typeof obj.args.crowdsec == 'object') { obj.crowdSecBounser = require('./crowdsec.js').CreateCrowdSecBouncer(obj, obj.args.crowdsec); }
 
-        // Check if self update is allowed. If running as a Windows service, self-update is not possible.
-        if (obj.fs.existsSync(obj.path.join(__dirname, 'daemon'))) { obj.serverSelfWriteAllowed = false; }
+        // Check if self update is allowed. As a Windows service, in a container or outside of node_modules/meshcentral, self-update is not possible.
+        const layout = require('./serverupdates.js').installLayout({ dirname: __dirname, env: process.env, daemon: obj.fs.existsSync(obj.path.join(__dirname, 'daemon')) });
+        if (!layout.allowed) {
+            obj.serverSelfWriteAllowed = false;
+            obj.serverUpdateUnavailable = { reason: layout.reason, message: layout.message };
+            if (obj.args.selfupdate) { console.log('Server self-update is not available: ' + layout.message); }
+        }
 
         // If we are targetting a specific version, update now.
         if ((obj.serverSelfWriteAllowed == true) && (typeof obj.args.selfupdate == 'string')) {
@@ -4182,7 +4203,10 @@ function CreateMeshCentralServer(config, args) {
             for (var i in meshServerState) { r += (i + '=' + meshServerState[i] + '\r\n'); }
             try {
                 obj.fs.writeFileSync(obj.getConfigFilePath('serverstate.txt'), r); // Try to write the server state, this may fail if we don't have permission.
-            } catch (ex) { obj.serverSelfWriteAllowed = false; }
+            } catch (ex) {
+                obj.serverSelfWriteAllowed = false;
+                if (!obj.serverUpdateUnavailable) { obj.serverUpdateUnavailable = { reason: 'not-writable', message: 'The server cannot write to its data folder, so it cannot update itself.' }; }
+            }
         } catch (ex) { } // Do nothing since this is not a critical feature.
     };
 
