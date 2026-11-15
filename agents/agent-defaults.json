@@ -183,13 +183,13 @@
     },
     {
       "repository": "kxd231/MeshAgent",
-      "tag": "dxgi",
+      "tag": "h264-v1",
       "files": [
         {
           "filename": "MeshService64.exe",
           "asset": "MeshService64.exe",
-          "size": 4121088,
-          "sha384": "6f9445cefe8e70a20b116687d7b665700cb9dbf46a82343f5a48a928b6b5435e8efb76ebfe42e065c9cb106505f851d5"
+          "size": 4291584,
+          "sha384": "aa6e6ae3019232c6f1999de9dfdd3ef5c1362d0e0898fe43e7647a1cbc730252489199707bd3b8aa7c82d1cfc01811f6"
         }
       ]
     },
