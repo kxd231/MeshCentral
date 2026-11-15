@@ -617,7 +617,10 @@ function CreateMeshCentralServer(config, args) {
         const isInspectorAttached = (()=> { try { return require('node:inspector').url() !== undefined; } catch (_) { return false; } }).call();
         const logFromChildProcess = isInspectorAttached ? () => {} : console.log.bind(console);
         if (!startArgs.includes('--disable-proto=delete')) { startArgs.unshift('--disable-proto=delete'); }
+        const childStarted = Date.now();
         childProcess = child_process.execFile(process.argv[0], startArgs, { maxBuffer: Infinity, cwd: obj.parentpath }, function (error, stdout, stderr) {
+            // Every exit that does not start an update (an update needs the exit code 200) is reported to the update logic of the parent
+            if (!require('./serverupdates.js').isUpdateExit(childProcess.xrestart, error)) { try { if (obj.parentUpdate) { obj.parentUpdate.onChildExit({ code: (error && (typeof error.code == 'number')) ? error.code : 0, xrestart: childProcess.xrestart, uptimeMs: Date.now() - childStarted }); } } catch (ex) { } }
             if (childProcess.xrestart == 1) {
                 setTimeout(function () { obj.launchChildServer(startArgs); }, 500); // This is an expected restart.
             } else if (childProcess.xrestart == 2) {
@@ -635,72 +638,32 @@ function CreateMeshCentralServer(config, args) {
                 else if (typeof obj.args.specificupdate == 'string') { version = '@' + obj.args.specificupdate; delete obj.args.specificupdate; }
                 const child_process = require('child_process');
                 const npmpath = ((typeof obj.args.npmpath == 'string') ? obj.args.npmpath : 'npm');
-                const env = Object.assign({}, process.env); // Shallow clone
-                if (typeof obj.args.npmproxy == 'string') { env['HTTP_PROXY'] = env['HTTPS_PROXY'] = env['http_proxy'] = env['https_proxy'] = obj.args.npmproxy; }
-
-                // Runs after npm finished, or after the update was given up. Restarts the server in all cases.
-                function finishUpdate(code) {
-                    if (code == 0) { console.log('Update completed...'); }
-
-                    // Run the server updated script if present
-                    if (typeof obj.config.settings.runonserverupdated == 'string') {
-                        const child_process = require('child_process');
-                        var parentpath = __dirname;
-                        if ((__dirname.endsWith('/node_modules/meshcentral')) || (__dirname.endsWith('\\node_modules\\meshcentral')) || (__dirname.endsWith('/node_modules/meshcentral/')) || (__dirname.endsWith('\\node_modules\\meshcentral\\'))) { parentpath = require('path').join(__dirname, '../..'); }
-                        child_process.exec(obj.config.settings.runonserverupdated + ' ' + getCurrentVersion(), { maxBuffer: 512000, timeout: 120000, cwd: parentpath }, function (error, stdout, stderr) { });
-                    }
-
-                    if (obj.args.cleannpmcacheonupdate === true) {
-                        // Perform NPM cache clean
-                        console.log('Cleaning NPM cache...');
-                        const xxxprocess = child_process.exec(npmpath + ' cache clean --force', { maxBuffer: Infinity, cwd: obj.parentpath, env: env }, function (error, stdout, stderr) { });
-                        xxxprocess.on('close', function (code) { setTimeout(function () { obj.launchChildServer(startArgs); }, 1000); });
-                    } else {
-                        // Run the updated server
-                        setTimeout(function () { obj.launchChildServer(startArgs); }, 1000);
-                    }
+                const target = version.substring(1) || null; // The exact version the server decided on, or null for "newest release"
+                const pinned = configVersion; // Version named in the configuration: that exact version is wanted, also if older
+                const context = { args: obj.args, config: obj.config, datapath: obj.datapath, parentpath: obj.parentpath, dirname: __dirname, platform: obj.platform, env: process.env, npmpath: npmpath, getCurrentVersion: getCurrentVersion, log: function (m) { console.log(m); }, relaunch: function (delayMs) { setTimeout(function () { obj.launchChildServer(startArgs); }, delayMs); }, childProcess: child_process, fs: obj.fs, path: obj.path };
+                // The installing logic is loaded again from the installed package, so it is the one of the running version that was verified when it
+                // was installed, not the one this process started with. When that fails, the one loaded at start is used.
+                // A failed load must not leave the cache without the modules: the old entries come back
+                const cacheNames = [require.resolve('./serverupdates.js'), require.resolve('./httpsdownloads.js')];
+                const saved = cacheNames.map(function (name) { return [name, require.cache[name]]; });
+                const restoreCache = function () { for (const [name, record] of saved) { if (record != null) { require.cache[name] = record; } } };
+                const fresh = serverUpdates.loadParentUpdateModule(function () {
+                    for (const name of cacheNames) { delete require.cache[name]; }
+                    try { return require('./serverupdates.js'); } catch (ex) { restoreCache(); throw ex; }
+                }, serverUpdates, function (m) { console.log(m); });
+                if (fresh === serverUpdates) { restoreCache(); }
+                // One restart whatever happens: the update logic that is used first is the fresh one; the one loaded at start only when the fresh one cannot be created
+                var relaunched = false;
+                const once = context.relaunch;
+                context.relaunch = function (delayMs) { if (relaunched) { return; } relaunched = true; once(delayMs); };
+                var update = null;
+                for (const module of ((fresh === serverUpdates) ? [serverUpdates] : [fresh, serverUpdates])) {
+                    try { update = module.createParentUpdate(context); break; } catch (ex) { console.log('ERROR: The server update could not start: ' + ((ex && ex.message) ? ex.message : String(ex))); }
                 }
-
-                if (obj.getServerUpdater().settings.source !== 'github') {
-                    // Installing from the npm registry is blocked (performServerUpdate already refuses it); restart on the current version
-                    console.log('ERROR: ' + ((obj.getServerUpdater().settings.source === 'npm') ? serverUpdates.NPM_INSTALL_BLOCKED : 'Server update is disabled.'));
-                    setTimeout(function () { obj.launchChildServer(startArgs); }, 1000);
-                } else {
-                    // GitHub release of the fork: download and verify meshcentral-<version>.tgz, then install that file with npm.
-                    // The server stays on the current version when anything fails, and the failure is remembered so that the
-                    // automatic update does not retry the same version in a loop.
-                    const updater = obj.getServerUpdater();
-                    const target = version.substring(1) || null; // The exact version the server decided on, or null for "newest release"
-                    const pinned = configVersion; // Version named in the configuration: that exact version is wanted, also if older
-                    const restart = function () { setTimeout(function () { obj.launchChildServer(startArgs); }, 5000); };
-                    const giveUp = function (v, message) { console.log('Update failed, nothing was installed: ' + message); if (v != null) { updater.recordFailure(v, message); } restart(); };
-                    // Without node_modules/meshcentral as the running folder, "npm install" would succeed and change nothing
-                    const layout = serverUpdates.installLayout({ dirname: __dirname, env: process.env, daemon: obj.fs.existsSync(obj.path.join(__dirname, 'daemon')) });
-                    if (!layout.allowed) { return giveUp(target, layout.message); }
-                    var fileName = null;
-                    updater.prepare(target, { current: getCurrentVersion(), allowDowngrade: pinned, signal: AbortSignal.timeout(15 * 60 * 1000) }).then(function (pkg) {
-                        fileName = pkg.assetName;
-                        console.log('Installing MeshCentral ' + pkg.version + ' from ' + updater.settings.repository + ' (' + pkg.size + ' bytes, sha384 ' + pkg.sha384 + ' as pinned in ' + updater.pinsFile + ', sha256 ' + pkg.sha256 + ')...');
-                        var finished = false;
-                        const finish = function (code) {
-                            if (finished) return; finished = true;
-                            if (code != 0) { updater.recordFailure(pkg.version, 'npm install exited with code ' + code + '.'); return finishUpdate(code); }
-                            // The installed package must be the version that was announced, or the next check would install it again
-                            var installed = null;
-                            try { installed = JSON.parse(obj.fs.readFileSync(obj.path.join(__dirname, 'package.json'), 'utf8')).version; } catch (ex) { }
-                            if (installed !== pkg.version) {
-                                console.log('ERROR: The installed MeshCentral version is ' + installed + ', not ' + pkg.version + ' as announced by the release.');
-                                updater.recordFailure(pkg.version, 'The installed version is ' + installed + ' instead of ' + pkg.version + '.');
-                            } else { updater.clearFailure(); updater.cleanup(fileName).catch(function () { }); }
-                            finishUpdate(code);
-                        };
-                        const done = function (error, stdout, stderr) { if ((error != null) && (error != '')) { console.log('Update failed: ' + error); } };
-                        var command;
-                        try { command = serverUpdates.buildLocalInstall(npmpath, obj.args.npmproxy, pkg.path, obj.platform); } catch (ex) { return giveUp(pkg.version, ex.message); }
-                        const xxprocess = child_process.exec(command, { maxBuffer: Infinity, cwd: obj.parentpath, env: env }, done);
-                        xxprocess.on('error', function (err) { console.log('Update failed: ' + err.message); finish(1); });
-                        xxprocess.on('close', finish);
-                    }).catch(function (err) { giveUp(target, (err && err.message) ? err.message : String(err)); });
+                if (update == null) { context.relaunch(5000); }
+                else {
+                    obj.parentUpdate = update;
+                    try { update.run({ target: target, pinned: pinned }); } catch (ex) { console.log('ERROR: The server update failed: ' + ((ex && ex.message) ? ex.message : String(ex))); context.relaunch(5000); }
                 }
             } else {
                 if (error != null) {
@@ -740,6 +703,7 @@ function CreateMeshCentralServer(config, args) {
                     }
                 }
             }
+            try { if (obj.parentUpdate) { obj.parentUpdate.onChildOutput(data); } } catch (ex) { }
             var datastr = data;
             while (datastr.endsWith('\r') || datastr.endsWith('\n')) { datastr = datastr.substring(0, datastr.length - 1); }
             logFromChildProcess(datastr);
@@ -767,7 +731,17 @@ function CreateMeshCentralServer(config, args) {
     var serverUpdater = null;
     obj.getServerUpdater = function () {
         if (serverUpdater == null) {
-            serverUpdater = require('./serverupdates.js').createServerUpdater({ args: obj.args, folder: obj.path.resolve(obj.datapath, 'serverupdates'), pinsFile: obj.path.resolve(obj.datapath, require('./serverupdates.js').PINS_FILE), log: function (m) { console.log(m); } });
+            const serverUpdates = require('./serverupdates.js');
+            serverUpdater = serverUpdates.createServerUpdater({
+                args: obj.args,
+                folder: obj.path.resolve(obj.datapath, serverUpdates.FOLDER_NAME),
+                pinsFile: obj.path.resolve(obj.datapath, serverUpdates.PINS_FILE),
+                keysFile: obj.path.join(__dirname, serverUpdates.KEYS_FILE), // Public keys of the release owner, part of the package
+                localKeysFile: obj.path.resolve(obj.datapath, serverUpdates.KEYS_FILE), // Optional, written by hand in the data folder
+                log: function (m) { console.log(m); },
+                onSuspicious: onSuspiciousRelease,
+                onWarning: function (m) { obj.addServerWarning(plainText(m), true); }
+            });
         }
         return serverUpdater;
     };
@@ -779,16 +753,11 @@ function CreateMeshCentralServer(config, args) {
     };
 
     // True when an automatic update to this version failed recently, so it is not tried again until the retry time has passed
-    // or an administrator starts the update by hand, or when the version has no local pin (it would be refused anyway, so the
-    // server is not restarted for it). The server keeps running on the current version meanwhile.
-    var serverUpdateBlockedLogged = null;
+    // or an administrator starts the update by hand. The server keeps running on the current version meanwhile. Whether the
+    // version is trusted (a signature or a pin) is decided by serverupdates.js ensureTrusted().
+    var serverUpdateBlockedLogged = null, serverUpdateSkippedLogged = null;
     obj.serverUpdateBlocked = function (version) {
         if (obj.getServerUpdater().settings.source !== 'github') { return false; }
-        const parsed = require('./serverupdates.js').parseVersion(String(version));
-        try { obj.getServerUpdater().pinFor((parsed != null) ? parsed.text : String(version)); } catch (ex) {
-            if (serverUpdateBlockedLogged !== version) { serverUpdateBlockedLogged = version; console.log('Automatic update to ' + version + ' skipped: ' + ex.message); }
-            return true;
-        }
         const marker = obj.getServerUpdater().failureBlocks(version);
         if (marker == null) { return false; }
         if (serverUpdateBlockedLogged !== version) { serverUpdateBlockedLogged = version; console.log('Automatic update to ' + version + ' skipped, it failed at ' + new Date(marker.time).toISOString() + ': ' + marker.reason + ' It is retried after ' + new Date(marker.time + require('./serverupdates.js').FAILURE_RETRY_MS).toISOString() + ' or when started by an administrator.'); }
@@ -860,6 +829,88 @@ function CreateMeshCentralServer(config, args) {
                 (code == 0) ? callback(xxprocess.data) : callback('{}');
             });
         } catch (ex) { callback('{}'); }
+    };
+
+    // ---- audit of server updates (events of type 'server', stored in the database) ----
+    // Text from outside (a version, a file name) that goes to the warnings of the server: the page shows them as they are, so no markup characters
+    const plainText = function (text) { return String(text).replace(/[<>&"'`]/g, ''); };
+    // A release whose signature, manifest or pin is wrong: one event and one warning per version and result in this process.
+    const suspiciousReleases = new Set();
+    function onSuspiciousRelease(info, done) {
+        const key = info.version + '/' + info.result;
+        if (suspiciousReleases.has(key)) { if (done) { done(null); } return; }
+        suspiciousReleases.add(key);
+        const what = (info.version == null) ? 'A server update' : ('Release ' + info.version);
+        obj.DispatchEvent(['*'], obj, { etype: 'server', action: 'serverupdateverify', domain: '', version: info.version, result: info.result, reason: info.reason || null, keyId: info.keyId, msg: what + ' refused: ' + info.result }, undefined, done);
+        obj.addServerWarning(plainText(what) + ' was refused: ' + plainText(info.message), true);
+    }
+
+    // An update was requested, by an administrator (who = { userid, username }) or by the automatic update (who = null). trusted is the
+    // result of ensureTrusted (or the origin of an existing pin). No secrets: the key identifier only. onStored: called when the event is in the database.
+    function dispatchServerUpdateRequest(trusted, who, onStored) {
+        const automatic = (who == null);
+        const how = (trusted.source === 'signature') ? (', signed with key ' + trusted.keyId) : ((trusted.keyId != null) ? (', pinned by hand, signed with key ' + trusted.keyId) : ', pinned by hand');
+        obj.DispatchEvent(['*'], obj, {
+            etype: 'server', action: 'serverupdaterequest', domain: '',
+            userid: automatic ? null : who.userid, username: automatic ? null : who.username,
+            version: trusted.version, fromVersion: getCurrentVersion(), trust: trusted.source === 'signature' ? 'signature' : 'pin', keyId: trusted.keyId || null, automatic: automatic,
+            msg: (automatic ? ('Automatic server update to ' + trusted.version) : ('Server update to ' + trusted.version + ' requested by ' + who.username)) + how
+        }, undefined, onStored);
+    }
+
+    // The one way to start a verified update, for the button, the console, the nightly update and selfUpdate: the event of the request is written to the
+    // database first, then the server exits for the update. Exiting at once would lose the event. When the event cannot be stored (an error, or no answer in
+    // 5 seconds) there is no update: an update that leaves no trace in the audit is not started (the automatic update tries again the next time; docs/fork-updates.md
+    // describes the update by hand). trusted must be the result of ensureTrusted or the pin that is on disk: a version and the origin of the trust.
+    // options.delayMs: wait that long after the event before the exit (the answer to the administrator has to leave first); options.announce: tell the
+    // parent the version (the configured selfUpdate version needs no announcement). Resolves to false when the update was not started; rejects with .uiMessage
+    // when the audit failed. Not a member of obj: nothing outside of this file can start an update with a version that was not verified.
+    async function startVerifiedUpdate(trusted, who, options) {
+        options = options || {};
+        const serverUpdates = require('./serverupdates.js');
+        if ((trusted == null) || (typeof trusted.version !== 'string') || (serverUpdates.parseVersion(trusted.version) == null) || (serverUpdates.parseVersion(trusted.version).text !== trusted.version) || ((trusted.source !== 'signature') && (trusted.source !== 'pin'))) { throw new Error('startVerifiedUpdate needs a verified release.'); }
+        let timedOut = false;
+        const stored = await new Promise(function (resolve) {
+            const timer = setTimeout(function () { timedOut = true; resolve(new Error('The event was not stored in time.')); }, 5000);
+            try {
+                dispatchServerUpdateRequest(trusted, who, function (err) {
+                    clearTimeout(timer);
+                    // The database answered after the time was up: the request is in the audit, the update was not started, and that is written down too
+                    if (timedOut && (err == null)) { obj.DispatchEvent(['*'], obj, { etype: 'server', action: 'serverupdateverify', domain: '', version: trusted.version, result: 'audit timeout, update not started', keyId: null, msg: 'The update to ' + trusted.version + ' was not started: the event of the request was stored too late' }); }
+                    resolve(err || null);
+                });
+            } catch (ex) { clearTimeout(timer); resolve(ex); }
+        });
+        if (stored != null) {
+            const message = 'The update to ' + trusted.version + ' was not started: the audit event could not be saved (' + String((stored && stored.message) ? stored.message : stored).substring(0, 100) + '). Try again; see docs/fork-updates.md for the update by hand.';
+            console.log('ERROR: ' + message);
+            const error = new Error(message); error.code = 'audit'; error.uiMessage = message;
+            throw error;
+        }
+        const perform = function () { return obj.performServerUpdate((options.announce === false) ? undefined : trusted.version) !== false; };
+        if (options.delayMs > 0) {
+            setTimeout(function () { if (!perform()) { obj.serverUpdateInFlight = false; console.log('Server update to ' + trusted.version + ' was not started.'); } }, options.delayMs);
+            return true;
+        }
+        return perform();
+    }
+
+    // Start a server update for the exact version (null: the newest stable release) after the release was verified (signature or pin).
+    // Resolves to the verified release when the update starts (the server restarts a moment later, so the answer can still be sent), rejects with
+    // an error that has .code and .uiMessage. who = { userid, username }. options.stableOnly: the administrator chose "Stable".
+    obj.serverUpdateInFlight = false;
+    obj.requestServerUpdate = async function (version, who, options) {
+        const fail = function (code, message) { const e = new Error(message); e.code = code; e.uiMessage = message; return e; };
+        const avail = obj.getServerUpdateAvailability();
+        if (!avail.allowed) { throw fail(avail.reason || 'disabled', avail.message || 'Server self-update not possible.'); }
+        if (obj.serverUpdateInFlight) { throw fail('busy', 'A server update is already being prepared.'); }
+        obj.serverUpdateInFlight = true;
+        try {
+            const wanted = ((version == null) || (version === '') || (version === 'latest') || (version === 'stable')) ? null : version;
+            const trusted = await obj.getServerUpdater().ensureTrusted(wanted, { current: getCurrentVersion(), stableOnly: !!(options && options.stableOnly) });
+            await startVerifiedUpdate(trusted, who, { delayMs: 1000 });
+            return trusted;
+        } catch (ex) { obj.serverUpdateInFlight = false; throw ex; }
     };
 
     // Whether this server can update itself at all: { allowed, reason, message }. The reason is the first thing that blocks it.
@@ -1583,8 +1634,21 @@ function CreateMeshCentralServer(config, args) {
                 console.log('ERROR: selfUpdate must be true or an exact version such as "1.3.2", not "' + obj.args.selfupdate.substring(0, 40) + '". Self-update is off.');
                 obj.args.selfupdate = false;
             } else if (!require('./serverupdates.js').selfUpdateIsCurrent(updateSource, getCurrentVersion(), obj.args.selfupdate)) { // We are targetting a specific version, run self update now.
-                if (!obj.serverUpdateBlocked(obj.args.selfupdate) && (obj.performServerUpdate() !== false)) { return; }
-                obj.args.selfupdate = false; // Update disabled or failed recently: start the server on the current version
+                if (!obj.serverUpdateBlocked(obj.args.selfupdate)) {
+                    const updater = obj.getServerUpdater();
+                    const wantedVersion = obj.args.selfupdate;
+                    const sayWhy = function (ex) { console.log('Update to ' + wantedVersion + ' skipped: ' + ((ex && ex.uiMessage) ? ex.uiMessage : 'unable to verify the release.')); };
+                    // The server starts now; the update follows when the version is trusted (a pin by hand, a pin from a key that is trusted, or a signature that
+                    // is verified now). The event of the request is written first, then the server exits; the parent takes the version from args.selfupdate.
+                    var known = null;
+                    if (updateSource === 'github') { try { known = updater.pinLookup(require('./serverupdates.js').parseVersion(wantedVersion).text); } catch (ex) { known = null; } }
+                    if ((updateSource === 'github') && (known != null) && (known.pin != null)) {
+                        startVerifiedUpdate({ version: known.pin.version, source: (known.origin === 'signature') ? 'signature' : 'pin', keyId: known.keyId }, null, { announce: false }).then(function (started) { if (!started) { sayWhy({ uiMessage: 'the server update could not be started.' }); } }, sayWhy);
+                    } else if (updateSource === 'github') {
+                        updater.ensureTrusted(wantedVersion, { current: getCurrentVersion(), allowOlder: true }).then(function (trusted) { return startVerifiedUpdate(trusted, null, { announce: false }).then(function (started) { if (!started) { sayWhy({ uiMessage: 'the server update could not be started.' }); } }); }).catch(sayWhy);
+                    } else if (obj.performServerUpdate() !== false) { return; }
+                }
+                obj.args.selfupdate = false; // Update disabled, failed recently or not verified yet: start the server on the current version
             }
         }
 
@@ -2210,6 +2274,8 @@ function CreateMeshCentralServer(config, args) {
 
                     // Dispatch an event that the server is now running
                     obj.DispatchEvent(['*'], obj, { etype: 'server', action: 'started', msg: 'Server started' });
+                    // A release that the parent process refused (its key was revoked while it downloaded): the parent has no database, so the event is made here
+                    try { const refusal = obj.getServerUpdater().consumeRefusal(); if (refusal != null) { onSuspiciousRelease(refusal, function (err) { if (err == null) { obj.getServerUpdater().clearRefusal(); } }); } } catch (ex) { }
 
                     // Plugin hook. Need to run something at server startup? This is the place.
                     if (obj.pluginHandler) { obj.pluginHandler.callHook('server_startup'); }
@@ -2480,7 +2546,19 @@ function CreateMeshCentralServer(config, args) {
                     obj.db.Set(performSelfUpdate);
                     obj.getLatestServerVersion(function (currentVer, latestVer) {
                         // GitHub source: hand the exact version we decided on to the parent process, it installs that version and nothing else.
-                        if (obj.serverUpdateNeeded(currentVer, latestVer)) { if (obj.performServerUpdate((obj.getServerUpdater().settings.source === 'github') ? latestVer : undefined) !== false) { return; } }
+                        if (obj.serverUpdateNeeded(currentVer, latestVer)) {
+                            if (obj.getServerUpdater().settings.source === 'github') {
+                                // Only a release that is signed by the release owner (or pinned by hand), stable and newer
+                                obj.getServerUpdater().ensureTrusted(latestVer, { current: currentVer, automatic: true }).then(function (trusted) {
+                                    return startVerifiedUpdate(trusted, null).then(function (started) { if (!started) { checkAutobackup(); } }, function (ex) { console.log('Automatic update to ' + latestVer + ' not started: ' + ((ex && ex.uiMessage) ? ex.uiMessage : 'unknown error')); checkAutobackup(); });
+                                }, function (ex) {
+                                    if (serverUpdateSkippedLogged !== (latestVer + '/' + ex.code)) { serverUpdateSkippedLogged = latestVer + '/' + ex.code; console.log('Automatic update to ' + latestVer + ' skipped: ' + ((ex && ex.uiMessage) ? ex.uiMessage : 'unable to verify the release.')); }
+                                    checkAutobackup();
+                                });
+                                return;
+                            }
+                            if (obj.performServerUpdate(undefined) !== false) { return; }
+                        }
                         checkAutobackup();
                     });
                 } else {
@@ -2597,9 +2675,10 @@ function CreateMeshCentralServer(config, args) {
             }
         }
     };
-    obj.DispatchEvent = function (ids, source, event, fromPeerServer) {
+    // onStored (optional, only for events that must be in the database before something else happens): called with the error (or null) when the event was stored, or at once when it is not stored
+    obj.DispatchEvent = function (ids, source, event, fromPeerServer, onStored) {
         // If the database is not setup, exit now.
-        if (!obj.db) return;
+        if (!obj.db) { if (onStored) { try { onStored(new Error('No database.')); } catch (ex) { } } return; }
 
         // Send event to syslog if needed
         if (obj.syslog && event.msg) { obj.syslog.log(obj.syslog.LOG_INFO, event.msg); }
@@ -2622,8 +2701,8 @@ function CreateMeshCentralServer(config, args) {
                 storeEvent.mesh = obj.common.escapeLinksFieldNameEx(storeEvent.mesh);
             }
             storeEvent.ids = ids;
-            obj.db.StoreEvent(storeEvent);
-        }
+            obj.db.StoreEvent(storeEvent, onStored ? function (err) { try { onStored(err); } catch (ex) { } } : undefined);
+        } else if (onStored) { try { onStored(null); } catch (ex) { } }
         const targets = []; // List of targets we dispatched the event to, we don't want to dispatch to the same target twice.
         for (var j in ids) {
             const id = ids[j];

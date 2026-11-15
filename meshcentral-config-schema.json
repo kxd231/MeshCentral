@@ -759,6 +759,15 @@
           "default": "github",
           "description": "Where the server looks for new versions and installs them from (the Update button, the version check and selfUpdate). \"github\" uses the releases of serverUpdateRepository: a release is usable when it has an asset named meshcentral-<version>.tgz, the asset is installed only when its size and SHA-384 match a pin in meshcentral-data/serverupdate-pins.json written by the administrator, and its SHA-256 matches the digest published by GitHub (see docs/fork-updates.md). \"npm\" only reports the versions of the meshcentral package of the npm registry; installing from it is blocked (it has no local pin) and logged. The value is not case sensitive. Any other value is logged and disables all server updates (checks, selfUpdate and the Update button); it never falls back to npm. A failed automatic update to a version is not retried for 24 hours."
         },
+        "serverUpdateTrust": {
+          "type": "string",
+          "enum": [
+            "signature",
+            "pin"
+          ],
+          "default": "signature",
+          "description": "What makes a release trusted for a server update (only for serverUpdateSource \"github\"). \"signature\": a release whose manifest is signed with a release key of this server (serverupdate-keys.json in the package, and an optional file of the same name in the data folder) writes its own pin into meshcentral-data/serverupdate-pins.json. \"pin\": only the pins that the administrator wrote by hand in that file count. Pins written by hand always work. The value is not case sensitive; any other value is logged and counts as \"pin\". See docs/fork-updates.md."
+        },
         "serverUpdateRepository": {
           "type": "string",
           "pattern": "^[A-Za-z0-9][A-Za-z0-9-]{0,38}/[A-Za-z0-9._-]{1,100}$",

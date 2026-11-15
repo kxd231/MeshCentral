@@ -6021,6 +6021,7 @@ module.exports.CreateMeshUser = function (parent, db, ws, req, args, domain, use
         'serverstats': serverCommandServerStats,
         'servertimelinestats': serverCommandServerTimelineStats,
         'serverupdate': serverCommandServerUpdate,
+        'serverupdateinfo': serverCommandServerUpdateInfo,
         'serverversion': serverCommandServerVersion,
         'setClip': serverCommandSetClip,
         'smsuser': serverCommandSmsUser,
@@ -7429,11 +7430,25 @@ module.exports.CreateMeshUser = function (parent, db, ws, req, args, domain, use
         if (!perm.allowed) { reply({ result: 'error', code: perm.reason, message: perm.message }); return; }
         if ((command.version != null) && ((typeof command.version != 'string') || (command.version.length > 40))) { reply({ result: 'error', code: 'version', message: 'Invalid version.' }); return; }
 
-        // Perform server update. When it starts, the server exits and restarts, so there is no reply.
-        if (parent.parent.performServerUpdate(command.version) === false) {
-            const avail = parent.parent.getServerUpdateAvailability();
-            reply({ result: 'error', code: avail.reason || 'disabled', message: avail.message || 'Server self-update not possible.' });
-        }
+        // Verify the release (signature or pin), then the server restarts a moment later to install it
+        parent.parent.requestServerUpdate(command.version, { userid: user._id, username: user.name }, { stableOnly: (command.tag === 'stable') }).then(
+            function (t) { reply({ result: 'ok', version: t.version, keyId: t.keyId }); },
+            function (e) { reply({ result: 'error', code: (e && e.code) || 'error', message: (e && e.uiMessage) || 'Server update failed.' }); }
+        );
+    }
+
+    // The signature status of the newest releases for the version dialog. At most one request in 5 seconds per connection.
+    var lastUpdateInfo = 0;
+    function serverCommandServerUpdateInfo(command) {
+        if (!(userHasSiteUpdate() && domainHasMyServerUpgrade())) { return; }
+        // The answer holds paths of the installation and the data folder: only for the domain that may update
+        if (domain.id !== '') { obj.send({ action: 'serverupdateinfo', responseid: command.responseid, update: serverUpdateStatus(), info: null, message: 'Not available for this domain.' }); return; }
+        if (Date.now() - lastUpdateInfo < 5000) { obj.send({ action: 'serverupdateinfo', responseid: command.responseid, update: serverUpdateStatus(), info: null, message: 'Try again in a few seconds.' }); return; }
+        lastUpdateInfo = Date.now();
+        parent.parent.getServerUpdater().releaseInfo(parent.parent.currentVer).then(
+            function (info) { obj.send({ action: 'serverupdateinfo', responseid: command.responseid, current: parent.parent.currentVer, update: serverUpdateStatus(), info: info }); },
+            function (ex) { obj.send({ action: 'serverupdateinfo', responseid: command.responseid, current: parent.parent.currentVer, update: serverUpdateStatus(), info: null, message: 'Unable to check the releases.' }); }
+        );
     }
 
     // Whether this user may start a server update, see serverupdates.js
@@ -7441,12 +7456,9 @@ module.exports.CreateMeshUser = function (parent, db, ws, req, args, domain, use
         return require('./serverupdates.js').updatePermission({ siteadmin: user.siteadmin, domainId: domain.id, loginToken: require('./serverupdates.js').sessionLoginToken(req && req.session), myserver: domain.myserver });
     }
 
-    // What the "update" field of a serverversion reply says: the first reason that blocks an update, the server side before the user side
+    // What the "update" field of a serverversion reply says (the order of the reasons is in serverupdates.js)
     function serverUpdateStatus() {
-        const avail = parent.parent.getServerUpdateAvailability(), perm = serverUpdatePermission();
-        // A user who may not start updates at all (another domain, a login token) is not told how this installation looks
-        const first = (!perm.allowed && ((perm.reason === 'not-default-domain') || (perm.reason === 'login-token'))) ? perm : (avail.allowed ? perm : avail);
-        return { allowed: (avail.allowed && perm.allowed), reason: first.reason, message: first.message };
+        return require('./serverupdates.js').updateStatus(parent.parent.getServerUpdateAvailability(), serverUpdatePermission());
     }
 
     function serverCommandServerVersion(command) {
@@ -8129,43 +8141,17 @@ module.exports.CreateMeshUser = function (parent, db, ws, req, args, domain, use
         // The same rule as the button and the web socket command: a full administrator of the default domain, not with a login token, in a domain that allows the upgrade
         const perm = serverUpdatePermission();
         if (!perm.allowed) { cmdData.result = 'Server self-update not possible. ' + perm.message; return; }
-        // Why it is not possible (the layout of the installation, a Windows service ...), for the administrator at the console
-        const notPossible = function () { const avail = parent.parent.getServerUpdateAvailability(); return 'Server self-update not possible.' + (avail.message ? (' ' + avail.message) : ''); };
-        cmdData.result = 'Performing server update...';
         var version = null;
-
         if (cmdData.cmdargs['_'].length > 0) {
             version = cmdData.cmdargs['_'][0];
-
-            // This call is SLOW. We only want to validate version if we have to
-            if (version != 'stable' && version != 'latest') {
-                parent.parent.getServerVersions((data) => {
-                    var versions = JSON.parse(data);
-
-                    if (versions.includes(version)) {
-                        if (parent.parent.performServerUpdate(version) == false) { 
-                            try { 
-                                ws.send(JSON.stringify({ action: 'serverconsole',
-                                                         value: notPossible() }));
-                            } catch (ex) { }
-                        }
-                    } else {
-                        try { 
-                            ws.send(JSON.stringify({ action: 'serverconsole',
-                                                     value: 'Invalid version. Aborting update'}));
-                        } catch (ex) { }
-                    }
-                });
-            } else {
-                if (parent.parent.performServerUpdate(version) == false) { 
-                    cmdData.result = notPossible();
-                }
-            }  
-        } else {
-            if (parent.parent.performServerUpdate(version) == false) { 
-                cmdData.result = notPossible();
-            }
+            if ((typeof version != 'string') || (version.length > 40)) { cmdData.result = 'Invalid version. Aborting update'; return; }
         }
+        cmdData.result = 'Verifying the release...';
+        const say = function (value) { try { ws.send(JSON.stringify({ action: 'serverconsole', value: value })); } catch (ex) { } };
+        parent.parent.requestServerUpdate(version, { userid: user._id, username: user.name }).then(
+            function (t) { say('Release ' + t.version + ' verified. The server restarts to install it.'); },
+            function (e) { say(((e && e.uiMessage) ? e.uiMessage : 'Server update failed.')); }
+        );
     }
 
     function serverUserCommandPrint(cmdData) {

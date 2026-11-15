@@ -39,6 +39,7 @@
     "sample-config.json",
     "sample-config-advanced.json",
     "meshcentral-config-schema.json",
+    "serverupdate-keys.json",
     "npm-shrinkwrap.json"
   ],
   "dependencies": {

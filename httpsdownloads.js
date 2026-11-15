@@ -135,7 +135,12 @@ const httpsDownloads = (function () {
                 if (options.progress) options.progress(size, Number(res.headers['content-length']) || null);
                 callback(null, chunk);
             } });
-            await pipeline(res, meter, fs.createWriteStream(filename, { flags: 'wx', mode: 0o600 }), { signal: options.signal });
+            const out = fs.createWriteStream(filename, { flags: 'wx', mode: 0o600 });
+            try { await pipeline(res, meter, out, { signal: options.signal }); } catch (ex) {
+                // After a failure or an abort the file may still be opening: wait until the stream is closed, so that the caller can delete the file for good
+                if (!out.closed) { await new Promise(function (resolve) { const timer = setTimeout(resolve, 5000); out.once('close', function () { clearTimeout(timer); resolve(); }); out.destroy(); }); }
+                throw ex;
+            }
             const sha256 = hash.digest('hex');
             if (options.sha256 && sha256 !== options.sha256) throw new Error('The downloaded SHA256 does not match the expected digest.');
             return { url: sourceUrl(url), finalUrl, size, sha256, digestVerified: !!options.sha256 };

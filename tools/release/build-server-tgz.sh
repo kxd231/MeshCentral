@@ -19,8 +19,8 @@
 set -euo pipefail
 umask 022
 
-# Pinned Node image.
-NODE_IMAGE='node:24-bookworm-slim@sha256:c86ecead9e55a5210ac1727de38a4ca840bf03dcaf34dc9749addbf383b1920c'
+# Pinned Node image (same Node 24 digest the unit tests use), shared with keygen.sh and sign-release.sh.
+. "$(dirname -- "${BASH_SOURCE[0]}")/node-image.sh"
 
 CHECK_AGENTS=0
 if [ "${1:-}" = "--check-agents" ]; then CHECK_AGENTS=1; shift; fi
@@ -108,7 +108,7 @@ fi
 
 echo "Checking package contents ..."
 tar -tzf "$WORK/out/$FILE" > "$WORK/list.txt"
-for required in package/package.json package/meshcentral.js package/serverupdates.js package/httpsdownloads.js package/agents/agent-defaults.json package/npm-shrinkwrap.json package/meshcentral-config-schema.json \
+for required in package/package.json package/meshcentral.js package/serverupdates.js package/httpsdownloads.js package/agents/agent-defaults.json package/serverupdate-keys.json package/npm-shrinkwrap.json package/meshcentral-config-schema.json \
         package/views/default.handlebars package/views/default-min.handlebars package/views/translations/default_pl.handlebars \
         package/emails/translations/account-invite_pl.html package/public/scripts/meshcentral-min.js; do
     grep -qx "$required" "$WORK/list.txt" || { echo "Missing $required in the package." >&2; exit 1; }

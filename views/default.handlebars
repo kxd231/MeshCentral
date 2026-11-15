@@ -3169,6 +3169,7 @@
                 }
                 case 'serverupdate': {
                     if (message.result == 'error') { messagebox("MeshCentral Version", EscapeHtml(message.message)); }
+                    else if (message.result == 'ok') { messagebox("MeshCentral Version", "Release " + EscapeHtml(message.version) + " verified. The server restarts to install it."); }
                     break;
                 }
                 case 'serverbackupready': {
@@ -3182,11 +3183,13 @@
                         if (!message.tags.stable) { message.tags.stable = "Unknown"; }
                         if (!message.tags.latest) { message.tags.latest = "Unknown"; }
                         var updateBlocked = (message.update && !message.update.allowed); // The server says why an update is not possible
+                        serverUpdateAllowed = (!updateBlocked && ((features & 2048) != 0));
                         x += addHtmlValue2("Current Version", '<b>' + EscapeHtml(message.tags.current) + '</b>');
                         x += '<hr />';
                         x += addHtmlValue2('<label><input id=d2updateCheck1 type=checkbox onclick=server_showVersionDlgUpdate()' + (((message.tags.stable == "Unknown") || (message.tags.current == message.tags.stable) || ((features & 2048) == 0) || updateBlocked)?' disabled':'') + ' /> ' + "Stable Version" + '</label>', '<b>' + EscapeHtml(message.tags.stable) + '</b>');
                         x += addHtmlValue2('<label><input id=d2updateCheck2 type=checkbox onclick=server_showVersionDlgUpdate()' + (((message.tags.latest == "Unknown") || (message.tags.current == message.tags.latest) || ((features & 2048) == 0) || updateBlocked)?' disabled':'') + ' /> ' + "Latest Version" + '</label>', '<b>' + EscapeHtml(message.tags.latest) + '</b>');
                         if (updateBlocked) { x += '<div class=dialogText>' + EscapeHtml(message.update.message) + '</div>'; }
+                        x += '<div id=d2updateInfo>Checking the release signature...</div>';
                         x += '</div>';
                         if (((message.tags.current == message.tags.latest) && (message.tags.current == message.tags.stable)) || ((features & 2048) == 0) || updateBlocked) {
                             setDialogMode(2, "MeshCentral Version", 1, null, x);
@@ -3195,7 +3198,13 @@
                             setDialogMode(2, "MeshCentral Version", 3, server_showVersionDlgEx, x, message.tags);
                             server_showVersionDlgUpdate();
                         }
+                        server_fillUpdateInfo();
                     }
+                    break;
+                }
+                case 'serverupdateinfo': {
+                    serverUpdateInfo = message;
+                    server_fillUpdateInfo();
                     break;
                 }
                 case 'servererrors': {
@@ -15321,21 +15330,54 @@
         function server_showVersionDlg() {
             if (xxdialogMode) return false;
             setDialogMode(2, "MeshCentral Version", 1, null, "Loading...", 'MeshCentralServerUpdate');
+            serverUpdateInfo = null; serverUpdateInstallable = null; serverUpdateAllowed = false; serverUpdateChannel = {};
             meshserver.send({ action: 'serverversion' });
+            meshserver.send({ action: 'serverupdateinfo' });
             return false;
+        }
+
+        // The signature status of the newest releases (answer of serverupdateinfo) in the version dialog. A release can be selected only when the
+        // server says that it is signed (or pinned by hand), newer than this server, and this user may start the update.
+        var serverUpdateInfo = null, serverUpdateInstallable = null, serverUpdateAllowed = false, serverUpdateChannel = {};
+        function server_updateInstallable(version) { return (serverUpdateAllowed && (serverUpdateInstallable != null) && (serverUpdateInstallable[version] === true)); }
+        function server_fillUpdateInfo() {
+            if ((serverUpdateInfo == null) || (Q('d2updateInfo') == null)) { return; }
+            var x = '', info = serverUpdateInfo.info;
+            if (info == null) { x = EscapeHtml(serverUpdateInfo.message || 'Unable to check the releases.'); }
+            else {
+                serverUpdateInstallable = {};
+                for (var i in info.releases) {
+                    var r = info.releases[i];
+                    serverUpdateInstallable[r.version] = (r.installable === true);
+                    serverUpdateChannel[r.version] = r.channel; // "Stable Version" can only be a release that is stable by its signed manifest
+                    var link = (typeof r.url == 'string' && r.url.startsWith('https://github.com/')) ? ('<a href="' + EscapeHtml(r.url) + '" target=_blank rel="noopener noreferrer">' + EscapeHtml(r.version) + '</a>') : EscapeHtml(r.version);
+                    x += '<div><b>' + link + '</b>: ' + EscapeHtml(r.message) + (r.channel == 'prerelease' || r.prerelease ? (' ' + EscapeHtml('Test release, never installed automatically.')) : '') + '</div>';
+                }
+                if (info.releases.length == 0) { x += '<div>No release information.</div>'; }
+                if (xxdialogTag && (serverUpdateChannel[xxdialogTag.latest] === 'prerelease')) { x += '<div><b>' + EscapeHtml(xxdialogTag.latest) + ' is a test release.</b> ' + EscapeHtml('Installing it asks for a second confirmation.') + '</div>'; }
+                if (info.keysError) { x += '<div>' + EscapeHtml('The release key list is invalid; signed updates are disabled.') + '</div>'; }
+                else if (info.keys.length == 0) { x += '<div>' + EscapeHtml('This server version has no release keys. Updates need a pin in serverupdate-pins.json.') + '</div>'; }
+                else { x += '<div>Trusted release keys: ' + info.keys.map(function (k) { return EscapeHtml(k.keyId + (k.comment ? (' (' + k.comment + ')') : '')); }).join(', ') + '</div>'; }
+            }
+            QH('d2updateInfo', x);
+            if ((typeof xxdialogTag == 'object') && (xxdialogTag != null) && Q('d2updateCheck1') && Q('idx_dlgOkButton')) { server_showVersionDlgUpdate(); }
         }
 
         function server_showVersionDlgUpdate() {
             var stableCheck = Q('d2updateCheck1').checked;
             var latestCheck = Q('d2updateCheck2').checked;
-            QE('d2updateCheck1', ((xxdialogTag.stable != "Unknown") && (xxdialogTag.current != xxdialogTag.stable) && (latestCheck == false)));
-            QE('d2updateCheck2', ((xxdialogTag.latest != "Unknown") && (xxdialogTag.current != xxdialogTag.latest) && (stableCheck == false)));
+            QE('d2updateCheck1', ((xxdialogTag.stable != "Unknown") && (xxdialogTag.current != xxdialogTag.stable) && server_updateInstallable(xxdialogTag.stable) && (serverUpdateChannel[xxdialogTag.stable] === 'stable') && (latestCheck == false)));
+            QE('d2updateCheck2', ((xxdialogTag.latest != "Unknown") && (xxdialogTag.current != xxdialogTag.latest) && server_updateInstallable(xxdialogTag.latest) && (stableCheck == false)));
             QE('idx_dlgOkButton', ((stableCheck) && (!latestCheck)) || ((!stableCheck) && (latestCheck)));
         }
 
         function server_showVersionDlgEx(b, tags) {
             if (Q('d2updateCheck1').checked) { meshserver.send({ action: 'serverupdate', tag: 'stable', version: tags.stable }); }
-            if (Q('d2updateCheck2').checked) { meshserver.send({ action: 'serverupdate', tag: 'latest', version: tags.latest }); }
+            if (Q('d2updateCheck2').checked) {
+                // A test release (by its signed manifest) is not what "Latest Version" usually means: it is installed only after a second question
+                if ((serverUpdateChannel[tags.latest] !== 'stable') && !confirm('Release ' + tags.latest + ' is a test release. Install it anyway?')) { return; }
+                meshserver.send({ action: 'serverupdate', tag: 'latest', version: tags.latest });
+            }
         }
 
         function server_showErrorsDlg() {

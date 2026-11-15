@@ -11198,8 +11198,6 @@ module.exports.CreateWebServer = function (parent, db, args, certificates, doneF
         }
     }
 
-    // Set a random value to this session. Only works if the session has a userid.
-    // This random value along with the userid is used to destroy the session when logging out.
     // A WebSocket session that was logged in with a login token (control.ashx with x-meshauth or user and pass in the query, or the userAuth command)
     // keeps the name of the token in the session, so the checks of the server can tell it from a login with a password.
     function setSessionTokenUser(req, loginOptions) {
@@ -11209,6 +11207,8 @@ module.exports.CreateWebServer = function (parent, db, args, certificates, doneF
         }
     }
 
+    // Set a random value to this session. Only works if the session has a userid.
+    // This random value along with the userid is used to destroy the session when logging out.
     function setSessionRandom(req) {
         if ((req.session == null) || (req.session.userid == null) || (req.session.x != null)) return;
         var x = obj.crypto.randomBytes(6).toString('base64');
