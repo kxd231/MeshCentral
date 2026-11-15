@@ -4878,7 +4878,7 @@
                     desktop.m.onVideoStatusChange = h264Status;
                     desktop.m.CompressionLevel = desktopsettings.quality; // Number from 1 to 100. 50 or less is best.
                     desktop.m.ScalingLevel = desktopsettings.scaling;
-                    desktop.m.SetFrameRate(desktopsettings.framerate); desktop.m.AutoDeviceKey = ((typeof desktopNode != 'undefined') && desktopNode && desktopNode._id) ? desktopNode._id : 'x'; if (d7ViewOnly()) { desktop.m.AutoBlocked = 'viewonly'; }
+                    if (typeof desktop.m.SetFrameRate != 'function') { desktop.m.SetFrameRate = function (v) { this.FrameRateTimer = v; }; } desktop.m.SetFrameRate(desktopsettings.framerate); desktop.m.AutoDeviceKey = ((typeof desktopNode != 'undefined') && desktopNode && desktopNode._id) ? desktopNode._id : 'x'; if (d7ViewOnly()) { desktop.m.AutoBlocked = 'viewonly'; }
                     desktop.m.BandwidthBudget = parseInt(desktopsettings.budget) || 0; // sent with the first compression command of the session
                     desktop.m.onDisplayinfo = deskDisplayInfo;
                     desktop.m.onScreenSizeChange = function (o, x, y) { if (fullscreen) { QS('deskarea3').width = (x * fullscreenzoom) + 'px'; QS('deskarea3').height = (y * fullscreenzoom) + 'px'; } deskAdjust(); }

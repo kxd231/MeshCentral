@@ -669,7 +669,7 @@
                     desktop.onMetadataChange = function (metadata) { updateMetadata(desktop, 'deskmetadata'); }
                     desktop.m.CompressionLevel = desktopsettings.quality; // Number from 1 to 100. 50 or less is best.
                     desktop.m.ScalingLevel = desktopsettings.scaling;
-                    if (desktopsettings.framerate) { desktop.m.SetFrameRate(desktopsettings.framerate); desktop.m.AutoDeviceKey = 'share'; if (viewOnly == 1) { desktop.m.AutoBlocked = 'viewonly'; } }
+                    if (desktopsettings.framerate) { if (typeof desktop.m.SetFrameRate != 'function') { desktop.m.SetFrameRate = function (v) { this.FrameRateTimer = v; }; } desktop.m.SetFrameRate(desktopsettings.framerate); desktop.m.AutoDeviceKey = 'share'; if (viewOnly == 1) { desktop.m.AutoBlocked = 'viewonly'; } }
                     desktop.m.onDisplayinfo = deskDisplayInfo;
                     desktop.m.onScreenSizeChange = deskAdjust;
                     desktop.Start(null);
