@@ -75551,7 +75551,7 @@
       "ja": "スロー",
       "ko": "느린",
       "nl": "Traag",
-      "pl": "Mała",
+      "pl": "Bardzo niska",
       "pt": "Lento",
       "pt-br": "Lento",
       "ru": "Медленно",
@@ -95924,6 +95924,42 @@
       "xloc": [
         "mstsc.handlebars->7->2"
       ]
+    },
+    {
+      "en": "The recording of this session has reached {0}% of its size limit, {1} MB of {2} MB are left. The session ends when the limit is reached; connecting again starts a new recording.",
+      "pl": "Nagranie tej sesji osiągnęło {0}% limitu rozmiaru, zostało {1} MB z {2} MB. Sesja zakończy się po osiągnięciu limitu; ponowne połączenie rozpocznie nowe nagranie."
+    },
+    {
+      "en": "The recording of this session reached its size limit of {0} MB, so the session has ended. Connect again to start a new recording.",
+      "pl": "Nagranie tej sesji osiągnęło limit rozmiaru {0} MB, więc sesja została zakończona. Połącz się ponownie, aby rozpocząć nowe nagranie."
+    },
+    {
+      "en": "High",
+      "pl": "Wysoka"
+    },
+    {
+      "en": "Low",
+      "pl": "Niska"
+    },
+    {
+      "en": "Auto {0} fps",
+      "pl": "Auto {0} kl/s"
+    },
+    {
+      "en": "Auto (agent)",
+      "pl": "Auto (agent)"
+    },
+    {
+      "en": "Auto paused (several viewers)",
+      "pl": "Auto wstrzymane (kilku widzów)"
+    },
+    {
+      "en": "Auto unavailable",
+      "pl": "Auto niedostępne"
+    },
+    {
+      "en": "Auto: no link measurement (Medium)",
+      "pl": "Auto: brak pomiaru łącza (Medium)"
     }
   ]
 }

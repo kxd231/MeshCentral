@@ -12,7 +12,11 @@
     {{{customCSSTags}}}
     <link rel="apple-touch-icon" href="/favicon-303x303.png" />
     <script type="text/javascript" src="scripts/common-0.0.1{{min}}.js"></script>
+    <script type="text/javascript" src="rdp/shared/limits.js"></script>
+    <script type="text/javascript" src="rdp/codecs/errors.js"></script>
+    <script type="text/javascript" src="rdp/codecs/avc420.js"></script>
     <script type="text/javascript" src="scripts/agent-desktop-0.0.2{{min}}.js"></script>
+    <script type="text/javascript" src="scripts/agent-desktop-h264{{min}}.js"></script>
     <script type="text/javascript" src="scripts/amt-desktop-0.0.2{{min}}.js"></script>
     <script type="text/javascript" src="scripts/amt-terminal-0.0.2{{min}}.js"></script>
     <script type="text/javascript" src="scripts/zlib{{min}}.js"></script>
@@ -315,9 +319,11 @@
         }
 
         function readBlockAt(ptr, func) {
+            if ((ptr + 16) > recFile.size) { func(-1); return; }
             var fr = new FileReader();
             fr.onload = function (r) {
                 var result = r.target.result;
+                if (result.length < 16) { func(-1); return; }
                 var type = ReadShort(result, 0);
                 var flags = ReadShort(result, 2);
                 var size = ReadInt(result, 4);
@@ -602,14 +608,12 @@
                     var view = new Uint8Array(data.length);
                     for (var i = 0; i < data.length; i++) { view[i] = data.charCodeAt(i); }
 
-                    // Accumulator is not active
-                    var cmd = (view[0] << 8) + view[1], cmdsize = (view[2] << 8) + view[3];
-                    if ((cmd == 27) && (cmdsize == 8)) { cmd = (view[8] << 8) + view[9]; cmdsize = view[4] * 0x1000000 + (view[5] << 16) + (view[6] << 8) + view[7]; view = view.slice(8); }
-                    if (cmdsize + 8 == view.byteLength) { view = view.slice(8); } // drop injected duplicate header
-                    if (cmdsize == view.byteLength) {
-                        agentDesktop.ProcessBinaryCommand(cmd, cmdsize, view);
+                    // Accumulator is not active. The JUMBO wrapper, the copy of the header in front of a command and the padding of a wrapped video frame are handled in agent-desktop-h264.js
+                    var rc = AgentDesktopH264.splitRecordedCommand(view);
+                    if (rc != null) {
+                        agentDesktop.ProcessBinaryCommand(rc.cmd, rc.size, rc.view);
                     } else {
-                        console.log('Bad command size', cmd, cmdsize, view.byteLength);
+                        console.log('Bad command size', (view[0] << 8) + view[1], (view[2] << 8) + view[3], view.byteLength);
                     }
                 } else if (recFileProtocol == 101) {
                     // Intel AMT KVM
@@ -647,16 +651,28 @@
                 tile.error = function () { }
             }
 
-            if (playing) { readNextBlock(processBlock); }
+            if (playing) { readNextWhenReady(); }
+        }
+
+        // The H.264 decoder sets the pace (protocol 7.5): the next block is read only when it has room, so that decoded pictures do not pile up when the recording is played fast, and not before the limit of decoder creations (2 per second, as live) allows another one. A seek of the user feeds its blocks without this wait (seekFetchNext)
+        var feedGate = { since: 0 }, feedTimer = null;
+        function readNextWhenReady() {
+            if (!playing) return;
+            var d = ((agentDesktop != null) && (typeof AgentDesktopH264 == 'object')) ? AgentDesktopH264.feedDelay(agentDesktop, feedGate, Date.now()) : 0;
+            if (d > 0) { feedTimer = setTimeout(function () { feedTimer = null; readNextWhenReady(); }, d); return; }
+            readNextBlock(processBlock);
         }
 
         function cleanup() {
+            SeekToken++; seeking = false;
+            if (feedTimer != null) { clearTimeout(feedTimer); feedTimer = null; }
+            feedGate.since = 0;
             clearXTerm();
             recFile = null;
             recFilePtr = 0;
             recFileMetadata = null;
             playing = false;
-            if (agentDesktop != null) { agentDesktop.Canvas.clearRect(0, 0, agentDesktop.CanvasId.width, agentDesktop.CanvasId.height); agentDesktop = null; }
+            if (agentDesktop != null) { if (agentDesktop.VideoClose) { agentDesktop.VideoClose(); } agentDesktop.Canvas.clearRect(0, 0, agentDesktop.CanvasId.width, agentDesktop.CanvasId.height); agentDesktop = null; }
             if (amtDesktop != null) { amtDesktop.canvas.clearRect(0, 0, amtDesktop.CanvasId.width, amtDesktop.CanvasId.height); amtDesktop = null; }
             readState = 0;
             waitTimerArgs = null;
@@ -819,7 +835,7 @@
         function play() {
             if (xxdialogMode) return;
             Q('PlayButton').blur();
-            if ((playing == true) || (recFileProtocol == 0)) return;
+            if ((playing == true) || (recFileProtocol == 0) || seeking) return;
             playing = true;
             QV('metadatadiv', false);
             QE('PlayButton', false);
@@ -848,6 +864,8 @@
             Q('PauseButton').blur();
             if (playing == false) return;
             playing = false;
+            if (feedTimer != null) { clearTimeout(feedTimer); feedTimer = null; }
+            feedGate.since = 0;
             QE('PlayButton', recFilePtr != recFile.size);
             QE('PauseButton', false);
             QE('RestartButton', recFilePtr != 0);
@@ -867,6 +885,7 @@
             if (xxdialogMode) return;
             Q('RestartButton').blur();
             if (playing == true) return;
+            if (seeking) { SeekToken++; seeking = false; QV('Desk', true); }      // a seek that still feeds blocks is given up (it feeds the old object)
             recFilePtr = 0;
             readState = 0;
             waitTimerArgs = null;
@@ -883,6 +902,7 @@
             clearXTerm();
             recFileLastTime = recFileStartTime;
             if (agentDesktop) {
+                if (agentDesktop.VideoClose) { agentDesktop.VideoClose(); } // the H.264 decoder of the old object (restart and seek build a new one)
                 agentDesktop.Canvas.clearRect(0, 0, agentDesktop.CanvasId.width, agentDesktop.CanvasId.height);
                 agentDesktop = CreateAgentRemoteDesktop('Desk');
                 agentDesktop.onScreenSizeChange = deskAdjust;
@@ -983,15 +1003,21 @@
         var SeekIndexPtr;
         var SeekIndexTime;
         var SeekPlayState;
+        var SeekSpan = null;      // { from, to } of the key frame to the index entry when the recording says where the last key frame is (protocol 7.5), else null
+        var SeekToken = 0;        // a new seek, a restart or the end of the file give up a seek that still feeds blocks
+        var seeking = false;
+        var seekGate = { since: 0 };
         function seek(indexNumber) {
             if (xxdialogMode) return;
             //console.log('seek', indexNumber);
             if ((recFileMetadata.indexes == null) || (recFileMetadata.indexes[indexNumber] == null)) return null;
-            SeekPlayState = playing;
+            SeekPlayState = playing || (seeking && SeekPlayState);
             pause();
             restart();
+            var token = ++SeekToken;
             SeekIndex = recFileMetadata.indexes[indexNumber];
             SeekIndexPtr = 3;
+            SeekSpan = (typeof AgentDesktopH264 == 'object') ? AgentDesktopH264.seekSpan(recFileMetadata, indexNumber, recFileIndexBasePtr, recFile.size) : null;
             recFileLastTime = SeekIndexTime = recFileStartTime + ((1 + indexNumber) * recFileMetadata.indexInterval * 1000);
             recFilePtr = recFileIndexBasePtr + SeekIndex[0];
             var width = SeekIndex[1];
@@ -1013,16 +1039,32 @@
             QV('metadatadiv', false);
             QV('Desk', false);
 
-            seekFetchNext(function () { QV('Desk', true); if (SeekPlayState) { play(); } });
+            seeking = true;
+            seekFetchNext(token, function () { seeking = false; QV('Desk', true); if (SeekPlayState) { play(); } });
         }
 
-        function seekFetchNext(func) {
-            if (SeekIndex[SeekIndexPtr] == null) { func(); return; }
+        // The tiles of the index (in the order of the file), then the blocks from the last key frame to the index entry: the decoder gets the key frame and every picture after it, so the moving areas are
+        // right at the target. The feed waits for the decoder as in playback (feedDelay: room in the queue, the limit of decoder creations); a seek that is given up (token) stops where it is.
+        function seekFetchNext(token, func) {
+            if (token != SeekToken) return;
+            if ((SeekIndex[SeekIndexPtr] == null) || ((SeekSpan != null) && (SeekIndex[SeekIndexPtr] >= SeekSpan.from))) { seekReplay(token, func); return; }
             readBlockAt(recFileIndexBasePtr + SeekIndex[SeekIndexPtr], function (type, flags, time, data) {
+                if (token != SeekToken) return;
                 SeekIndexPtr++;
                 processBlockEx(type, flags, SeekIndexTime, data, true);
-                seekFetchNext(func);
+                if ((SeekIndexPtr & 127) == 0) { setTimeout(function () { seekFetchNext(token, func); }, 0); } else { seekFetchNext(token, func); }   // blocks that are in memory answer at once: the stack must not grow with the size of the index
             });
+        }
+        function seekReplay(token, func) {
+            if ((SeekSpan == null) || (agentDesktop == null)) { func(); return; }
+            AgentDesktopH264.replayBlocks({
+                readAt: function (ptr, cb) { readBlockAt(recFileIndexBasePtr + ptr, cb); },
+                feed: function (type, flags, time, data) { processBlockEx(type, flags, SeekIndexTime, data, true); },
+                delay: function () { return AgentDesktopH264.feedDelay(agentDesktop, seekGate, Date.now()); },
+                later: function (fn, ms) { setTimeout(fn, ms); },
+                alive: function () { return (token == SeekToken) && (agentDesktop != null); },
+                done: function () { if (token == SeekToken) { seekGate.since = 0; func(); } }
+            }, SeekSpan.from, SeekSpan.to);
         }
 
         //

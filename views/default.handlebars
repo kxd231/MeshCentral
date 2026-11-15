@@ -31,6 +31,8 @@
     <script type="text/javascript" src="scripts/agent-redir-ws-0.1.1{{{min}}}.js"></script>
     <script type="text/javascript" src="scripts/agent-redir-rtc-0.1.0{{{min}}}.js"></script>
     <script type="text/javascript" src="scripts/agent-desktop-0.0.2{{{min}}}.js"></script>
+    <script type="text/javascript" src="scripts/agent-desktop-h264{{{min}}}.js"></script>
+    <script type="text/javascript" src="scripts/agent-desktop-auto{{{min}}}.js"></script>
     <script type="text/javascript" src="scripts/agent-rdp-0.0.1{{{min}}}.js"></script>
     <script type="text/javascript" src="scripts/qrcode.min.js"></script>
     <script type="text/javascript" src="scripts/xterm{{{min}}}.js"></script>
@@ -109,6 +111,8 @@
         }
 
     </script>
+    <script type="text/javascript" src="rdp/codecs/errors.js"></script>
+    <script type="text/javascript" src="rdp/codecs/avc420.js"></script>
     <script keeplink=1 type="text/javascript" src="scripts/u2f-api{{{min}}}.js"></script>
     <script keeplink=1 type="text/javascript" src="scripts/charts{{{min}}}.js"></script>
     <script keeplink=1 type="text/javascript" src="scripts/moment{{min}}.js"></script>
@@ -892,6 +896,7 @@
                     </div>
                     <div id=deskarea4 class="areaFoot">
                         <div class="toright2">
+                            <span id="DeskVideoNote" style="font-style:italic;display:none;line-height:22px;white-space:nowrap;margin-right:8px" role="status" aria-live="polite" title="H.264 video was chosen in the settings, but this session shows JPEG."></span>
                             <span id="DeskStats" style="display:none;line-height:22px;white-space:nowrap;margin-right:8px" title="Frames drawn per second and data received per second (average of the last 2 seconds). The bandwidth is measured after any WebSocket decompression."></span>
                             <span id="DeskLatency" style="line-height:22px;width:50px" title="Desktop Session Latency"></span>
                             <span id="DeskTimer" style="line-height:22px" title="Session time"></span>
@@ -1575,10 +1580,11 @@
                         <div>
                             <div>Frame rate</div>
                             <select id="d7framelimiter" dir="rtl">
-                                <option value=16>Very fast</option>
-                                <option value=20>Fast</option>
-                                <option selected=selected value=50>Medium</option>
+                                <option value=16>High</option>
+                                <option selected=selected value=33>Medium</option>
+                                <option value=50>Low</option>
                                 <option value=100>Slow</option>
+                                <option value=auto id="d7frameauto">Auto</option>
                             </select>
                         </div>
                         <div id="d7budgetRow">
@@ -1731,8 +1737,25 @@
         var stars = {}; // Devices that have been "stared" by the user.
         var nodeShortIdent = 0;
         var desktop;
-        var desktopsettings = { encoding: 2, showfocus: false, showmouse: true, showcad: true, quality: 40, scaling: 1024, framerate: 50, budget: 0, localkeymap: false, swapmouse: false, remotekeymap: false, autoclipboard: false, autolock: false, agentencoding: 1 };
+        var desktopsettings = { encoding: 2, showfocus: false, showmouse: true, showcad: true, quality: 40, scaling: 1024, framerate: 33, frameratever: 1, budget: 0, localkeymap: false, swapmouse: false, remotekeymap: false, autoclipboard: false, autolock: false, agentencoding: 1 };
         var multidesktopsettings = { quality: 20, scaling: 128, framerate: 1000, agentencoding: 1 };
+        function d7ViewOnly() { try { var n = ((typeof desktopNode != 'undefined') && desktopNode) ? desktopNode : currentNode; if (n == null) { return false; } var r = GetNodeRights(n); var ok = ((features2 & 0x2000) == 0) && ((n.agent == null) || (n.agent.id != 14)) && ((r == 0xFFFFFFFF) || (((r & 8) != 0) && ((r & 256) == 0) && ((r & 4096) == 0))); return !ok; } catch (ex) { return false; } } // no input for this user (the condition of inputAllowed of the buttons): Auto cannot work there, command 5 of a view only user is not passed on
+        // Frame rate list: High 16 ms (60 frames/s), Medium 33 ms (30, default), Low 50 ms (20), Slow 100 ms (10); the same list for JPEG and H.264.
+        // Settings saved before the list had these names (no frameratever) meant Very fast 16, Fast 20, Medium 50 (the old default) and Slow 100: they move once
+        // (50 to Medium 33, 20 to High 16; 16 and 100 stay) and get frameratever = 1, so that a Low (50) chosen later is never changed again.
+        function d7FrameRateMigrate(s) {
+            if ((s == null) || (parseInt(s.frameratever) >= 1)) return s;
+            var f = parseInt(s.framerate);
+            if (f == 50) { s.framerate = 33; } else if (f == 20) { s.framerate = 16; }
+            s.frameratever = 1;
+            return s;
+        }
+        // The list entry for a saved rate: Medium when there is none, Slow for a rate that is not in the list (the removed 400 and 1000)
+        // Auto (the frame rate chosen by the viewer, agent-desktop-auto.js): the list has it as 'auto'; ?kvmauto=0 or localStorage kvmAuto = '0' turn it off (a saved 'auto' is then Medium)
+        function d7AutoOff() { try { if ((typeof urlargs == 'object') && (urlargs != null) && (String(urlargs.kvmauto) === '0')) { return true; } } catch (ex) { } try { if (localStorage.getItem('kvmAuto') === '0') { return true; } } catch (ex) { } return false; }
+        function d7FrameRateValue(v) { if (String(v) === 'auto') return d7AutoOff() ? 33 : 'auto'; v = parseInt(v); if (isNaN(v)) return 33; return ([16, 33, 50, 100].indexOf(v) < 0) ? 100 : v; }
+        // The Auto entry of the list is for the desktop, not for the thumbnails of the multi desktop view (they keep their own slow rate), and not when it is switched off
+        function d7FrameRateAutoShow(on) { var o = Q('d7frameauto'); if (o) { var show = (on === true) && !d7AutoOff(); o.style.display = show ? '' : 'none'; o.disabled = !show; } }
         var terminal;
         var files;
         var debugLevel = parseInt('{{{debuglevel}}}');
@@ -1972,10 +1995,12 @@
             var t = null;
             try { t = localStorage.getItem('desktopsettings'); } catch (ex) {}
             if (t != null) { desktopsettings = JSON.parse(t); }
+            d7FrameRateMigrate(desktopsettings);
             t = null;
             try { t = localStorage.getItem('multidesktopsettings'); } catch (ex) {}
             if (t != null) { multidesktopsettings = JSON.parse(t); }
-            if ([1, 2].indexOf(parseInt(multidesktopsettings.agentencoding)) < 0) { multidesktopsettings.agentencoding = 1; } // same list as the normal session
+            if ([1, 2].indexOf(parseInt(multidesktopsettings.agentencoding)) < 0) { multidesktopsettings.agentencoding = 1; } // thumbnails: JPEG or PNG only, never video
+            h264Detect();
             applyDesktopSettings();
 
             // Terminal special keys
@@ -5031,6 +5056,7 @@
                                 c.removeAttribute('onmousemove');
                                 Q('xkvmid_' + shortid).appendChild(c);
                                 QH('skvmid_' + shortid, ["Disconnected", "Connecting...", "Setup...", '', ''][((desktop.m.State == null)?desktop.m.state:desktop.m.State)]);
+                                if (desktop.m.SetH264) { desktop.m.SetH264(false); desktop.m.onVideoStatusChange = null; QV('DeskVideoNote', false); } // a thumbnail is never video
                                 if (desktop.m.SendCompressionLevel) { desktop.m.SendCompressionLevel(multidesktopsettings.agentencoding, multidesktopsettings.quality, multidesktopsettings.scaling, multidesktopsettings.framerate); }
                                 desktop.shortid = shortid;
                                 desktop.onStateChanged = onMultiDesktopStateChange;
@@ -5604,9 +5630,11 @@
             QV('d7desktopOtherSettings', false);
             d7bitmapquality.value = multidesktopsettings.quality;
             d7bitmapscaling.value = multidesktopsettings.scaling;
+            h264Page.multi = true; h264Option(); // no video option for thumbnails
             d7encoding.value = multidesktopsettings.agentencoding;
             QV('d7budgetRow', false); // thumbnails never send a budget
             d7FrameRateOptions(multidesktopsettings.framerate); // thumbnails keep their own (slow) rate, also through open and OK
+            d7FrameRateAutoShow(false);
             if (multidesktopsettings.framerate) { d7framelimiter.value = multidesktopsettings.framerate; } else { d7framelimiter.value = 100; }
             changeDesktopSettingsTab(null, 'd7meshkvm');
             setDialogMode(7, "Remote Desktop Settings", 3, showMultiDesktopSettingsChanged);
@@ -5645,6 +5673,7 @@
                 } else if (contype == 1) {
                     // Setup the Mesh Agent remote desktop
                     desk = CreateAgentRedirect(meshserver, CreateAgentRemoteDesktop('kvmid_' + shortid), serverPublicNamePort, authCookie, authRelayCookie, domainUrl);
+                    desk.m.StreamAckEnabled = false; // a thumbnail never asks for the end-to-end ACK or for video
                     desk.m.UseExtendedKeyFlag = isWindowsNode(node);
                     desk.m.mouseCursorActive(xxcurrentView == 11);
                     desk.shortid = shortid;
@@ -9689,7 +9718,8 @@
                     c.removeAttribute('onclick');
                     Q('DeskParent').appendChild(c);
                     desktop = xdesk;
-                    if (desktop.m.SendCompressionLevel) { desktop.m.SendCompressionLevel(desktopsettings.agentencoding, desktopsettings.quality, desktopsettings.scaling, desktopsettings.framerate, desktopsettings.budget || 0); }
+                    desktop.m.onVideoStatusChange = h264Status;
+                    if (desktop.m.SendCompressionLevel) { desktop.m.SendCompressionLevel(h264Apply(desktop.m, desktopsettings.agentencoding), desktopsettings.quality, desktopsettings.scaling, desktopsettings.framerate, desktopsettings.budget || 0); }
                     desktop.onStateChanged = onDesktopStateChange;
                     desktop.onMetadataChange = function(metadata) { updateMetadata(desktop, 'deskmetadata'); }
                     if ((features2 & 0x2000) != 0) desktop.m.stopInput = true;
@@ -9834,11 +9864,13 @@
         agentConsoleMessages['legacy-fallback'] = "Simplified graphics (classic bitmaps): {0}";
         agentConsoleMessages['reconnect-legacy'] = "Reconnect with classic bitmaps";
         agentConsoleMessages['accept-cert'] = "Accept the new certificate and reconnect";
+        agentConsoleMessages['rec-limit-warn'] = "The recording of this session has reached {0}% of its size limit, {1} MB of {2} MB are left. The session ends when the limit is reached; connecting again starts a new recording.";
+        agentConsoleMessages['rec-limit-end'] = "The recording of this session reached its size limit of {0} MB, so the session has ended. Connect again to start a new recording.";
         function formatAgentConsoleMessage(msg, msgid, msgargs) {
             var r;
             if (msgargs == null) { msgargs = []; }
             while (msgargs.length < 3) { msgargs.push(''); } // We need to call the format function in a way that works with older browsers and minifier, can't use apply() or ...
-            if (msgid && ((msgid < agentConsoleMessages.length) || (msgid == 'legacy-fallback'))) { r = EscapeHtml(format(agentConsoleMessages[msgid], (msgargs[0]), (msgargs[1]), (msgargs[2]))); } else { r = EscapeHtml(msg); }
+            if (msgid && ((msgid < agentConsoleMessages.length) || (msgid == 'legacy-fallback') || (msgid == 'rec-limit-warn') || (msgid == 'rec-limit-end'))) { r = EscapeHtml(format(agentConsoleMessages[msgid], (msgargs[0]), (msgargs[1]), (msgargs[2]))); } else { r = EscapeHtml(msg); }
             return r.split('\n').join('<br />') + '<br /><br />';
         }
 
@@ -9891,7 +9923,7 @@
                                     webRtcDesktop.softdesktop.m.UseExtendedKeyFlag = isWindowsNode(desktopNode);
                                     webRtcDesktop.softdesktop.m.setRotation(desktop.m.rotation);
                                     webRtcDesktop.softdesktop.m.onScreenSizeChange = deskAdjust;
-                                    webRtcDesktop.softdesktop.m.ImageType = desktopsettings.agentencoding; // JPEG (1) or PNG (2), as in the settings
+                                    webRtcDesktop.softdesktop.m.ImageType = h264Apply(webRtcDesktop.softdesktop.m, desktopsettings.agentencoding); // JPEG (1) or PNG (2), as in the settings; video as in the settings
                                     if (desktopsettings.quality) { webRtcDesktop.softdesktop.m.CompressionLevel = desktopsettings.quality; } // Number from 1 to 100. 50 or less is best.
                                     if (desktopsettings.scaling) { webRtcDesktop.softdesktop.m.ScalingLevel = desktopsettings.scaling; }
                                     webRtcDesktop.softdesktop.Start();
@@ -9973,10 +10005,11 @@
                         }
                     }
                     desktop.onMetadataChange = function(metadata) { updateMetadata(desktop, 'deskmetadata'); }
-                    desktop.m.ImageType = desktopsettings.agentencoding; // JPEG (1) or PNG (2)
+                    desktop.m.ImageType = h264Apply(desktop.m, desktopsettings.agentencoding); // JPEG (1) or PNG (2); H.264 (264) is JPEG tiles plus video
+                    desktop.m.onVideoStatusChange = h264Status;
                     desktop.m.CompressionLevel = desktopsettings.quality; // Number from 1 to 100. 50 or less is best.
                     desktop.m.ScalingLevel = desktopsettings.scaling;
-                    if (desktopsettings.framerate) { desktop.m.FrameRateTimer = desktopsettings.framerate; }
+                    if (desktopsettings.framerate) { desktop.m.SetFrameRate(desktopsettings.framerate); desktop.m.AutoDeviceKey = ((typeof desktopNode != 'undefined') && desktopNode && desktopNode._id) ? desktopNode._id : 'x'; if (d7ViewOnly()) { desktop.m.AutoBlocked = 'viewonly'; } }
                     desktop.m.BandwidthBudget = parseInt(desktopsettings.budget) || 0; // sent with the first compression command of the session
                     if (desktopsettings.swapmouse) { desktop.m.SwapMouse = desktopsettings.swapmouse; }
                     if (desktopsettings.rmw) { desktop.m.ReverseMouseWheel = desktopsettings.rmw; }
@@ -10267,7 +10300,9 @@
             if (s == null) return;
             var kib = s.bytesPerSec / 1024, mbit = s.bytesPerSec * 8 / 1000000;
             var fps = s.hidden ? '- fps' : format('{0} fps', (s.fps >= 10) ? Math.round(s.fps) : (Math.round(s.fps * 10) / 10));
-            QH('DeskStats', fps + ' \u00B7 ' + format('{0} KiB/s ({1} Mb/s)', (kib >= 10) ? Math.round(kib) : (Math.round(kib * 10) / 10), mbit.toFixed(1)));
+            var auto = '';      // Auto (the frame rate chosen by the viewer or by the agent): who chooses, and the step
+            if (s.auto) { auto = ((s.auto.available === false) || (s.auto.owner === 'unavailable')) ? "Auto unavailable" : ((s.auto.owner === 'agent') ? "Auto (agent)" : ((s.auto.owner === 'frozen') ? "Auto paused (several viewers)" : ((s.auto.mode === 'none') ? "Auto: no link measurement (Medium)" : format("Auto {0} fps", s.auto.fpsTarget)))); auto = auto + ' \u00B7 '; }
+            QH('DeskStats', (s.codec ? (s.codec + ' \u00B7 ') : '') + auto + fps + ' \u00B7 ' + format('{0} KiB/s ({1} Mb/s)', (kib >= 10) ? Math.round(kib) : (Math.round(kib * 10) / 10), mbit.toFixed(1)));
         }
 
         function updateSessionTime() {
@@ -10362,8 +10397,9 @@
             desktopsettings.quality = d7bitmapquality.value;
             desktopsettings.scaling = d7bitmapscaling.value;
             desktopsettings.framerate = d7framelimiter.value;
+            desktopsettings.frameratever = 1;
             desktopsettings.budget = parseInt(d7budget.value) || 0;
-            desktopsettings.agentencoding = d7encoding.value;
+            desktopsettings.agentencoding = h264Saved(d7encoding.value);
             desktopsettings.swapmouse = d7deskSwapMouse.checked;
             desktopsettings.rmw = d7deskrmw.checked;
             desktopsettings.remotekeymap = d7deskRemoteKeyMap.checked;
@@ -10388,7 +10424,7 @@
                     desktop.m.ReverseMouseWheel = desktopsettings.rmw;
                     desktop.m.remoteKeyMap = desktopsettings.remotekeymap;
                     if (desktop.State != 0) {
-                        desktop.m.SendCompressionLevel(desktopsettings.agentencoding, desktopsettings.quality, desktopsettings.scaling, desktopsettings.framerate, desktopsettings.budget || 0);
+                        desktop.m.SendCompressionLevel(h264Apply(desktop.m, desktopsettings.agentencoding), desktopsettings.quality, desktopsettings.scaling, desktopsettings.framerate, desktopsettings.budget || 0);
                         desktop.sendCtrlMsg('{"ctrlChannel":"102938","type":"autolock","value":' + desktopsettings.autolock + '}');
                         desktop.m.SendRefresh();
                     }
@@ -10418,6 +10454,56 @@
             sel.add(o);
         }
 
+        // H.264 (video). The Encoding option "H.264 (video)" is in the list only when this browser can decode it (probe once per page) and the server allows it
+        // (domain desktop.h264 = false hides it). Thumbnails of the multi desktop view are always JPEG or PNG. A saved choice that cannot be used now is JPEG for the
+        // session; the saved value itself stays until the user saves the settings again.
+        // 0x40000000: a high bit of features3 on purpose, for a flag that only this fork has (upstream hands out the low bits one by one)
+        var h264Page = { server: ((features3 & 0x40000000) == 0), browser: false, known: (!(typeof AgentDesktopH264 == 'object') || ((features3 & 0x40000000) != 0)), multi: false };
+        function h264Usable() { return h264Page.server && h264Page.browser; }
+        function h264Detect() {
+            if (!h264Page.server || (typeof AgentDesktopH264 != 'object')) { h264Page.known = true; return; }
+            AgentDesktopH264.available().then(function (ok) { h264Page.browser = ok; h264Page.known = true; h264Option(); h264Late(); }, function () { h264Page.known = true; h264Late(); });
+        }
+        // The probe ends after a session may have started: the session takes the mode of the saved setting now (request for video, or the note why not)
+        function h264Late() {
+            if ((desktop == null) || (desktop.contype != 1) || (desktop.m == null)) return;
+            h264Apply(desktop.m, desktopsettings.agentencoding);
+        }
+        // A setting saved while the probe is still running keeps a saved H.264 (the list cannot show it yet and would turn it into JPEG)
+        function h264Saved(value) { return ((!h264Page.known) && (parseInt(desktopsettings.agentencoding) == 264) && (parseInt(value) == 1)) ? 264 : value; }
+        function h264Say(text) { QH('DeskVideoNote', text); QV('DeskVideoNote', text != ''); }
+        function h264Option() {
+            var sel = Q('d7encoding'), o = null, i, want = h264Usable() && !h264Page.multi;
+            for (i = 0; i < sel.options.length; i++) { if (sel.options[i].value == '264') { o = sel.options[i]; } }
+            if (want && (o == null)) {
+                o = document.createElement('option');
+                o.value = '264'; o.text = "\u2066H.264 (video)\u2069";
+                o.title = "Moving areas are sent as H.264 video, text and still areas stay sharp JPEG. Needs an agent with video support (the Windows x64 agent of this fork); other agents keep using JPEG.";
+                sel.add(o);
+            }
+            if (!want && (o != null)) { sel.remove(o.index); }
+            sel.value = h264Page.multi ? multidesktopsettings.agentencoding : (((parseInt(desktopsettings.agentencoding) == 264) && !want) ? 1 : desktopsettings.agentencoding);
+        }
+        // Puts a session into the video mode the Encoding setting asks for; returns the picture type for the compression command
+        function h264Apply(m, setting) {
+            var type = (typeof AgentDesktopH264 == 'object') ? AgentDesktopH264.applyEncoding(m, setting, h264Usable()) : ((parseInt(setting) == 2) ? 2 : 1);
+            // H.264 is the saved choice but this session cannot have it (server switch, browser): the note says so, the picture is JPEG. Another setting: no note.
+            if ((desktop != null) && (desktop.m === m) && !h264Usable() && (h264Page.known || !h264Page.server)) {
+                h264Say((parseInt(setting) == 264) ? format("Using JPEG instead of H.264: {0}", h264WhyText[h264Page.server ? 'browser' : 'r6']) : '');
+            }
+            return type;
+        }
+        // Why the session shows JPEG although H.264 was chosen (short, for the status line)
+        var h264WhyText = {
+            browser: "this browser cannot decode H.264", agent: "this agent has no H.264 video", errors: "H.264 decoding failed", unsupported: "this browser cannot decode this stream",
+            veto: "another viewer is connected", r1: "this agent has no H.264 video", r2: "this agent cannot encode H.264", r3: "the encoder of the agent did not start",
+            r4: "the encoder of the agent failed", r6: "H.264 is turned off or not available", r7: "the screen is too large", r8: "no common H.264 profile", r9: "no acknowledgement from the browser"
+        };
+        function h264Status(m, st) {
+            if ((desktop == null) || (desktop.m !== m)) return;
+            h264Say((st.state == 'fallback') ? format("Using JPEG instead of H.264: {0}", h264WhyText[st.why] || st.why) : '');
+        }
+
         function applyDesktopSettings() {
             var r = '', ops = (features & 512)?[100,90,80,70,60,50,40,30,20,10,5,1]:[60,50,40,30,20,10,5,1];
             for (var i in ops) { r += '<option value=' + ops[i] + '>' + ops[i] + '%</option>'; }
@@ -10425,15 +10511,17 @@
             d7desktopmode.value = desktopsettings.encoding;
             d7showfocus.checked = desktopsettings.showfocus;
             d7showcursor.checked = desktopsettings.showmouse;
-            // Only JPEG (1) and PNG (2) are offered: a saved TIFF (3), WebP (4) or anything else becomes JPEG
-            if ([1, 2].indexOf(parseInt(desktopsettings.agentencoding)) < 0) { desktopsettings.agentencoding = 1; }
-            d7encoding.value = desktopsettings.agentencoding;
+            // Only JPEG (1), PNG (2) and H.264 (264) are offered: a saved TIFF (3), WebP (4) or anything else becomes JPEG
+            if ([1, 2, 264].indexOf(parseInt(desktopsettings.agentencoding)) < 0) { desktopsettings.agentencoding = 1; }
+            h264Page.multi = false;
+            h264Option();
             d7bitmapquality.value = 40; // Default value
             if (ops.indexOf(parseInt(desktopsettings.quality)) >= 0) { d7bitmapquality.value = desktopsettings.quality; }
             d7bitmapscaling.value = desktopsettings.scaling;
-            // The slow frame rates (400, 1000) were removed from the list: a saved one becomes Medium, so that the list is never left without a selection.
+            // The slow frame rates (400, 1000) were removed from the list: a saved one becomes Slow, so that the list is never left without a selection.
             d7FrameRateOptions(null);
-            if ([16, 20, 50, 100].indexOf(parseInt(desktopsettings.framerate)) < 0) { desktopsettings.framerate = 100; }
+            d7FrameRateAutoShow(true);
+            desktopsettings.framerate = d7FrameRateValue(desktopsettings.framerate);
             d7framelimiter.value = desktopsettings.framerate;
             // Bandwidth limit (units of 100 kbit/s): anything that is not in the list means no limit
             if ([0, 200, 100, 60, 40, 20, 10].indexOf(parseInt(desktopsettings.budget)) < 0) { desktopsettings.budget = 0; }

@@ -21,6 +21,7 @@
     <script type="text/javascript" src="scripts/meshcentral{{{min}}}.js"></script>
     <script type="text/javascript" src="scripts/agent-redir-ws-0.1.1{{{min}}}.js"></script>
     <script type="text/javascript" src="scripts/agent-desktop-0.0.2{{{min}}}.js"></script>
+    <script type="text/javascript" src="scripts/agent-desktop-auto{{{min}}}.js"></script>
     <script type="text/javascript" src="scripts/amt-0.2.0{{{min}}}.js"></script>
     <script type="text/javascript" src="scripts/amt-redir-ws-0.1.0{{{min}}}.js"></script>
     <script type="text/javascript" src="scripts/amt-desktop-0.0.2{{{min}}}.js"></script>
@@ -692,11 +693,11 @@
                             </td>
                             <td style="width:100px">
                                 <select id="d7framelimiter" style="float:right;width:200px" dir="rtl">
-                                    <option value=20>Very fast</option>
-                                    <option selected=selected value=50>Fast</option>
-                                    <option value=100>Medium</option>
-                                    <option value=400>Slow</option>
-                                    <option value=1000>Very slow</option>
+                                    <option value=16>High</option>
+                                    <option selected=selected value=33>Medium</option>
+                                    <option value=50>Low</option>
+                                    <option value=100>Slow</option>
+                                    <option value=auto id="d7frameauto">Auto</option>
                                 </select>
                             </td>
                         </tr>
@@ -805,6 +806,7 @@
             // Load desktop settings
             var t = localStorage.getItem('desktopsettings');
             if (t != null) { desktopsettings = JSON.parse(t); }
+            d7FrameRateMigrate(desktopsettings);
             applyDesktopSettings();
 
             attemptWebRTC = false; // For now, default WebRTC off unless we set it in the URL.
@@ -1011,7 +1013,23 @@
 
         var desktop;
         var desktopNode;
-        var desktopsettings = { encoding: 2, showfocus: false, showmouse: true, showcad: true, quality: 40, scaling: 1024, framerate: 50, autolock: false };
+        var desktopsettings = { encoding: 2, showfocus: false, showmouse: true, showcad: true, quality: 40, scaling: 1024, framerate: 33, frameratever: 1, autolock: false };
+        // Frame rate list: High 16 ms (60 frames/s), Medium 33 ms (30, default), Low 50 ms (20), Slow 100 ms (10); the same list for JPEG and H.264.
+        // Settings saved before the list had these names (no frameratever) meant Very fast 16, Fast 20, Medium 50 (the old default) and Slow 100: they move once
+        // (50 to Medium 33, 20 to High 16; 16 and 100 stay) and get frameratever = 1, so that a Low (50) chosen later is never changed again.
+        function d7FrameRateMigrate(s) {
+            if ((s == null) || (parseInt(s.frameratever) >= 1)) return s;
+            var f = parseInt(s.framerate);
+            if (f == 50) { s.framerate = 33; } else if (f == 20) { s.framerate = 16; }
+            s.frameratever = 1;
+            return s;
+        }
+        // The list entry for a saved rate: Medium when there is none, Slow for a rate that is not in the list (the removed 400 and 1000)
+        // Auto (the frame rate chosen by the viewer, agent-desktop-auto.js): the list has it as 'auto'; ?kvmauto=0 or localStorage kvmAuto = '0' turn it off (a saved 'auto' is then Medium)
+        function d7AutoOff() { try { if ((typeof urlargs == 'object') && (urlargs != null) && (String(urlargs.kvmauto) === '0')) { return true; } } catch (ex) { } try { if (localStorage.getItem('kvmAuto') === '0') { return true; } } catch (ex) { } return false; }
+        function d7FrameRateValue(v) { if (String(v) === 'auto') return d7AutoOff() ? 33 : 'auto'; v = parseInt(v); if (isNaN(v)) return 33; return ([16, 33, 50, 100].indexOf(v) < 0) ? 100 : v; }
+        // The Auto entry of the list is for the desktop, not for the thumbnails of the multi desktop view (they keep their own slow rate), and not when it is switched off
+        function d7FrameRateAutoShow(on) { var o = Q('d7frameauto'); if (o) { var show = (on === true) && !d7AutoOff(); o.style.display = show ? '' : 'none'; o.disabled = !show; } }
         function setupDesktop() {
             // Setup the remote desktop
             if ((desktopNode != currentNode) && (desktop != null)) { desktop.Stop(); desktopNode = null; desktop = null; }
@@ -1068,11 +1086,13 @@
 
         // Used to translate incoming agent console messages
         var agentConsoleMessages = ['', "Waiting for user to grant access...", "Denied", "Failed to start remote terminal session, {0} ({1})", "Timeout", "Received invalid network data"];
+        agentConsoleMessages['rec-limit-warn'] = "The recording of this session has reached {0}% of its size limit, {1} MB of {2} MB are left. The session ends when the limit is reached; connecting again starts a new recording.";
+        agentConsoleMessages['rec-limit-end'] = "The recording of this session reached its size limit of {0} MB, so the session has ended. Connect again to start a new recording.";
         function formatAgentConsoleMessage(msg, msgid, msgargs) {
             var r;
             if (msgargs == null) { msgargs = []; }
             while (msgargs.length < 3) { msgargs.push(''); } // We need to call the format function in a way that works with older browsers and minifier, can't use apply() or ...
-            if (msgid && (msgid < agentConsoleMessages.length)) { r = EscapeHtml(format(agentConsoleMessages[msgid], (msgargs[0]), (msgargs[1]), (msgargs[2]))); } else { r = EscapeHtml(msg); }
+            if (msgid && ((msgid < agentConsoleMessages.length) || (msgid == 'rec-limit-warn') || (msgid == 'rec-limit-end'))) { r = EscapeHtml(format(agentConsoleMessages[msgid], (msgargs[0]), (msgargs[1]), (msgargs[2]))); } else { r = EscapeHtml(msg); }
             return r.split('\n').join('<br />') + '<br /><br />';
         }
 
@@ -1122,7 +1142,7 @@
                     desktop.m.ImageType = webpSupport ? 4 : 1; // Send 4 if WebP is supported, otherwise send 1 for JPEG.
                     desktop.m.CompressionLevel = desktopsettings.quality; // Number from 1 to 100. 50 or less is best.
                     desktop.m.ScalingLevel = desktopsettings.scaling;
-                    desktop.m.FrameRateTimer = desktopsettings.framerate;
+                    desktop.m.SetFrameRate(desktopsettings.framerate); desktop.m.AutoDeviceKey = 'share'; if (viewOnly == 1) { desktop.m.AutoBlocked = 'viewonly'; }
                     desktop.m.onDisplayinfo = deskDisplayInfo;
                     desktop.m.onScreenSizeChange = function (o, x, y) { if (fullscreen) { QS('deskarea3').width = (x * fullscreenzoom) + 'px'; QS('deskarea3').height = (y * fullscreenzoom) + 'px'; } deskAdjust(); }
                     desktop.Start(null);
@@ -1202,6 +1222,7 @@
             desktopsettings.quality = d7bitmapquality.value;
             desktopsettings.scaling = d7bitmapscaling.value;
             desktopsettings.framerate = d7framelimiter.value;
+            desktopsettings.frameratever = 1;
             desktopsettings.autolock = d7deskAutoLock.checked;
             localStorage.setItem('desktopsettings', JSON.stringify(desktopsettings));
             applyDesktopSettings();
@@ -1224,7 +1245,7 @@
             d7bitmapquality.value = 40; // Default value
             if (ops.indexOf(parseInt(desktopsettings.quality)) >= 0) { d7bitmapquality.value = desktopsettings.quality; }
             d7bitmapscaling.value = desktopsettings.scaling;
-            if (desktopsettings.framerate) { d7framelimiter.value = desktopsettings.framerate; }
+            d7FrameRateAutoShow(true); d7framelimiter.value = desktopsettings.framerate = d7FrameRateValue(desktopsettings.framerate);
             if (desktopsettings.autolock != null) { d7deskAutoLock.checked = desktopsettings.autolock; }
         }
 

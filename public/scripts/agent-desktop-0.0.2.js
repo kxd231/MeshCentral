@@ -73,6 +73,12 @@ var CreateAgentRemoteDesktop = function (canvasid, scrolldiv) {
     obj.QueueOverflows = 0;
     obj.bitmapFailures = 0;
 
+    // H.264 video (commands 240-243, public/scripts/agent-desktop-h264.js). false: this viewer never asks for video. The visible option (agentencoding=264)
+    // sets it with SetH264(true). Selecting video implies the end-to-end ACK (op 1 carries it) and a JPEG/WebP picture type for the tiles around the video.
+    obj.H264Enabled = false;
+    obj.H264Options = null;                     // overrides for the decoder module (tests: fakes of VideoDecoder and EncodedVideoChunk, probe result)
+    var h264 = null;                            // the decoder of the module, created when the first frame needs it
+
     // Viewer ACK. A multiplexing server that offers it ("kvmAck":1 in its metadata) gets a request; after its confirmation the
     // client tags every tile and screen frame received from the websocket with (epoch, seq) and acknowledges, cumulatively and at most every
     // 20 ms, the last tag whose queue position has been consumed (drawn, failed or dropped). The server uses this to keep a bounded window.
@@ -110,7 +116,7 @@ var CreateAgentRemoteDesktop = function (canvasid, scrolldiv) {
         if (s.length < 2) return null;
         var a = s[0], b = s[s.length - 1], dt = (b.t - a.t) / 1000;
         if (dt <= 0) return null;
-        return { fps: (b.frames - a.frames) / dt, bytesPerSec: (b.bytes - a.bytes) / dt, seconds: dt, hidden: ((typeof document == 'object') && (document != null) && (document.visibilityState === 'hidden')) };
+        return { fps: (b.frames - a.frames) / dt, bytesPerSec: (b.bytes - a.bytes) / dt, seconds: dt, codec: obj.ActiveCodec(), hidden: ((typeof document == 'object') && (document != null) && (document.visibilityState === 'hidden')), auto: obj.AutoBrief() };
     }
 
     // Remote user mouse and keyboard lock
@@ -146,14 +152,19 @@ var CreateAgentRemoteDesktop = function (canvasid, scrolldiv) {
         obj.State = 0;
         obj.accumulator = null;
         obj.KvmAckReset(); // before the drop: tags of the old connection must not produce ACKs
+        streamReset();     // same for the positions of the end-to-end stream ACK
         obj.DropPendingOperations();
+        presentDiscard();
         clearOverflowRefresh();
     }
 
     obj.Stop = function () {
         obj.StatsEnable(false);
         obj.KvmAckReset();
+        streamReset();
         obj.DropPendingOperations();
+        autoStop();
+        presentClose();     // the end of a session: the observer of the long animation frames goes too (a new connection of the page makes a new viewer object, the old one must not stay observed)
         clearOverflowRefresh();
         obj.setRotation(0);
         obj.UnGrabKeyInput();
@@ -176,7 +187,7 @@ var CreateAgentRemoteDesktop = function (canvasid, scrolldiv) {
             }
             case 3: {
                 // Websocket connected
-
+                autoSync();
                 break;
             }
         }
@@ -232,6 +243,7 @@ var CreateAgentRemoteDesktop = function (canvasid, scrolldiv) {
     function clearOverflowRefresh() { if (refreshTimer != null) { clearTimeout(refreshTimer); refreshTimer = null; } }
     function queueOverflow() {
         obj.QueueOverflows++;
+        autoFreeze(600000, 'overflow');
         if (obj.debugmode > 0) { console.log('KVM draw queue overflow, dropping ' + obj.PendingOperations.length + ' operations'); }
         obj.DropPendingOperations();
         overflowRefresh();
@@ -299,6 +311,7 @@ var CreateAgentRemoteDesktop = function (canvasid, scrolldiv) {
                 }
             }
         } finally { draining = false; }
+        h264HeadCheck();
     }
 
     // Apply the operation at the head of the queue if it is complete. Returns true if an operation was consumed.
@@ -306,14 +319,17 @@ var CreateAgentRemoteDesktop = function (canvasid, scrolldiv) {
         var q = obj.PendingOperations;
         if ((q.length == 0) || (q[0].st == 0)) return false;
         var op = q.shift();
-        if (op.t == 0) { kvmAckDone(op.ackTag); return true; } // an ACK marker: nothing to draw, not a tile
+        if (op.t == 0) { if (op.pos) { streamDone(op.pos); } kvmAckDone(op.ackTag); return true; } // an ACK marker: nothing to draw, not a tile
+        if (op.t == 3) { return consumeVideo(op); }
         obj.QueuedBytes -= op.bytes;
         if (op.st == 1) { obj.DecodedPixels -= op.px; }
         obj.TilesDrawn++;
         if (obj.onPreDrawImage != null) { try { obj.onPreDrawImage(); } catch (ex) { console.log(ex); } } // Notify that we are about to draw on the canvas.
         if ((op.st == 1) && (obj.Canvas != null) && (obj.State != 0)) {
             try {
-                if (op.t == 2) { obj.Canvas.drawImage(op.img, obj.rotX(op.x, op.y), obj.rotY(op.x, op.y)); }
+                if ((presenter != null) && (obj.PresentMode === 'off')) { presenter.flush(); }
+                if ((presenter != null) && presenter.busy()) { presentBehind(op); } // video pictures wait for their frame: this draw keeps its place behind them
+                else if (op.t == 2) { obj.Canvas.drawImage(op.img, obj.rotX(op.x, op.y), obj.rotY(op.x, op.y)); }
                 else if (op.t == 1) { drawCopyRect(op); }
                 obj.DrawSeq++;
             } catch (ex) { console.log('KVM draw error', ex); }
@@ -325,15 +341,342 @@ var CreateAgentRemoteDesktop = function (canvasid, scrolldiv) {
 
     // Drop everything that is queued: pending decodes are ignored when they finish and decoded bitmaps are released.
     obj.DropPendingOperations = function () {
-        var q = obj.PendingOperations, lastTag = null;
-        for (var i = 0; i < q.length; i++) { q[i].dropped = true; releaseImage(q[i].img); q[i].img = null; if (q[i].ackTag) { lastTag = q[i].ackTag; } }
+        var q = obj.PendingOperations, lastTag = null, lastPos = null;
+        for (var i = 0; i < q.length; i++) {
+            q[i].dropped = true;
+            if (q[i].t == 3) { if (h264 != null) { h264.dropped(q[i]); } } else { releaseImage(q[i].img); q[i].img = null; }
+            if (q[i].ackTag) { lastTag = q[i].ackTag; } if (q[i].pos) { lastPos = q[i].pos; }
+        }
         q.length = 0;
+        if (lastPos != null) { streamDone(lastPos); } // a dropped position counts as consumed (protocol 7.4): the agent's window must not wait for it
         if (lastTag != null) { kvmAckDone(lastTag); } // dropped operations have left the queue too
         obj.QueuedBytes = 0;
         obj.DecodedPixels = 0;
         obj.tilesReceived = obj.TilesDrawn = obj.KillDraw = 0; // the counters describe the queue, which is empty now
         obj.Epoch++;
         if (drainTimer != null) { clearTimeout(drainTimer); drainTimer = null; }
+        h264HeadCheck();
+    }
+
+    // ---- H.264 video in the draw queue (the decoder is in agent-desktop-h264.js) ----
+    function h264Module() { return ((typeof AgentDesktopH264 == 'object') && (AgentDesktopH264 != null)) ? AgentDesktopH264 : null; }
+    function h264Host() {
+        return {
+            player: function () { return (obj.parent == null); },
+            now: function () { return svNow(); },
+            setTimeout: function (fn, ms) { return setTimeout(fn, ms); },
+            clearTimeout: function (h) { clearTimeout(h); },
+            hidden: function () { return !kvmAckVisible(); },
+            presenter: function () { return presentGet(); },
+            tick: function () { return presentNow(); },
+            tune: function () { return !presentOff(); },        // the presentation switch also switches off what goes with it in the decoder (the hold time of the overflow, the software retry)
+            softwareGet: function () { try { return (typeof sessionStorage == 'object') && (sessionStorage != null) && (sessionStorage.getItem('kvmH264Software') === '1'); } catch (ex) { return false; } },
+            softwareSet: function (on) { try { if ((typeof sessionStorage == 'object') && (sessionStorage != null)) { if (on) { sessionStorage.setItem('kvmH264Software', '1'); } else { sessionStorage.removeItem('kvmH264Software'); } } } catch (ex) { } },
+            sendOp3: function (flags) { if (svBound()) { sv.stats.op3++; svSend240(3, flags); } },
+            sendOp2: function () { if (svBound()) { sv.stats.op2++; svSend240(2, 0); } },
+            wake: function () { drainOperations(); },
+            changed: function () { videoStatusNotify(); },
+            head: function () { var q = obj.PendingOperations; return (q.length > 0) ? q[0] : null; },
+            rotX: function (x, y) { return obj.rotX(x, y); },
+            rotY: function (x, y) { return obj.rotY(x, y); },
+            log: function (m) { if (obj.debugmode > 0) { console.log(m); } }
+        };
+    }
+    function h264Get() {
+        if (h264 == null) { var m = h264Module(); if (m == null) { return null; } h264 = m.create(h264Host(), obj.H264Options); }
+        return h264;
+    }
+    function h264HeadCheck() { if (h264 != null) { var q = obj.PendingOperations; h264.headChanged((q.length > 0) ? q[0] : null); } }
+    // Frames are decoded when this viewer asked for video and the agent says it is on; the player decodes whatever the recording holds (7.5)
+    function h264Want() {
+        if (h264Module() == null) { return false; }
+        if (obj.parent == null) { return true; }
+        return (obj.H264Enabled === true) && ((h264 == null) || !h264.disabled) && (sv.state != null) && (sv.state.video === 1) && (sv.state.ack === 1);
+    }
+    function h264Repair(flags) { if ((h264 != null) && h264Want()) { h264.repair(flags); } }
+
+    // Presentation of the decoded pictures (createPresenter in agent-desktop-h264.js): one video picture per frame of the browser, the surplus waits for the next frame, the target of the
+    // queue follows the last 0.5 s. Only for a live viewer (the recording player draws as fast as it decodes). Off with ?kvmpresent=0 in the address of the page, with localStorage kvmPresent = '0', or with
+    // obj.PresentMode = 'off': then the viewer is what it was without the presenter (the decoder too: no hold time of the overflow, no software retry). 'fixed' (?kvmpresent=fixed, localStorage 'fixed') is
+    // the presenter with a fixed target (one picture may stay behind, no history), for the comparison.
+    obj.PresentMode = 'queue';                  // 'queue' (default), 'fixed' or 'off' (draw when the picture is consumed, as before)
+    var presenter = null, presentDecided = false;
+    var presentUser = null, presentLooseUser = null;     // what the address of the page and localStorage say, read once ('' nothing, '0' off, 'fixed'); the loose target of the presenter (0-3, -1 nothing)
+    function presentSwitch() {
+        if (obj.PresentMode === 'off') { return '0'; }
+        if (obj.PresentMode === 'fixed') { return 'fixed'; }
+        if (presentUser == null) {
+            presentUser = '';
+            try { if ((typeof urlargs == 'object') && (urlargs != null) && (urlargs.kvmpresent != null)) { var u = String(urlargs.kvmpresent); if ((u === '0') || (u === 'fixed')) { presentUser = u; } } } catch (ex) { }
+            try { if ((presentUser === '') && (typeof localStorage == 'object') && (localStorage != null)) { var l = localStorage.getItem('kvmPresent'); if ((l === '0') || (l === 'fixed')) { presentUser = l; } } } catch (ex) { }
+        }
+        return presentUser;
+    }
+    // ?kvmpresentloose=N / localStorage kvmPresentLoose = 'N' (0 to 3): how many pictures stay behind a frame of the browser when the queue has been short; for the comparison of the targets, nothing changes without it
+    function presentLoose() {
+        if (presentLooseUser == null) {
+            presentLooseUser = -1;
+            var pick = function (v) { v = String(v); if (/^[0-3]$/.test(v)) { presentLooseUser = parseInt(v, 10); return true; } return false; };
+            try { if ((typeof urlargs == 'object') && (urlargs != null) && (urlargs.kvmpresentloose != null) && pick(urlargs.kvmpresentloose)) { return presentLooseUser; } } catch (ex) { }
+            try { if ((typeof localStorage == 'object') && (localStorage != null)) { var l = localStorage.getItem('kvmPresentLoose'); if (l != null) { pick(l); } } } catch (ex) { }
+        }
+        return presentLooseUser;
+    }
+    function presentOff() { return presentSwitch() === '0'; }
+    function presentNow() { return ((typeof performance == 'object') && (performance != null) && performance.now) ? performance.now() : Date.now(); }
+    // Long animation frames of the page, where the browser reports them (Chrome 123+); otherwise nothing is observed. → a function that stops the observer, or null
+    function presentLoaf(cb) {
+        try {
+            if ((typeof PerformanceObserver != 'function') || !PerformanceObserver.supportedEntryTypes || (PerformanceObserver.supportedEntryTypes.indexOf('long-animation-frame') < 0)) { return null; }
+            var po = new PerformanceObserver(function (list) { var l = list.getEntries(); for (var i = 0; i < l.length; i++) { cb(l[i]); } });
+            po.observe({ type: 'long-animation-frame', buffered: false });
+            return function () { po.disconnect(); };
+        } catch (ex) { return null; }
+    }
+    function presentGet() {
+        if (obj.parent == null) { return null; }
+        if (presentOff()) { if (presenter != null) { presenter.flush(); } return null; }   // also in the middle of a session: what waits is drawn, later pictures are drawn at once
+        if ((presenter == null) && !presentDecided) {
+            presentDecided = true;
+            var m = h264Module();
+            if ((m == null) || (typeof m.createPresenter != 'function') || (typeof requestAnimationFrame != 'function') || presentOff()) { return null; }
+            presenter = m.createPresenter({
+                raf: function (fn) { return requestAnimationFrame(fn); },
+                cancelRaf: function (id) { if (typeof cancelAnimationFrame == 'function') { cancelAnimationFrame(id); } },
+                setTimeout: function (fn, ms) { return setTimeout(fn, ms); }, clearTimeout: function (h) { clearTimeout(h); },
+                hidden: function () { return !kvmAckVisible(); },
+                now: function () { return presentNow(); },
+                loaf: function (cb) { return presentLoaf(cb); },
+                log: function (msg) { if (obj.debugmode > 0) { console.log(msg); } }
+            }, (presentLoose() >= 0) ? { loose: presentLoose() } : {});
+        }
+        if (presenter != null) { presenter.setFixed(presentSwitch() === 'fixed'); }     // the mode may be changed while the viewer runs (the A/B of the measurement)
+        return presenter;
+    }
+    // Pictures waiting for their frame must be on the canvas before anything else touches it (resize, rotation, a snapshot), and must not outlive the screen they belong to
+    function presentFlush() { if (presenter != null) { presenter.flush(); } }
+    function presentDiscard() { if (presenter != null) { presenter.discard(); } }
+    function presentClose() { if (presenter != null) { presenter.discard(); presenter.close(); } }
+    // A tile or a CopyRect consumed while video pictures wait: it is drawn after them, at their frame (the bitmap of a tile is closed after the draw, and by op.img = null the queue does not close it earlier)
+    function presentBehind(op) {
+        var img = op.img, t = op.t, c = obj.Canvas, x = (t == 2) ? obj.rotX(op.x, op.y) : 0, y = (t == 2) ? obj.rotY(op.x, op.y) : 0, cost = (t == 2) ? (op.px || 0) : ((op.w * op.h) || 0);
+        op.img = null;
+        presenter.submit(function () { try { if (t == 2) { c.drawImage(img, x, y); } else if (t == 1) { drawCopyRect(op); } } finally { releaseImage(img); } },
+            function () { releaseImage(img); }, false, cost);
+    }
+    // What the page and the tests can read: counters of the presenter, null when it was never needed
+    // meter: what the display gets : arrival → frame, paint(), long animation frames of the page (null where the browser has no such API)
+    obj.PresentState = function () { return (presenter == null) ? null : { pending: presenter.pending(), mode: (presentSwitch() === '0') ? 'off' : (presentSwitch() || 'queue'), stats: JSON.parse(JSON.stringify(presenter.stats)), meter: presenter.meter() }; }
+
+    // ---- Auto in the browser (public/scripts/agent-desktop-auto.js) ----
+    // The frame rate "Auto": the interval of command 5 is chosen by the module of Auto from what this viewer receives, when the agent does not choose it itself (an agent without Auto, JPEG, a second
+    // viewer). One owner at a time: the viewer, or the agent (Auto of the agent: 242 with caps bit 2 and video on, after our op 1 with bit 3; it overrides command 5, the interval then only is the spare),
+    // or nobody (a second viewer of a relay 1:1: frozen). This object is the only owner of FrameRateTimer while Auto is chosen; the pages call SetFrameRate / SendCompressionLevel and never put 'auto' there.
+    obj.AutoMode = false;               // the user chose Auto
+    obj.AutoBlocked = null;             // a reason (the page knows it, e.g. 'viewonly' in a relay 1:1) why Auto cannot work here: then it is shown as unavailable and the step is Medium
+    obj.AutoDeviceKey = 'x';            // the key of the device for the memory of the step (the page gives the node id)
+    obj.AutoAck = 'auto';               // 'auto': the ACK of JPEG (op 4) is asked for while Auto is chosen and stays to the end of the connection; 'off': never; 'on': always (?kvmautoack=0|1, localStorage kvmAutoAck, read once)
+    obj.onAutoChange = null;            // function (viewer, info) when the owner or the step changes
+    // The clock of Auto is monotonic (N3): a step of the wall clock (NTP, a resumed VM) must not look like a delay of 150 ms. The probe `rtt` carries the wall time (the transport reads it back); the time of sending is kept here
+    function autoMono() { return ((typeof performance == 'object') && (performance != null) && performance.now) ? performance.now() : Date.now(); }
+    var autoProbeSent = {}, autoProbeKeys = [];
+    // the answer of the transport (wall clock) in the time of the monotonic clock; null for an answer of a probe that is not ours (the transport sends its own every 10 s)
+    function autoProbeMs(ms) {
+        var k = Date.now() - ms;
+        for (var d = 0; d <= 3; d++) { for (var sg = -1; sg <= 1; sg += 2) { var key = k + (d * sg); if (autoProbeSent[key] !== undefined) { var r = autoMono() - autoProbeSent[key]; delete autoProbeSent[key]; return r; } } }
+        return null;
+    }
+    var autoCtl = null, autoRun = false, autoR9At = -1e12, autoLastOwner = 'off', autoPendingSince = 0, autoUsers = null, autoLastMd = null, autoAckRead = null;
+    function autoModule() { return ((typeof AgentDesktopAuto == 'object') && (AgentDesktopAuto != null)) ? AgentDesktopAuto : null; }
+    function autoOff() {                // ?kvmauto=0 or localStorage kvmAuto = '0': the choice is Medium
+        try { if ((typeof urlargs == 'object') && (urlargs != null) && (String(urlargs.kvmauto) === '0')) { return true; } } catch (ex) { }
+        try { if ((typeof localStorage == 'object') && (localStorage != null) && (localStorage.getItem('kvmAuto') === '0')) { return true; } } catch (ex) { }
+        return false;
+    }
+    function autoAvailable() { return (autoModule() != null) && (obj.parent != null) && (obj.AutoBlocked == null) && !autoOff(); }
+    function autoWantsBit() { return (obj.AutoMode === true) && autoAvailable(); }
+    function autoAckMode() {
+        if (autoAckRead == null) {
+            autoAckRead = obj.AutoAck;
+            try { if ((typeof urlargs == 'object') && (urlargs != null) && (urlargs.kvmautoack != null)) { var u = String(urlargs.kvmautoack); if (u === '0') { autoAckRead = 'off'; } else if (u === '1') { autoAckRead = 'on'; } } else if ((typeof localStorage == 'object') && (localStorage != null)) { var l = localStorage.getItem('kvmAutoAck'); if (l === '0') { autoAckRead = 'off'; } else if (l === '1') { autoAckRead = 'on'; } } } catch (ex) { }
+        }
+        return autoAckRead;
+    }
+    function autoAckWanted() { var m = autoAckMode(); return (m === 'on') || ((m !== 'off') && autoWantsBit()); }
+    function autoUsersOf(md) { var n = 0; if ((md != null) && (md.users != null) && (typeof md.users == 'object')) { for (var k in md.users) { n += (parseInt(md.users[k]) || 1); } } return n; }
+    // A multiplexing server says so in its metadata (kvmAck, startTime); the agent of a relay 1:1 never does
+    function autoIsMux(md) { return (md != null) && ((md.kvmAck != null) || (md.startTime != null)); }
+    // Who chooses the interval now (design 4)
+    function autoOwner() {
+        var o;
+        if (!obj.AutoMode) { o = 'off'; }
+        else if (!autoAvailable()) { o = 'unavailable'; }
+        else {
+            autoMetaCheck();
+            var md = obj.parent.metadata, users = autoUsersOf(md), vs = obj.VideoStatus();
+            if (!autoIsMux(md) && (users > 1)) { o = 'frozen'; }
+            else if ((vs.state === 'on') && (sv.state != null) && ((sv.state.caps & 4) !== 0) && sv.op1Auto) { o = 'agent'; }
+            else if ((vs.state === 'pending') && (sv.state != null) && ((autoLastOwner === 'agent') || (autoLastOwner === 'viewer'))) {     // "not yet" (reason 0, 10, 11): the owner does not change, for 5 s
+                if (autoPendingSince === 0) { autoPendingSince = svNow(); }
+                o = ((svNow() - autoPendingSince) < autoModule().PENDING_MS) ? autoLastOwner : 'viewer';
+            } else { o = 'viewer'; }
+            if (vs.state !== 'pending') { autoPendingSince = 0; }
+        }
+        autoLastOwner = o;
+        return o;
+    }
+    function autoPath() { if (obj.VideoStatus().state === 'on') { return 'h264'; } return ((sv.state != null) && (sv.state.ack === 1)) ? 'jpeg-ack' : 'jpeg'; }
+    function autoMemKey(path) { return 'kvmAutoStep:' + obj.AutoDeviceKey + ':' + path; }
+    function autoHost() {
+        return {
+            now: autoMono,
+            setTimeout: function (fn, ms) { return setTimeout(fn, ms); }, clearTimeout: function (h) { clearTimeout(h); },
+            raf: function (fn) { return (typeof requestAnimationFrame == 'function') ? requestAnimationFrame(fn) : null; },
+            cancelRaf: function (id) { if (typeof cancelAnimationFrame == 'function') { cancelAnimationFrame(id); } },
+            hidden: function () { return !kvmAckVisible(); },
+            send: function (ms) { obj.FrameRateTimer = ms; if (obj.State == 3) { sendCompression(); } },
+            owner: autoOwner, path: autoPath, wall: function () { return Date.now(); },
+            probe: function () { var p = obj.parent; if ((p != null) && (typeof p.sendCtrlMsg == 'function')) { var w = Date.now(); autoProbeSent[w] = autoMono(); autoProbeKeys.push(w); if (autoProbeKeys.length > 30) { delete autoProbeSent[autoProbeKeys.shift()]; } p.sendCtrlMsg(JSON.stringify({ ctrlChannel: 102938, type: 'rtt', time: w })); } },
+            proven: function () { return (obj.parent != null) && (obj.parent.latency != null) && (obj.parent.latency.current >= 0); },
+            isMux: function () { return (obj.parent != null) && (autoIsMux(obj.parent.metadata) || (obj.parent.webRtcActive === true)); },       // no probe path: a multiplexor drops `rtt`, and with WebRTC the data go by the data channel, an answer through the socket does not wait behind them (N1)
+            ready: function () { return (sv.state != null) && ((sv.state.ack === 1) || (sv.state.video === 1)); },
+            slowStart: function () { return (svNow() - autoR9At) < 120000; },
+            sample: function () { var vs = (h264 != null) ? h264.stats : null; return { pending: obj.PendingOperations.length, ovQueue: vs ? vs.ovQueue : 0, queueHigh: vs ? vs.queueHigh : 0, queueOverflows: obj.QueueOverflows }; },
+            memGet: function (path) { try { var v = JSON.parse(localStorage.getItem(autoMemKey(path))); return ((v != null) && (typeof v.step == 'number') && (typeof v.t == 'number')) ? v : null; } catch (ex) { return null; } },
+            memSet: function (path, step, t) { try { localStorage.setItem(autoMemKey(path), JSON.stringify({ step: step, t: t })); } catch (ex) { } },
+            changed: function (info) { autoNotify(info); },
+            log: function (m) { if (obj.debugmode > 0) { console.log(m); } }
+        };
+    }
+    function autoNotify(info) { if (obj.onAutoChange != null) { try { obj.onAutoChange(obj, info); } catch (ex) { console.log(ex); } } }
+    function autoSetMode(on) {
+        on = (on === true);
+        if (obj.AutoMode === on) { return; }
+        obj.AutoMode = on;
+        if (on) { obj.FrameRateTimer = 33; }                 // Auto starts with Medium (the step of the memory comes after the 242)
+        autoSync();
+        autoNotify({ owner: autoOwner(), stepMs: obj.FrameRateTimer });
+    }
+    // Starts or stops the module and asks the agent again (op 1 bit 3, op 4) when what the request says has changed
+    function autoSync() {
+        if ((obj.State == 3) && (obj.parent != null)) {
+            if (autoWantsBit()) {
+                if (autoCtl == null) { autoCtl = autoModule().create(autoHost()); }
+                if (!autoCtl.running()) { autoCtl.start(); autoRun = true; }
+                autoLatency(true);
+            } else { autoStopCtl(); }
+        } else { autoStopCtl(); }
+        if (svBound() && (sv.screenW !== 0) && (obj.parent.protocol == 2)) {
+            if (((sv.want === 1) && (sv.op1Auto !== autoWantsBit())) || ((sv.want === 0) && streamAckWanted())) { streamRequest(); }
+        }
+    }
+    function autoStopCtl() { autoRun = false; if ((autoCtl != null) && autoCtl.running()) { autoCtl.stop(); } autoLatency(false); }
+    // The answers of the probe `rtt` (a relay 1:1 sends them back through the agent): the transport calls latency.callback, which the page uses for its own readout; the module is put in front of it and gives it back
+    var autoLatencyWrap = null, autoLatencyPrev = null;
+    function autoLatency(on) {
+        var l = (obj.parent != null) ? obj.parent.latency : null;
+        if (l == null) { return; }
+        if (on && (autoLatencyWrap == null)) {
+            autoLatencyPrev = l.callback;
+            autoLatencyWrap = function (ms) { if ((autoCtl != null) && autoCtl.running()) { var pm = autoProbeMs(ms); if (pm !== null) { autoCtl.probeSample(pm); } } if (autoLatencyPrev != null) { return autoLatencyPrev.apply(this, arguments); } };
+            l.callback = autoLatencyWrap;
+        } else if (!on && (autoLatencyWrap != null)) { if (l.callback === autoLatencyWrap) { l.callback = autoLatencyPrev; } autoLatencyWrap = null; autoLatencyPrev = null; }
+    }
+    function autoStop() {
+        autoStopCtl();
+        autoUsers = null; autoLastMd = null; autoLastOwner = 'off'; autoPendingSince = 0;
+    }
+    // The number of viewers changed (metadata of the multiplexor, or of the agent in a relay 1:1): the interval that the agent follows may no longer be the one of this viewer. In a multiplexor every
+    // change sends the step again; in a relay 1:1 the module does it when it is let go (2 to 1); a viewer in a fixed mode sends its interval again when a viewer left (the multiplexor keeps the
+    // shortest one: the one of the viewer that left would stay).
+    function autoMetaCheck() {
+        if ((obj.parent == null) || (obj.State != 3)) { return; }
+        var md = obj.parent.metadata;
+        if (md === autoLastMd) { return; }
+        autoLastMd = md;
+        var n = autoUsersOf(md), was = autoUsers;
+        autoUsers = n;
+        if ((was == null) || (n === was)) { return; }
+        if (obj.AutoMode && (autoCtl != null) && autoCtl.running()) { if (autoIsMux(md)) { autoCtl.resend(); } }
+        else if ((n < was) && !obj.AutoMode) { sendCompression(); }
+    }
+    function autoNote(cmd, size, view) {
+        if (cmd === 243) {
+            var ts = (view[8] * 0x1000000) + (view[9] << 16) + (view[10] << 8) + view[11], flags = view[12];
+            if ((flags & 2) !== 0) { autoCtl.note('marker', size, ts); }
+            else { if ((flags & 1) !== 0) { autoCtl.freeze(size, 'idr'); } autoCtl.note('frame', size, ts); }
+        } else if ((cmd === 3) || (cmd === 4)) { autoCtl.note('data', size, null); }
+    }
+    function autoFreeze(bytes, why) { if (autoRun && (autoCtl != null)) { autoCtl.freeze(bytes, why); } }
+    // What the page and the tests can read
+    obj.AutoState = function () {
+        var i = (autoCtl != null) ? autoCtl.info() : null;
+        return { on: obj.AutoMode, owner: obj.AutoMode ? autoLastOwner : 'off', blocked: obj.AutoBlocked, available: autoAvailable(), stepMs: obj.FrameRateTimer, reason: i ? i.reason : null, path: i ? i.path : null,
+            mode: i ? i.mode : null, measures: i ? i.measures : null, probe: i ? i.probe : null, changes: i ? i.changes : 0, downs: i ? i.downs : 0, ups: i ? i.ups : 0, periodMs: i ? i.periodMs : 0, fps: i ? i.fps : 0, history: i ? i.history : [], ack: autoAckMode(), users: autoUsers };
+    }
+    // The readout of the page: who chooses, and the step (null when Auto is not chosen)
+    obj.AutoBrief = function () {
+        if (!obj.AutoMode) { return null; }
+        var st = obj.AutoState();
+        return { owner: st.owner, stepMs: st.stepMs, fpsTarget: Math.round(1000 / st.stepMs), available: st.available, mode: st.mode };
+    }
+
+    // The video operation (t3) is consumed in queue order: painted inside the rectangles of its frame when it holds a picture, then released
+    function consumeVideo(op) {
+        obj.QueuedBytes -= op.bytes;
+        obj.TilesDrawn++;
+        if (obj.onPreDrawImage != null) { try { obj.onPreDrawImage(); } catch (ex) { console.log(ex); } }
+        try {
+            if (h264.consume(op, ((op.st == 1) && (obj.Canvas != null) && (obj.State != 0)) ? obj.Canvas : null)) { obj.DrawSeq++; }
+        } catch (ex) { console.log('KVM draw error', ex); }
+        if (op.pos) { streamDone(op.pos); }
+        kvmAckDone(op.ackTag);
+        return true;
+    }
+
+    // Stops the decoder of this viewer for good (the recording player calls it before it replaces the object on restart)
+    obj.VideoClose = function () { presentClose(); if (h264 != null) { h264.close(); } }
+    // State of the video path for the page and for tests
+    obj.VideoState = function () { return (h264 == null) ? null : { info: h264.info(), stats: h264.stats }; }
+    // The recording player feeds blocks into ProcessBinaryCommand as fast as the timeline allows; it waits while this is true (protocol 7.5, back pressure)
+    obj.VideoBusy = function () { return (h264 != null) && h264.busy(); }
+    // The player also waits while decoders were created too often (a recording of a hostile agent): milliseconds until the next creation is allowed, 0 live and when none is due
+    obj.VideoRestartWait = function () { return (h264 == null) ? 0 : h264.restartWait(); }
+    // What the page tells the user about the video of this session. state: 'off' (the option is not selected), 'pending' (asked, no answer yet), 'on', 'fallback' (JPEG instead of
+    // the video the user asked for). why, for a fallback: 'browser' (this browser cannot decode it), 'agent' (the agent does not know video), 'errors' / 'unsupported' (the decoder
+    // gave up), 'veto' (another viewer has the device), 'r1' ... 'r9' (reason of the last 242 of the agent, protocol 3.3).
+    obj.onVideoStatusChange = null;     // function (viewer, status), called when state or why change
+    obj.VideoStatus = function () {
+        if ((obj.parent == null) || (obj.H264Enabled !== true)) { return { state: 'off', why: null }; }
+        if (h264Module() == null) { return { state: 'fallback', why: 'browser' }; }
+        if ((h264 != null) && h264.disabled) { return { state: 'fallback', why: h264.why || 'errors' }; }
+        var s = sv.state, cap = h264Caps[sv.screenW + 'x' + sv.screenH];
+        if ((s != null) && (s.video === 1) && (s.ack === 1)) { return { state: 'on', why: null }; }
+        if ((cap !== undefined) && !cap.ok) { return { state: 'fallback', why: 'browser' }; }
+        if (s == null) { return sv.timedOut ? { state: 'fallback', why: 'agent' } : { state: 'pending', why: null }; }
+        // The agent answered (0, 1, 0) to the request for the ACK alone that follows a refusal of the video (reason 6, a server switch): the reason stays
+        if ((sv.want === 4) && (s.video === 0) && (s.reason === 0)) { return { state: 'fallback', why: 'r6' }; }
+        if ((s.reason === 0) || (s.reason === 10) || (s.reason === 11)) { return { state: 'pending', why: null }; }
+        return { state: 'fallback', why: (s.reason === 5) ? 'veto' : ('r' + s.reason) };
+    }
+    var vsLast = 'off/';
+    function videoStatusNotify() {
+        var v = obj.VideoStatus(), k = v.state + '/' + (v.why || '');
+        if (k === vsLast) { return; }
+        vsLast = k;
+        if (obj.onVideoStatusChange != null) { try { obj.onVideoStatusChange(obj, v); } catch (ex) { console.log(ex); } }
+    }
+    // The picture format in use, for the readout: H.264 only while the agent really sends video to this viewer
+    obj.ActiveCodec = function () { return (obj.VideoStatus().state === 'on') ? 'H.264' : (({ 1: 'JPEG', 2: 'PNG', 3: 'TIFF', 4: 'WebP' })[obj.ImageType] || 'JPEG'); }
+    // The option "H.264 (video)": on asks for video (op 1) when the first screen size is known, off asks the agent to stop it (op 2) and keeps the ACK
+    obj.SetH264 = function (on) {
+        on = (on === true);
+        if (obj.H264Enabled === on) { return; }
+        obj.H264Enabled = on;
+        videoStatusNotify();
+        if (!svBound() || (sv.screenW === 0) || (obj.parent.protocol != 2)) { return; }
+        if (on) { sv.requested = true; streamRequest(); }
+        else if ((sv.state != null) && (sv.state.video === 1)) { sv.stats.op2++; sv.want = 4; svSend240(2, 0); }
     }
 
     // ---- Viewer ACK ----
@@ -423,9 +766,11 @@ var CreateAgentRemoteDesktop = function (canvasid, scrolldiv) {
         if (kvmAckBound()) { ka.transport.sendCtrlMsg('{"ctrlChannel":"102938","type":"kvmack","op":"off","v":1,"reason":"desync"}'); }
     }
 
-    // Tag of the next counted frame, or null
-    function kvmAckTag(cmd, fromWire) {
-        if ((fromWire !== true) || !ka.active || ((cmd != 3) && (cmd != 7))) return null;
+    // Tag of the next counted frame, or null. The multiplexor counts every entry of its image list: tiles (3), screen sizes (7), video frames and markers (243)
+    // and the video state (242) that it queues for one viewer. A 242 that the multiplexor makes up itself (caps bit 7) is not in the list and is not counted.
+    function kvmAckTag(cmd, fromWire, view) {
+        if ((fromWire !== true) || !ka.active || ((cmd != 3) && (cmd != 7) && (cmd != 243) && (cmd != 242))) return null;
+        if ((cmd == 242) && (view != null) && (view.length > 14) && ((view[14] & 0x80) != 0)) return null;
         if (cmd == 7) { ka.epoch = kvmAckNext(ka.epoch); ka.seq = 0; } // a screen frame opens a new epoch
         ka.seq = kvmAckNext(ka.seq);
         return { a: ka.activation, e: ka.epoch, s: ka.seq };
@@ -437,7 +782,7 @@ var CreateAgentRemoteDesktop = function (canvasid, scrolldiv) {
         var q = obj.PendingOperations, tail = (q.length > 0) ? q[q.length - 1] : null;
         if ((tail != null) && (tail.t === 0) && !tail.dropped) { tail.ackTag = tag; return; }
         if (q.length >= obj.MaxQueuedOps) { queueOverflow(); }
-        q.push({ t: 0, st: 1, bytes: 0, px: 0, img: null, ackTag: tag, dropped: false });
+        q.push({ t: 0, st: 1, bytes: 0, px: 0, img: null, ackTag: tag, pos: null, dropped: false });
         drainOperations();
     }
 
@@ -459,6 +804,275 @@ var CreateAgentRemoteDesktop = function (canvasid, scrolldiv) {
         ka.sentE = e; ka.sentS = s; ka.lastSend = Date.now();
         obj.KvmAckStats.acks++;
         ka.transport.send(b);
+    }
+
+    // ---- End-to-end stream ACK and video state (commands 240-243) ----
+    // The agent announces what it can do with command 242 (VIDEO_STATE). After the first screen size this viewer asks for the end-to-end ACK (240 op 4,
+    // JPEG picture as before). Every position of the agent's stream (a video frame or a marker, command 243) is queued behind the tiles that came before it;
+    // when the queue has consumed it, a 241 (STREAM_ACK) goes back, at most every 20 ms, always for the newest consumed position. This module has no H.264
+    // decoder unless this viewer asked for video (H264Enabled) and the module agent-desktop-h264.js is loaded: then a 243 frame is a video operation (t3) of
+    // the draw queue, decoded on arrival and painted in order, otherwise it is consumed and never drawn, and it is acknowledged like a marker. The recording
+    // player has no channel to the agent (obj.parent == null), sends nothing and decodes what the recording holds.
+    var SV_MAX_FRAME = 8 * 1024 * 1024;
+    var sv = { activation: 0, want: 0, requested: false, state: null, waitTimer: null, timedOut: false, reqTimer: null, lastReq: 0, retryTimer: null, retryAt: 0, retries: 0, visListener: null,
+        lastSeq: null, done: null, sentSeq: 0, sentTs: 0, lastSend: 0, paceTimer: null, lastStrayOp2: 0, screenW: 0, screenH: 0, op1W: 0, op1H: 0,
+        stats: { requests: 0, states: 0, rejected: 0, lastReject: null, rejects: {}, positions: 0, markers: 0, frames: 0, stray: 0, gaps: 0, acks: 0, op2: 0, op3: 0 } };
+    // The end-to-end ACK is off by default until it has been measured : the viewer asks for it (240 op 4) only when StreamAckEnabled is true or, while it is null,
+    // when the page was opened with ?streamack=1 (development and measurement). false: never (the thumbnails of the multi-desktop view set this). The video option
+    // (H264Enabled) asks with op 1, which brings the ACK with it, unless StreamAckEnabled is false.
+    obj.StreamAckEnabled = null;
+    obj.StreamStats = sv.stats;
+    // What the agent announced last (announced is false before the first valid 242) and the viewer's side of the negotiation.
+    obj.StreamState = function () {
+        var s = sv.state;
+        return { announced: (s != null), video: (s != null) && (s.video === 1), ack: (s != null) && (s.ack === 1), reason: (s != null) ? s.reason : null, gen: (s != null) ? s.gen : null, caps: (s != null) ? s.caps : 0,
+            profile: (s != null) ? s.profile : 0, level: (s != null) ? s.level : 0, codedW: (s != null) ? s.codedW : 0, codedH: (s != null) ? s.codedH : 0,
+            requested: sv.want, timedOut: sv.timedOut, retries: sv.retries, lastSeq: sv.lastSeq };
+    }
+
+    function svNow() { return Date.now(); }
+    function svU16(b, o) { return (b[o] << 8) | b[o + 1]; }
+    function svU32(b, o) { return (b[o] * 0x1000000) + (b[o + 1] << 16) + (b[o + 2] << 8) + b[o + 3]; }
+    function svNext(x) { return (x >= 0xFFFFFFFF) ? 1 : (x + 1); }
+    function svReject(code) { sv.stats.rejected++; sv.stats.lastReject = code; sv.stats.rejects[code] = (sv.stats.rejects[code] || 0) + 1; }
+
+    // 242 (protocol 4.1). Returns null or the rejection code. view is the command as the transport hands it over, size is its size field.
+    function svCheck242(view, size) {
+        if (view.length < 4) { return 'TRUNCATED'; }
+        if (size !== 16) { return 'BAD_SIZE'; }
+        if (view.length < 16) { return 'TRUNCATED'; }
+        if (view.length > 16) { return 'BAD_SIZE'; }
+        if (view[4] !== 1) { return 'BAD_VERSION'; }
+        if ((view[5] > 1) || (view[6] > 1) || ((view[5] === 1) && (view[6] === 0))) { return 'BAD_FIELD'; }
+        return null;
+    }
+
+    // 243 (protocol 4.2, steps 2 to 10; the transport has already unwrapped MNG_JUMBO, so view is the inner command and size is its length N).
+    function svCheck243(view, size) {
+        if (size > SV_MAX_FRAME) { return 'FRAME_TOO_BIG'; }
+        if (size < 20) { return 'BAD_SIZE'; }
+        if (view.length < size) { return 'TRUNCATED'; }
+        if (svU16(view, 0) !== 243) { return 'NOT_243'; }
+        if (svU32(view, 4) === 0) { return 'BAD_SEQ'; }
+        var flags = view[12], codedW = svU16(view, 14), codedH = svU16(view, 16), nRects = svU16(view, 18);
+        if ((flags & 3) === 3) { return 'BAD_MARKER'; }
+        if ((flags & 2) !== 0) { return ((size !== 20) || (nRects !== 0) || (codedW !== 0) || (codedH !== 0)) ? 'BAD_MARKER' : null; }
+        if ((nRects < 1) || (nRects > 256)) { return 'BAD_RECT_COUNT'; }
+        if ((20 + (8 * nRects)) > size) { return 'TRUNCATED'; }
+        var sw = sv.screenW, sh = sv.screenH;
+        if ((sw === 0) || (sh === 0)) { return 'NO_SCREEN'; }
+        var pw = Math.ceil(sw / 32) * 32, ph = Math.ceil(sh / 32) * 32;
+        if ((codedW !== pw) || (codedH !== ph) || (codedW < 32) || (codedH < 32) || (codedW > 8192) || (codedH > 8192)) { return 'CODED_SIZE'; }
+        for (var i = 0; i < nRects; i++) {
+            var o = 20 + (i * 8), x = svU16(view, o), y = svU16(view, o + 2), w = svU16(view, o + 4), h = svU16(view, o + 6);
+            if ((w < 1) || (h < 1) || ((x + w) > sw) || ((y + h) > sh)) { return 'BAD_RECT'; }
+        }
+        if ((size - 20 - (8 * nRects)) < 5) { return 'NO_PAYLOAD'; }
+        return null;
+    }
+    obj.StreamCheck242 = svCheck242;
+    obj.StreamCheck243 = function (view, size, screenW, screenH) { var w = sv.screenW, h = sv.screenH; sv.screenW = screenW; sv.screenH = screenH; try { return svCheck243(view, size); } finally { sv.screenW = w; sv.screenH = h; } }
+
+    function svClearTimers() {
+        if (sv.paceTimer != null) { clearTimeout(sv.paceTimer); sv.paceTimer = null; }
+        if (sv.waitTimer != null) { clearTimeout(sv.waitTimer); sv.waitTimer = null; }
+        if (sv.reqTimer != null) { clearTimeout(sv.reqTimer); sv.reqTimer = null; }
+        if (sv.retryTimer != null) { clearTimeout(sv.retryTimer); sv.retryTimer = null; }
+        if ((sv.visListener != null) && (typeof document == 'object') && document.removeEventListener) { document.removeEventListener('visibilitychange', sv.visListener); }
+        sv.visListener = null;
+    }
+
+    // Everything here belongs to one connection; the module calls this on every start and stop
+    function streamReset() {
+        svClearTimers();
+        sv.activation++; // positions still queued become stale
+        sv.want = 0; sv.requested = false; sv.op1Auto = false; sv.state = null; sv.timedOut = false; sv.lastReq = 0; sv.retryAt = 0; sv.retries = 0;
+        sv.lastSeq = null; sv.done = null; sv.sentSeq = 0; sv.sentTs = 0; sv.lastSend = 0; sv.lastStrayOp2 = 0; sv.screenW = 0; sv.screenH = 0; sv.op1W = 0; sv.op1H = 0;
+        if (h264 != null) { h264.reset(); }
+        videoStatusNotify();
+    }
+
+    // The channel to the agent: a live transport that is connected (the player, which has none, never sends)
+    function svBound() { return (obj.parent != null) && (obj.State == 3) && (typeof obj.parent.send == 'function'); }
+
+    function svSend240(op, flags) {
+        var b = new Uint8Array(16);
+        b[1] = 240; b[3] = 16; b[4] = 1; b[5] = op; b[6] = flags || 0; // limits and the reserved word stay 0 for ops 2, 3 and 4
+        obj.parent.send(b);
+    }
+
+    // 240 op 4: only the ACK, the picture stays JPEG. Asked once after the first screen size, again after 242 with reason 10 or 11 and after reason 9.
+    function streamAckWanted() {
+        if (obj.StreamAckEnabled === false) return false;
+        if (obj.StreamAckEnabled === true) return true;
+        if (obj.H264Enabled === true) return true;
+        if (autoAckWanted()) return true;       // Auto in the browser: the markers carry the time of the agent, and its window of ACK keeps the queue short; it stays to the end of the connection
+        return (typeof urlargs == 'object') && (urlargs != null) && (urlargs.streamack == '1');
+    }
+
+    // What the browser can decode for the screen: undefined while the check runs (it asks again when it is done), then { ok, flags, maxLevelIdc, maxW, maxH }
+    var h264Caps = {}, h264CapsPending = {};
+    function h264CapsFor(w, h) {
+        var key = w + 'x' + h;
+        if (h264Caps[key] !== undefined) { return h264Caps[key]; }
+        if (!h264CapsPending[key]) {
+            h264CapsPending[key] = true;
+            var act = sv.activation, done = function (r) { h264Caps[key] = r; delete h264CapsPending[key]; if (act === sv.activation) { streamRequest(); videoStatusNotify(); } };
+            h264Module().detect(w, h, obj.H264Options).then(done, function () { done({ ok: false, flags: 0, maxLevelIdc: 0, maxW: 0, maxH: 0 }); });
+        }
+        return undefined;
+    }
+
+    // 240 op 1 (video and ACK) when H.264 is selected and the browser can decode it, else op 4 (ACK only) when that is wanted; ackOnly forces op 4
+    function streamRequest(ackOnly) {
+        if ((obj.StreamAckEnabled === false) || !svBound() || (obj.parent.protocol != 2)) return;
+        var cap = null;
+        if ((ackOnly !== true) && (obj.H264Enabled === true) && (h264Module() != null) && ((h264 == null) || !h264.disabled)) {
+            cap = h264CapsFor(sv.screenW, sv.screenH);
+            if (cap === undefined) return;
+        }
+        var video = (cap != null) && cap.ok;
+        if (!video && !streamAckWanted()) return;
+        sv.want = video ? 1 : 4; sv.lastReq = svNow();
+        sv.stats.requests++;
+        if (video) {
+            var b = new Uint8Array(16);
+            sv.op1Auto = autoWantsBit();      // bit 3: the viewer chose Auto (Auto of the agent); in every op 1, also after reason 10 / 11 and 9, or the agent falls back to a fixed rate
+            b[1] = 240; b[3] = 16; b[4] = 1; b[5] = 1; b[6] = cap.flags | (sv.op1Auto ? 8 : 0); b[7] = cap.maxLevelIdc;
+            b[8] = cap.maxW >> 8; b[9] = cap.maxW & 255; b[10] = cap.maxH >> 8; b[11] = cap.maxH & 255;
+            sv.op1W = cap.maxW; sv.op1H = cap.maxH;
+            obj.parent.send(b);
+        } else { svSend240(4, 0); }
+        if ((sv.state == null) && (sv.waitTimer == null)) {
+            // An agent that does not know the protocol never answers: after 3 s the viewer stays with JPEG. A later 242 is still taken (it starts the state machine).
+            sv.waitTimer = setTimeout(function () { sv.waitTimer = null; if (sv.state == null) { sv.timedOut = true; videoStatusNotify(); } }, 3000);
+        }
+    }
+
+    // 242 reason 10 or 11 must be answered with the request again; at most every 250 ms, so that a broken agent cannot make this a flood
+    function streamRequestSoon() {
+        var wait = (sv.lastReq + 250) - svNow();
+        if (wait <= 0) { streamRequest(); return; }
+        if (sv.reqTimer == null) { sv.reqTimer = setTimeout(function () { sv.reqTimer = null; streamRequest(); }, wait); }
+    }
+
+    // After reason 9 (no ACK for 15 s): ask again after 30 s when the page is visible, at most 3 times; when it is hidden, after it is shown
+    function streamRetry() {
+        sv.retryTimer = null;
+        if (!svBound() || (sv.want === 0) || (sv.retries >= 3) || ((sv.state != null) && (sv.state.ack === 1))) return;
+        if (kvmAckVisible()) { sv.retries++; streamRequest(); return; }
+        if ((sv.visListener == null) && (typeof document == 'object') && document.addEventListener) {
+            sv.visListener = function () {
+                if (!kvmAckVisible() || (svNow() < sv.retryAt)) return;
+                document.removeEventListener('visibilitychange', sv.visListener);
+                sv.visListener = null;
+                streamRetry();
+            };
+            document.addEventListener('visibilitychange', sv.visListener);
+        }
+    }
+
+    // 242 from the agent (or, in a recording, from the file)
+    function streamState(view, size) {
+        var err = svCheck242(view, size);
+        if (err != null) { svReject(err); return; }
+        var st = { video: view[5], ack: view[6], reason: view[7], profile: view[8], level: view[9], codedW: svU16(view, 10), codedH: svU16(view, 12), caps: view[14] & 0x7F, gen: view[15] };
+        sv.state = st; sv.stats.states++; sv.timedOut = false;
+        if (st.reason === 9) { autoR9At = svNow(); }
+        if (autoRun && (autoCtl != null)) { autoCtl.ownerNow(); }     // the owner of the interval is looked at with every 242 (caps bit 2 may be gone with the video on): the viewer takes over at once
+        sv.lastSeq = null; // a new child process counts from 1 again
+        if (sv.waitTimer != null) { clearTimeout(sv.waitTimer); sv.waitTimer = null; }
+        if ((h264Module() != null) && ((obj.parent == null) || (obj.H264Enabled === true) || (h264 != null))) { h264Get().onState(st); } // needIdr and expectedGen belong to the decoder (7.1)
+        if (st.ack === 0) { sv.done = null; if (sv.paceTimer != null) { clearTimeout(sv.paceTimer); sv.paceTimer = null; } }
+        if (obj.parent == null) return; // a recording: the state is only recorded
+        videoStatusNotify();
+        if ((st.reason === 6) && (sv.want === 1) && (st.ack === 0) && streamAckWanted()) { streamRequest(true); } // video refused by a switch, the ACK is still wanted
+        else if (((st.reason === 10) || (st.reason === 11)) && (sv.want !== 0)) { streamRequestSoon(); }
+        else if (st.reason === 9) {
+            if ((sv.retryTimer == null) && (sv.retries < 3)) { sv.retryAt = svNow() + 30000; sv.retryTimer = setTimeout(streamRetry, 30000); }
+        }
+    }
+
+    // A queue position of the stream. It is a marker operation in the draw queue (t0) that is consumed when everything before it has been drawn or dropped.
+    // A marker at the tail takes the newer position and the newer ACK tag (both are cumulative, nothing lies between them).
+    function streamPosition(seq, ts, tag) {
+        var q = obj.PendingOperations, tail = (q.length > 0) ? q[q.length - 1] : null;
+        var pos = { seq: seq, ts: ts, rx: svNow(), a: sv.activation, q: 0 };
+        sv.stats.positions++;
+        if ((tail != null) && (tail.t === 0) && !tail.dropped) { tail.pos = pos; if (tag != null) { tail.ackTag = tag; } return; }
+        if (budgetsApply() && (q.length >= obj.MaxQueuedOps)) { queueOverflow(); }
+        q.push({ t: 0, st: 1, bytes: 0, px: 0, img: null, ackTag: tag, pos: pos, dropped: false });
+        drainOperations();
+    }
+
+    // 243. Returns the ACK tag when this function did not attach it to a queue operation (a refused frame has no position).
+    function streamFrame(view, size, tag) {
+        var err = svCheck243(view, size);
+        if (err != null) { svReject(err); if (h264Want()) { h264Get().streamError(err); } return tag; }
+        var seq = svU32(view, 4), ts = svU32(view, 8), flags = view[12];
+        var gap = (sv.lastSeq !== null) && ((flags & 1) === 0) && (seq !== svNext(sv.lastSeq));
+        if (gap) { sv.stats.gaps++; } // without a decoder it is only counted
+        sv.lastSeq = seq;
+        var want = h264Want();
+        if ((flags & 2) !== 0) { sv.stats.markers++; if (gap && want) { h264Get().gap(); } streamPosition(seq, ts, tag); return null; }
+        sv.stats.frames++;
+        if (!want) {
+            // A frame nobody decodes: its position is consumed. When the last 242 said video = 0 this viewer has not asked for it:
+            // a sender that keeps on sending is asked to stop with 240 op 2, at most every 5 s. A frame while video = 1 but this viewer does not want video
+            // belongs to somebody else's request: it is only consumed (op 2 would switch the video off for that viewer).
+            if ((sv.state == null) || (sv.state.video === 0)) {
+                sv.stats.stray++;
+                if (svBound() && ((svNow() - sv.lastStrayOp2) >= 5000)) { sv.lastStrayOp2 = svNow(); sv.stats.op2++; svSend240(2, 0); }
+            }
+            streamPosition(seq, ts, tag);
+            return null;
+        }
+        // The first frame after a screen size opens the canvas like the first tile does (the queue is empty or holds only markers then)
+        if (obj.FirstDraw) { obj.onResize(); }
+        var video = h264Get(), op = video.accept(h264Module().parseFrame(view, size), gap);
+        op.pos = { seq: seq, ts: ts, rx: svNow(), a: sv.activation, q: 0 };
+        op.ackTag = tag;
+        sv.stats.positions++;
+        var q = obj.PendingOperations;
+        // the compressed bytes of the frame count against MaxQueuedBytes like those of a tile (they are held until the frame is consumed)
+        if (budgetsApply() && ((q.length >= obj.MaxQueuedOps) || ((obj.QueuedBytes + op.bytes) > obj.MaxQueuedBytes))) { queueOverflow(); }
+        q.push(op);
+        obj.QueuedBytes += op.bytes;
+        drainOperations();
+        return null;
+    }
+
+    // A position has left the draw queue (consumed or dropped)
+    function streamDone(pos) {
+        if ((pos == null) || (pos.a !== sv.activation)) return;
+        pos.q = Math.max(0, Math.min(65535, svNow() - pos.rx));
+        sv.done = pos;
+        streamAckMaybeSend();
+    }
+
+    // 241: the newest consumed position, not more often than every 20 ms, only while the agent's last 242 said ack = 1
+    function streamAckMaybeSend() {
+        var d = sv.done;
+        if ((d == null) || (sv.state == null) || (sv.state.ack !== 1) || ((d.seq === sv.sentSeq) && (d.ts === sv.sentTs))) return;
+        var wait = (sv.lastSend + 20) - svNow();
+        if (wait > 0) { if (sv.paceTimer == null) { sv.paceTimer = setTimeout(function () { sv.paceTimer = null; streamAckMaybeSend(); }, wait); } return; }
+        if (!svBound()) return;
+        var b = new Uint8Array(16);
+        b[1] = 241; b[3] = 16;
+        b[4] = (d.seq >>> 24) & 255; b[5] = (d.seq >>> 16) & 255; b[6] = (d.seq >>> 8) & 255; b[7] = d.seq & 255;
+        b[8] = (d.ts >>> 24) & 255; b[9] = (d.ts >>> 16) & 255; b[10] = (d.ts >>> 8) & 255; b[11] = d.ts & 255;
+        b[12] = (d.q >>> 8) & 255; b[13] = d.q & 255;
+        b[15] = kvmAckVisible() ? 0 : 1; // flags bit 0: the page is hidden
+        sv.sentSeq = d.seq; sv.sentTs = d.ts; sv.lastSend = svNow();
+        sv.stats.acks++;
+        obj.parent.send(b);
+    }
+
+    // The first cmd 7 opens the negotiation
+    function streamScreen(width, height) {
+        sv.screenW = width; sv.screenH = height;
+        if (!sv.requested) { sv.requested = true; streamRequest(); }
+        else if ((sv.want === 1) && ((Math.ceil(width / 32) * 32 > sv.op1W) || (Math.ceil(height / 32) * 32 > sv.op1H))) { streamRequest(); } // a larger screen than the limits of the request: ask again (agent: reason 7)
     }
 
     // CopyRect: 6 big-endian 16 bit values, SX SY DX DY WIDTH HEIGHT, in the coordinates of the remote screen. It is queued like a tile.
@@ -510,12 +1124,17 @@ var CreateAgentRemoteDesktop = function (canvasid, scrolldiv) {
     // A budget given once is kept for later calls without one (the resend after a screen size change); a session that never gave one sends 10 bytes
     // as before (the thumbnails of the multi desktop view). Agents that do not know the budget ignore the extra bytes.
     obj.SendCompressionLevel = function (type, level, scaling, frametimer, budget) { // Type: 1 = JPEG, 2 = PNG, 3 = TIFF, 4 = WebP
+        if ((obj.H264Enabled === true) && (type != 1) && (type != 4)) { type = 1; } // video needs the adaptive JPEG/WebP path of the agent for the sharpening (protocol 5.4)
         obj.ImageType = type;
         if (level) { obj.CompressionLevel = level; }
         if (scaling) { obj.ScalingLevel = scaling; }
-        if (frametimer) { obj.FrameRateTimer = frametimer; }
+        if (frametimer) { obj.SetFrameRate(frametimer); }       // a number of ms or 'auto' (Auto in the browser: the module of Auto owns the interval)
         if ((budget != null) && (budget !== '') && !isNaN(parseInt(budget))) { obj.BandwidthBudget = Math.max(0, Math.min(65535, parseInt(budget))); }
-        var withBudget = (obj.BandwidthBudget != null);
+        sendCompression();
+    }
+    // The command 5 with what is kept of the user's choice: type, quality, scale, budget, and the interval (the step of Auto while it is the owner of it). Auto only changes the interval
+    function sendCompression() {
+        var type = obj.ImageType, withBudget = (obj.BandwidthBudget != null);
         function command(frameInterval) {
             return String.fromCharCode(0x00, 0x05, 0x00, withBudget ? 0x0C : 0x0A, type, obj.CompressionLevel) + obj.shortToStr(obj.ScalingLevel) + obj.shortToStr(frameInterval) + (withBudget ? obj.shortToStr(obj.BandwidthBudget) : '');
         }
@@ -523,16 +1142,27 @@ var CreateAgentRemoteDesktop = function (canvasid, scrolldiv) {
         // sent twice: first with 20 ms, which every agent accepts (50 fps, what an agent that does not know shorter intervals ends up with),
         // then with the real interval, which an agent that allows it takes over. Both carry the same budget.
         var fr = parseInt(obj.FrameRateTimer);
+        if (isNaN(fr)) { obj.FrameRateTimer = fr = 33; }
         if (fr < 20) { obj.send(command(20)); }
         obj.send(command(obj.FrameRateTimer));
     }
+    // The frame interval of the user: a number of ms, or 'auto'. The pages call this (and SendCompressionLevel) and never put 'auto' into FrameRateTimer themselves
+    obj.SetFrameRate = function (v) {
+        if (v === 'auto') { autoSetMode(true); return; }
+        var n = parseInt(v);
+        autoSetMode(false);
+        if (n > 0) { obj.FrameRateTimer = n; }
+    }
 
     obj.SendRefresh = function () {
+        autoFreeze(600000, 'refresh');
         obj.send(String.fromCharCode(0x00, 0x06, 0x00, 0x04));
+        h264Repair(2); // cmd 6 does not repaint what the video painted (7.3): the agent sends the tiles of the video again as JPEG
     }
 
     obj.ProcessScreenMsg = function (width, height) {
         if (obj.debugmode > 0) { console.log('ScreenSize: ' + width + ' x ' + height); }
+        sv.screenW = width; sv.screenH = height; // the player seeks with this call alone: the validation of video frames needs the size
         if ((obj.ScreenWidth == width) && (obj.ScreenHeight == height)) return; // Ignore change if screen is same size.
         // A new size with the same proportions as the picture on the canvas (2 pixels of rounding allowed) is what the agent sends when it lowers or restores
         // its picture scale under a bandwidth limit. The canvas then takes the new size at once, with the old picture stretched to it, and the new tiles
@@ -545,7 +1175,10 @@ var CreateAgentRemoteDesktop = function (canvasid, scrolldiv) {
         obj.KeepPictureOnResize = keepPicture;
         obj.ScreenWidth = obj.width = width;
         obj.ScreenHeight = obj.height = height;
+        autoFreeze(800000, 'screen');
         obj.DropPendingOperations(); // Everything queued belongs to the old screen. The counters start again with the new one.
+        if (keepPicture) { presentFlush(); } else { presentDiscard(); }   // the old picture is kept and stretched: the pictures that wait are drawn on it first (nothing is lost); on any other change of size they belong to the old screen and go
+        if (h264 != null) { h264.screenChanged(); } // the decoder goes with the screen; the agent starts a new generation with an IDR picture
         obj.KillDraw = obj.tilesReceived = obj.TilesDrawn = 0;
         if (keepPicture) { obj.onResize(); } // the queue is empty, so resizing the canvas here cannot reorder drawing
         obj.SendCompressionLevel(obj.ImageType);
@@ -556,7 +1189,9 @@ var CreateAgentRemoteDesktop = function (canvasid, scrolldiv) {
     }
 
     obj.ProcessBinaryCommand = function (cmd, cmdsize, view, fromWire) {
-        var X, Y, op = null, ackTag = kvmAckTag(cmd, fromWire); // fromWire: set by the transport for frames received on its websocket
+        var X, Y, op = null, ackTag = kvmAckTag(cmd, fromWire, view); // fromWire: set by the transport for frames received on its websocket
+        autoMetaCheck();        // the number of viewers (no timer: the check is a comparison of one reference, and it runs with every command and every window of Auto)
+        if (autoRun) { autoNote(cmd, cmdsize, view); }
         if ((cmd == 3) || (cmd == 4) || (cmd == 7)) { X = (view[4] << 8) + view[5]; Y = (view[6] << 8) + view[7]; }
         if (obj.debugmode > 2) { console.log('CMD', cmd, cmdsize, X, Y); }
 
@@ -566,7 +1201,10 @@ var CreateAgentRemoteDesktop = function (canvasid, scrolldiv) {
             var chunkSize = 10000;
             let result = '';
             for (let i = 0; i < view.length; i += chunkSize) { result += String.fromCharCode.apply(null, view.slice(i, i + chunkSize)); }
-            if (cmdsize > 65000) {
+            if (cmd == 243) {
+                // A video frame or a marker is always written in a jumbo packet (its own size field is 0): MNG_JUMBO, the length of the inner command, the inner command
+                obj.recordedData.push(recordingEntry(2, 1, obj.shortToStr(27) + obj.shortToStr(8) + obj.intToStr(cmdsize) + result));
+            } else if (cmdsize > 65000) {
                 obj.recordedData.push(recordingEntry(2, 1, obj.shortToStr(27) + obj.shortToStr(8) + obj.intToStr(cmdsize) + obj.shortToStr(cmd) + obj.shortToStr(0) + obj.shortToStr(0) + obj.shortToStr(0) + result));
             } else {
                 obj.recordedData.push(recordingEntry(2, 1, result));
@@ -586,6 +1224,7 @@ var CreateAgentRemoteDesktop = function (canvasid, scrolldiv) {
                 obj.ProcessCopyRectMsg(view.slice(4));
                 break;
             case 7: // Screen size
+                sv.screenW = X; sv.screenH = Y;
                 obj.ProcessScreenMsg(X, Y);
                 obj.SendKeyMsgKC(obj.KeyAction.UP, 16); // Shift
                 obj.SendKeyMsgKC(obj.KeyAction.UP, 17); // Ctrl
@@ -594,6 +1233,7 @@ var CreateAgentRemoteDesktop = function (canvasid, scrolldiv) {
                 obj.SendKeyMsgKC(obj.KeyAction.UP, 92); // Right-Windows
                 obj.SendKeyMsgKC(obj.KeyAction.UP, 16); // Shift
                 obj.send(String.fromCharCode(0x00, 0x0E, 0x00, 0x04));
+                streamScreen(X, Y);
                 break;
             case 11: // GetDisplays (TODO)
                 var selectedDisplay = 0, displays = {}, dcount = (view[4] << 8) + view[5];
@@ -639,6 +1279,12 @@ var CreateAgentRemoteDesktop = function (canvasid, scrolldiv) {
                 } else {
                     console.log('KVM: ' + str.substring(1));
                 }
+                break;
+            case 242: // VIDEO_STATE: what the agent can do and what it does now
+                streamState(view, cmdsize);
+                break;
+            case 243: // VIDEO_FRAME: a video frame or a marker. Its position is acknowledged once everything before it has been consumed.
+                ackTag = streamFrame(view, cmdsize, ackTag);
                 break;
             case 82: // DISPLAY LOCATION & SIZE
                 if ((cmdsize < 4) || (((cmdsize - 4) % 10) != 0)) break;
@@ -989,6 +1635,7 @@ var CreateAgentRemoteDesktop = function (canvasid, scrolldiv) {
     obj.onResize = function () {
         if (obj.ScreenWidth == 0 || obj.ScreenHeight == 0) return;
         if ((obj.Canvas.canvas.width == obj.ScreenWidth) && (obj.Canvas.canvas.height == obj.ScreenHeight)) return;
+        presentFlush(); // the picture that is on the canvas is copied below
         if (obj.FirstDraw) {
             var cv = obj.Canvas.canvas, keep = null;
             if (obj.KeepPictureOnResize && (cv.width > 0) && (cv.height > 0)) { // copy the picture before the resize clears the canvas
@@ -1264,6 +1911,7 @@ var CreateAgentRemoteDesktop = function (canvasid, scrolldiv) {
         while (x < 0) { x += 4; }
         var newrotation = x % 4;
         if (newrotation == obj.rotation) return true;
+        presentFlush(); // the canvas is copied and turned below
         var rw = obj.Canvas.canvas.width;
         var rh = obj.Canvas.canvas.height;
         if (obj.rotation == 1 || obj.rotation == 3) { rw = obj.Canvas.canvas.height; rh = obj.Canvas.canvas.width; }
@@ -1296,6 +1944,7 @@ var CreateAgentRemoteDesktop = function (canvasid, scrolldiv) {
 
     obj.StartRecording = function () {
         if (obj.recordedData != null) return;
+        presentFlush(); // the screen shot is the canvas as it is now
         // Take a screen shot and save it to file
         obj.CanvasId['toBlob'](function (blob) {
             var fileReader = new FileReader();
@@ -1318,6 +1967,7 @@ var CreateAgentRemoteDesktop = function (canvasid, scrolldiv) {
                     // Normal packet
                     obj.recordedData.push(recordingEntry(2, 1, obj.shortToStr(3) + obj.shortToStr(cmdlen) + obj.shortToStr(0) + obj.shortToStr(0) + binary));
                 }
+                h264Repair(3); // the first video frame after the screenshot is an IDR picture (7.5)
             };
         });
     }
