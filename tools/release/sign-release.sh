@@ -6,9 +6,11 @@
 # files and publishing the release is not done here.
 #
 # Usage: tools/release/sign-release.sh --key <key.json> --tgz <meshcentral-<version>.tgz> --version <v> --tag <tag> --commit <sha> --out <dir>
-#                                      [--channel stable|prerelease] [--repository kxd231/MeshCentral] [--append <existing .sig>]
+#                                      [--channel stable|prerelease] [--repository kxd231/MeshCentral] [--append <existing .sig>] [--state-dir <dir>]
 # --append adds a second signature to an existing signature file (two keys while a key is replaced). The manifest next to that file must be exactly the
 # manifest of this package and these values, and every signature in the file must be valid; --out is then the folder of that file.
+# --state-dir: where the tag of the last release that this tool signed is kept (default $MESHCENTRAL_RELEASE_STATE, or ~/.config/meshcentral-release), file last-signed. The
+# changes are shown against that release; without a record (the first signing on this computer) the nearest tag of the fork is used and the script says so.
 # The output folder belongs to you and is closed to others (mode 700); before the passphrase is asked, the script shows what changed in the key list and in the
 # release tools since the previous release and asks you to type yes.
 set -euo pipefail
@@ -21,12 +23,12 @@ SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 REPO_DIR=$(CDPATH= cd -- "$SCRIPT_DIR/../.." && pwd)
 usage() { sed -n '/^# Usage:/,/^set -/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//' >&2; exit 2; }
 
-KEY= TGZ= VERSION= TAG= COMMIT= OUT= CHANNEL=stable REPOSITORY=kxd231/MeshCentral APPEND=
+KEY= TGZ= VERSION= TAG= COMMIT= OUT= CHANNEL=stable REPOSITORY=kxd231/MeshCentral APPEND= STATE_DIR=${MESHCENTRAL_RELEASE_STATE:-$HOME/.config/meshcentral-release}
 while [ "$#" -gt 0 ]; do
     [ "$#" -ge 2 ] || usage
     case "$1" in
         --key) KEY=$2 ;; --tgz) TGZ=$2 ;; --version) VERSION=$2 ;; --tag) TAG=$2 ;; --commit) COMMIT=$2 ;; --out) OUT=$2 ;;
-        --channel) CHANNEL=$2 ;; --repository) REPOSITORY=$2 ;; --append) APPEND=$2 ;;
+        --channel) CHANNEL=$2 ;; --repository) REPOSITORY=$2 ;; --append) APPEND=$2 ;; --state-dir) STATE_DIR=$2 ;;
         *) usage ;;
     esac
     shift 2
@@ -70,7 +72,16 @@ VERIFY_DIR=$(mktemp -d "${TMPDIR:-/tmp}/sign-release.XXXXXX")
 trap 'rm -rf "$VERIFY_DIR"' EXIT
 git -C "$REPO_DIR" show "$COMMIT:serverupdate-keys.json" > "$VERIFY_DIR/commit-keys.json" || { echo "serverupdate-keys.json is not in commit $COMMIT." >&2; exit 1; }
 # The previous release of the fork (a tag of the form <base>-custom.<n>), not just any tag: upstream tags say nothing about what the servers know
-PREVIOUS=$(git -C "$REPO_DIR" describe --tags --abbrev=0 --match '*-custom.*' "$COMMIT^" 2>/dev/null || true)
+# The previous release is the last one that was signed on this computer (recorded after every signing); the nearest tag is only the start
+PREVIOUS=
+if [ -f "$STATE_DIR/last-signed" ]; then
+    RECORDED=$(head -c 100 "$STATE_DIR/last-signed" | tr -d '\n')
+    if [ "$RECORDED" != "$TAG" ] && git -C "$REPO_DIR" rev-parse -q --verify "refs/tags/$RECORDED" >/dev/null 2>&1; then PREVIOUS=$RECORDED; fi
+fi
+if [ -z "$PREVIOUS" ]; then
+    PREVIOUS=$(git -C "$REPO_DIR" describe --tags --abbrev=0 --match '*-custom.*' "$COMMIT^" 2>/dev/null || true)
+    echo "NOTE: no record of an earlier signing in $STATE_DIR (or it is this release); comparing with the nearest tag of the fork: ${PREVIOUS:-none}." >&2
+fi
 HAVE_PREVIOUS_KEYS=0
 if [ -n "$PREVIOUS" ] && git -C "$REPO_DIR" show "$PREVIOUS:serverupdate-keys.json" > "$VERIFY_DIR/previous-keys.json" 2>/dev/null; then HAVE_PREVIOUS_KEYS=1; fi
 tool() { "${DOCKER[@]}" -v "$VERIFY_DIR:/keys:ro" "$NODE_IMAGE" "${TOOL[@]}" "$@"; }  # for the key lists only
@@ -125,6 +136,11 @@ if [ "$HAVE_PREVIOUS_KEYS" = 1 ]; then
     echo "Verifying with the keys of the previous release $PREVIOUS (what servers on that version trust) ..."
     verify previous-keys.json || echo "WARNING: servers on $PREVIOUS do not trust this key, they cannot install this release from the web interface (see docs/fork-updates.md)."
 fi
+
+# The record of the last release that was signed, for the next signing (kept outside of the repository, in a folder that is yours)
+case "$(realpath -m -- "$STATE_DIR")/" in "$REPO_DIR"/*) echo "NOTE: the state folder is inside the repository; not recorded." >&2 ;; *)
+    mkdir -p -m 700 -- "$STATE_DIR" && printf '%s\n' "$TAG" > "$STATE_DIR/last-signed.tmp" && mv -f "$STATE_DIR/last-signed.tmp" "$STATE_DIR/last-signed" || echo "NOTE: could not record $TAG in $STATE_DIR." >&2 ;;
+esac
 
 echo
 echo "Upload these two files to the draft release of $TAG:"

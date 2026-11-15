@@ -415,6 +415,39 @@ How to bump:
 
 ## Making a release (owner)
 
+### With `release.sh` (the short way)
+
+`tools/release/release.sh [--dry-run] --key <key.json> [--channel stable|prerelease] [--notes-file <file>] <version>` does the steps below in one run, on the computer that
+holds the signing key: it checks the tree (clean, `package.json` and `npm-shrinkwrap.json` have the version, the commit is on the remote, no tag and no release yet), tags and
+pushes the tag **after you type `yes`**, waits for the draft of the workflow (at most `--timeout-minutes`, default 40), builds the tag once locally and compares its
+sha256 with the digest of the draft, runs `sign-release.sh` (it asks for the passphrase), uploads the manifest and the signature to the draft (never over existing files), downloads the
+package, the manifest and the signature again and verifies them (`verify --tgz`), and publishes **after a second `yes`**. Anything else than `yes` stops it; nothing is forced, moved or
+deleted. `--dry-run` runs only the read-only checks and prints the steps; it creates, pushes, uploads, signs and publishes nothing.
+
+`sign-release.sh` keeps the tag of the last release that it signed in `~/.config/meshcentral-release/last-signed` (or `$MESHCENTRAL_RELEASE_STATE`, or `--state-dir`; the folder is
+yours, mode 700, outside of the repository) and shows the changes of the key list, the tools and the update code since that release. Without a record (the first signing on that computer)
+it falls back to the nearest tag of the fork and says so.
+
+Before the second `yes` the script reads the digests of the three files on GitHub again and compares them with the files that were verified; after the publication it
+does so once more. A difference stops the script with a message.
+
+If `release.sh` stops, there is no `--resume`: look at the table, do the next step by hand (the manual steps are below) or start again with the next version number.
+
+| Stopped at | State | What to do |
+| --- | --- | --- |
+| 1 (checks) | nothing was created | Fix what the message says and run again. |
+| 2, answer not `yes` | nothing was created | Run again. |
+| 2, the push failed | the tag exists only on your computer | `git tag -d <version>` (it was never pushed), fix the push (rights, rulesets), run again. |
+| 3, no draft in time | the tag is pushed, the workflow runs or failed | Look at the run in GitHub Actions. If it failed, fix the cause and start it again for the tag (`gh workflow run server-release.yml -f tag=<version>`), then continue by hand from the local build below. A wrong tag cannot be moved: use the next version number. |
+| 4, local build is not the draft | the draft exists, nothing is signed | Do not sign. Find out why (the build is not reproducible, or the draft was changed). Start again with the next version number if you cannot tell. |
+| 5, wrong passphrase or you stopped | nothing is signed or uploaded | Run `sign-release.sh` again by hand with the same arguments (the output folder must be empty), then continue with the upload. |
+| 6, half an upload | the draft may have the manifest but not the signature | Delete the file that is there from the **draft** (`gh release delete-asset <version> <file>`), then upload both again. Never `--clobber`. |
+| 7, verify failed | the draft has the three files | Do not publish. Compare the files, find the cause; if the draft cannot be trusted, delete the draft and start again with the next version number. |
+| 8, answer not `yes` | the draft is complete and verified | Publish by hand when ready: `gh release edit <version> --draft=false`. |
+| after 8, digests differ | the release is published and immutable | Do not use it; tell the people who use it; publish a new version. |
+
+The manual steps follow.
+
 The package is built by GitHub Actions from a tag, and a published release cannot be changed: the repository
 has immutable releases on, and rulesets forbid force pushes to `custom` and moving or deleting tags.
 
