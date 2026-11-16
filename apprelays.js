@@ -2054,7 +2054,7 @@ module.exports.CreateSshFilesRelay = function (parent, db, ws, req, domain, user
 function checkRelayRights(parent, domain, user, relayNodeId, func, protocol) {
     if (relayNodeId == null) { func(true); return; } // No relay, do nothing.
     parent.GetNodeWithRights(domain, user, relayNodeId, function (node, rights, visible) {
-        const restricted = (rights != MESHRIGHT_ADMIN) && (((protocol == 10) && ((rights & MESHRIGHT_NOFILES) != 0)) || ((protocol == 11) && ((rights & MESHRIGHT_NOTERMINAL) != 0)));
+        const restricted = (rights != MESHRIGHT_ADMIN) && (protocol == 11) && ((rights & MESHRIGHT_NOTERMINAL) != 0); // Web-RDP (10) through a gateway is not a file transfer, No Files does not apply
         func((node != null) && ((protocol == null) || ((visible !== false) && !restricted)) && ((rights & 0x00200008) != 0)); // MESHRIGHT_REMOTECONTROL or MESHRIGHT_RELAY rights
     });
 }
@@ -2109,8 +2109,9 @@ function mstscAuthorize(parent, domain, req, obj, creds, useServerCreds, func) {
     parent.GetNodeWithRights(domain, obj.userid, obj.nodeid, function (node, rights, visible) {
         if (obj.ws == null) return; // obj has been cleaned up, just exit.
         if (!setRelaySessionDeadline(req, obj, obj.cookie)) return;
-        if ((node == null) || (visible == false) || ((rights & MESHRIGHT_REMOTECONTROL) == 0) || ((rights != MESHRIGHT_ADMIN) && ((rights & MESHRIGHT_NOFILES) != 0))) { obj.close(); return; }
-        if ((rights != MESHRIGHT_ADMIN) && ((rights & MESHRIGHT_NODESKTOP) != 0)) { obj.close(); return; } // The No Desktop restriction also blocks Web-RDP
+        if ((node == null) || (visible == false) || ((rights & MESHRIGHT_REMOTECONTROL) == 0)) { obj.close(); return; }
+        // Same rule as upstream: No Desktop blocks Web-RDP, No Files does not (the session is a routed TCP connection, it has no file transfer)
+        if ((rights != MESHRIGHT_ADMIN) && ((rights & MESHRIGHT_NODESKTOP) != 0)) { obj.close(); return; }
         if ((rights != MESHRIGHT_ADMIN) && ((rights & MESHRIGHT_REMOTEVIEWONLY) != 0)) { obj.viewonly = true; }
         if ((rights != MESHRIGHT_ADMIN) && ((rights & MESHRIGHT_DESKLIMITEDINPUT) != 0)) { obj.limitedinput = true; }
         obj.rights = rights;
