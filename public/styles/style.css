@@ -3376,33 +3376,47 @@ a {
     color: #222;
 }
 
-.night #p18html {
+.night #p18html,
+.night #p18wuhtml,
+.night #p18msihtml {
     color: #CCC;
 }
 
-.night #p18html table {
+.night #p18html table,
+.night #p18wuhtml table,
+.night #p18msihtml table {
     background-color: #000 !important;
     border-color: #444 !important;
 }
 
-.night #p18html thead tr {
+.night #p18html thead tr,
+.night #p18wuhtml thead tr,
+.night #p18msihtml thead tr {
     background-color: #222 !important;
 }
 
-.night #p18html thead th {
+.night #p18html thead th,
+.night #p18wuhtml thead th,
+.night #p18msihtml thead th {
     border-color: #444 !important;
     color: #CCC !important;
 }
 
-.night #p18html tbody tr {
+.night #p18html tbody tr,
+.night #p18wuhtml tbody tr,
+.night #p18msihtml tbody tr {
     background-color: #444 !important;
 }
 
-.night #p18html tbody tr:nth-child(even) {
+.night #p18html tbody tr:nth-child(even),
+.night #p18wuhtml tbody tr:nth-child(even),
+.night #p18msihtml tbody tr:nth-child(even) {
     background-color: #333 !important;
 }
 
-.night #p18html tbody td {
+.night #p18html tbody td,
+.night #p18wuhtml tbody td,
+.night #p18msihtml tbody td {
     border-color: #444 !important;
     color: #CCC !important;
 }
@@ -3410,6 +3424,10 @@ a {
 .night #p18html h4 {
     color: #CCC;
     border-bottom-color: #007bff !important;
+}
+
+.night #p18wuhtml h4 {
+    color: #CCC;
 }
 
 .night #p18html h4 span {
