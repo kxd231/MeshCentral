@@ -37,6 +37,17 @@ const MAX_REVOKED = 64;
 const MAX_SIGNED_BYTES = 16384;             // Manifest and signature files
 const INSPECT_CACHE_MS = 5 * 60 * 1000;
 const PARENT_API_VERSION = 1;               // Version of the contract between meshcentral.js (parent process) and createParentUpdate()
+const REQUEST_FILE = 'requested.json';      // Written by the server process before it exits for an update, read by the next server process (the result of the update)
+const RESULT_FILE = 'last-result.json';     // What the version dialog shows as "last update"
+const MAX_MARKER_BYTES = 4096;
+const REQUEST_MAX_AGE_MS = 7 * 24 * 3600 * 1000; // A request older than this is not the update that just ended
+const MAX_REASON_CHARS = 300;
+const AGENT_DEFAULTS_ENTRY = 'package/agents/agent-defaults.json';
+const MAX_AGENT_DEFAULTS_BYTES = 1024 * 1024;
+const MAX_AGENT_CHANGES = 64;
+const MiB = 1024 * 1024;
+const SPACE_DOWNLOAD_EXTRA = 64 * MiB;      // Free space the download needs on top of the package: temporary file and the file that is kept
+const SPACE_INSTALL_FACTOR = 4, SPACE_INSTALL_EXTRA = 128 * MiB; // npm unpacks the package and its modules: a rough 4 times the size of the package
 // The npm source can still report versions, but installing from it is refused: the registry package has no local pin
 const NPM_INSTALL_BLOCKED = 'Server update from serverUpdateSource "npm" is blocked: a package from the npm registry has no local size and SHA-384 pin. Nothing was installed. Use serverUpdateSource "github" (the default) with a pin in meshcentral-data/' + PINS_FILE + ', or update by hand.';
 
@@ -417,7 +428,7 @@ function readTgzEntry(file, entryName, limit) {
         gunzip.on('end', function () {
             if (settled) { return; }
             if (capture != null) { return finish(invalid()); }
-            if (matches === 0) { return finish(new Error(entryName + ' was not found in the package.')); }
+            if (matches === 0) { const missing = new Error(entryName + ' was not found in the package.'); missing.code = 'ENTRY_MISSING'; return finish(missing); }
             finish(null, found);
         });
         gunzip.on('error', function () { finish(new Error('The package is not a valid gzip archive.')); });
@@ -449,6 +460,177 @@ function nodeVersionMeets(running, required) {
     const have = String(running).replace(/^v/, '').split('.').map(Number);
     for (let i = 0; i < 3; i++) { const x = have[i] || 0; if (x !== required[i]) { return x > required[i]; } }
     return true;
+}
+
+// What engines.node of a package means for the Node.js that runs the server: { range, required, status }.
+// status: 'none' (no engines.node), 'ok', 'too-old' (a plain lower bound that the running Node.js does not meet), 'unchecked' (a form of range that is not
+// a plain lower bound: the update does not check it and the new version checks Node.js itself when it starts). range is the text as the package writes it,
+// cut to 64 characters without control characters.
+function nodeRequirement(pkg, running) {
+    const raw = (pkg != null) && (pkg.engines != null) && (typeof pkg.engines === 'object') ? pkg.engines.node : null;
+    if (raw == null) { return { range: null, required: null, status: 'none' }; }
+    const range = String(raw).replace(/[\u0000-\u001f\u007f-\u009f]/g, ' ').substring(0, 64);
+    const required = requiredNodeVersion(pkg);
+    if (required == null) { return { range: range, required: null, status: 'unchecked' }; }
+    if (!nodeVersionMeets(running, required)) { return { range: range, required: required, status: 'too-old' }; }
+    // Only a plain ">=X.Y.Z" is fully understood: an upper bound or another term after the lower bound is not checked
+    return { range: range, required: required, status: /^\s*>=\s*v?\d{1,4}(?:\.\d{1,4}){0,2}\s*$/.test(String(raw)) ? 'ok' : 'unchecked' };
+}
+
+// ---- the result of an update, seen by the next server process ----
+// A text from a marker file or from an error on its way to the version dialog, a server warning or an event: no long hexadecimal or base64 runs (checksums,
+// signatures), no control characters, the known folders of the installation named by a label instead of their path, at most MAX_REASON_CHARS.
+// paths: [[absolute path, label], ...]
+function redactReason(text, paths) {
+    let out = (text == null) ? '' : String(text).substring(0, 4000);
+    const known = (Array.isArray(paths) ? paths : []).filter(function (p) { return Array.isArray(p) && (typeof p[0] === 'string') && (p[0].length > 3); }).sort(function (a, b) { return b[0].length - a[0].length; });
+    for (const entry of known) { out = out.split(entry[0]).join('<' + entry[1] + '>'); }
+    out = out.replace(/[A-Fa-f0-9]{32,}/g, '...').replace(/[A-Za-z0-9+/_-]{40,}={0,2}/g, '...').replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g, ' ').replace(/\s+/g, ' ').trim();
+    return (out.length > MAX_REASON_CHARS) ? (out.substring(0, MAX_REASON_CHARS - 3) + '...') : out;
+}
+
+// requested.json: { schemaVersion: 1, version, fromVersion, time, automatic, trust: 'signature' | 'pin', keyId }. Returns the request or null for anything that is not that.
+function parseRequest(text) {
+    let data;
+    try { data = JSON.parse(text); } catch (ex) { return null; }
+    if ((data == null) || (typeof data !== 'object') || (data.schemaVersion !== 1)) { return null; }
+    const version = parseVersion(data.version);
+    if ((version == null) || (version.text !== data.version)) { return null; }
+    const from = (data.fromVersion == null) ? null : parseVersion(data.fromVersion);
+    if ((data.fromVersion != null) && ((from == null) || (from.text !== data.fromVersion))) { return null; }
+    if (!Number.isSafeInteger(data.time) || (data.time <= 0)) { return null; }
+    if ((data.trust !== 'signature') && (data.trust !== 'pin')) { return null; }
+    if ((data.keyId != null) && ((typeof data.keyId !== 'string') || !/^[a-f0-9]{16}$/.test(data.keyId))) { return null; }
+    return { version: data.version, fromVersion: data.fromVersion == null ? null : data.fromVersion, time: data.time, automatic: (data.automatic === true), trust: data.trust, keyId: (data.keyId == null) ? null : data.keyId };
+}
+
+// How an update ended, from what the process that starts after it can see. input: { request (parseRequest), current (the running version), failure ({ version, time, reason }
+// of last-failure.json or null), refusal ({ version, time, message } of last-refusal.json or null), now, paths (for redactReason) }.
+// Returns null when there is nothing to report (no request, or one that is too old), otherwise { result: 'ok' | 'failed', version, fromVersion, trust, keyId, automatic, requestedAt, reason }.
+// ok: the running version is the requested one. failed: it is not; the reason is the failure marker of that version (written by the parent process after the request), else the
+// refusal marker, else a statement of what is known. The markers of an older update (older than the request) are not used. The parent process of an older version writes the same
+// failure marker and nothing else, which is why an update that this module did not install is judged the same way.
+function detectUpdateResult(input) {
+    const request = input && input.request;
+    if (request == null) { return null; }
+    const now = Number.isFinite(input.now) ? input.now : Date.now();
+    if ((request.time > now + 60000) || (now - request.time > REQUEST_MAX_AGE_MS)) { return null; }
+    const current = parseVersion(input.current);
+    const base = { version: request.version, fromVersion: request.fromVersion, trust: request.trust, keyId: request.keyId, automatic: request.automatic, requestedAt: request.time };
+    if ((current != null) && (compareVersions(current, request.version) === 0)) { return Object.assign(base, { result: 'ok', reason: null }); }
+    const fresh = function (marker) { return (marker != null) && Number.isFinite(marker.time) && (marker.time >= request.time - 5000) && (parseVersion(marker.version) != null) && (compareVersions(marker.version, request.version) === 0); };
+    let reason;
+    if (fresh(input.failure)) { reason = redactReason(input.failure.reason, input.paths) || 'The update failed without a reason.'; }
+    else if (fresh(input.refusal)) { reason = 'The release was refused: ' + (redactReason(input.refusal.message, input.paths) || 'its signature or pin was not accepted.'); }
+    else if ((current != null) && (request.fromVersion != null) && (compareVersions(current, request.fromVersion) === 0)) { reason = 'The server is still on ' + request.fromVersion + ' and no reason was recorded. See the log of the server.'; }
+    else { reason = 'The server runs ' + (current ? current.text : 'an unknown version') + ' after the update to ' + request.version + ' was requested. See the log of the server.'; }
+    return Object.assign(base, { result: 'failed', reason: reason });
+}
+
+// last-result.json (what the dialog shows as the last update): { schemaVersion: 1, result, version, fromVersion, trust, keyId, automatic, requestedAt, time, reason }. Strict; null for anything else.
+function parseLastResult(text, paths) {
+    let data;
+    try { data = JSON.parse(text); } catch (ex) { return null; }
+    if ((data == null) || (typeof data !== 'object') || (data.schemaVersion !== 1) || ((data.result !== 'ok') && (data.result !== 'failed'))) { return null; }
+    const version = parseVersion(data.version);
+    if ((version == null) || (version.text !== data.version)) { return null; }
+    if ((data.fromVersion != null) && ((parseVersion(data.fromVersion) == null) || (parseVersion(data.fromVersion).text !== data.fromVersion))) { return null; }
+    if (!Number.isSafeInteger(data.time) || (data.time <= 0)) { return null; }
+    return { result: data.result, version: data.version, fromVersion: data.fromVersion == null ? null : data.fromVersion, trust: (data.trust === 'signature') ? 'signature' : 'pin', keyId: ((typeof data.keyId === 'string') && /^[a-f0-9]{16}$/.test(data.keyId)) ? data.keyId : null, automatic: (data.automatic === true), time: data.time, reason: (data.result === 'failed') ? redactReason(data.reason, paths) : null };
+}
+
+// ---- free disk space before an update ----
+// The nearest existing folder at or above dir, with the bytes that a normal user can still write to it, or null when that is not known on this system.
+function freeBytesOf(dir, statfs) {
+    let at = dir;
+    for (let i = 0; i < 64; i++) {
+        try { const s = statfs(at); const free = Number(s.bavail) * Number(s.bsize); return Number.isFinite(free) ? { dir: at, free: free } : null; }
+        catch (ex) { const up = path.dirname(at); if (up === at) { return null; } at = up; }
+    }
+    return null;
+}
+function deviceOfDir(dir) {
+    let at = dir;
+    for (let i = 0; i < 64; i++) { try { return fs.statSync(at).dev; } catch (ex) { const up = path.dirname(at); if (up === at) { return null; } at = up; } }
+    return null;
+}
+// Is there room for a package of this size: size + 64 MiB in the download folder, and, when installDir is given, 4 times the size + 128 MiB where npm installs it
+// (the sum when both are on one disk). Rough numbers, on purpose on the generous side of what an update needs. A disk whose free space cannot be read is not a reason to refuse.
+// options: { size, downloadDir, installDir, statfs, deviceOf }. Returns { ok, message }, the message names MiB and the folders by their labels, not by path.
+function checkFreeSpace(options) {
+    const statfs = options.statfs || fs.statfsSync, deviceOf = options.deviceOf || deviceOfDir;
+    if (!Number.isFinite(options.size) || (options.size <= 0) || (typeof statfs !== 'function')) { return { ok: true, message: null }; }
+    const needs = [{ label: 'the download folder', dir: options.downloadDir, need: options.size + SPACE_DOWNLOAD_EXTRA }];
+    if (typeof options.installDir === 'string') { needs.push({ label: 'the installation folder', dir: options.installDir, need: options.size * SPACE_INSTALL_FACTOR + SPACE_INSTALL_EXTRA }); }
+    const found = needs.filter(function (n) { return typeof n.dir === 'string'; }).map(function (n) { return Object.assign({ at: freeBytesOf(n.dir, statfs), device: deviceOf(n.dir) }, n); }).filter(function (n) { return n.at != null; });
+    // Folders on one disk share its free space
+    const groups = [];
+    for (const n of found) {
+        const group = groups.find(function (g) { return (n.device != null) && (g.device === n.device); });
+        if (group) { group.need += n.need; group.labels.push(n.label); } else { groups.push({ device: n.device, need: n.need, free: n.at.free, labels: [n.label] }); }
+    }
+    const short = groups.find(function (g) { return g.free < g.need; });
+    if (short == null) { return { ok: true, message: null }; }
+    return { ok: false, message: 'Not enough free disk space for the update: ' + short.labels.join(' and ') + ' need' + (short.labels.length > 1 ? '' : 's') + ' about ' + Math.ceil(short.need / MiB) + ' MiB, ' + Math.floor(short.free / MiB) + ' MiB are free. Nothing was installed.' };
+}
+
+// ---- the agents that a release pins ----
+// agents/agent-defaults.json of a package: { schemaVersion: 1, releases: [ { repository, tag, files: [ { filename, asset, size, sha384 } ] } ] } as a Map filename -> { repository, tag, size, sha384 }.
+// The same limits as the server applies to the file when it loads it (agentbuilds.js). Throws on anything else.
+function parseAgentPins(bytes) {
+    let data;
+    try { data = JSON.parse(new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes)); } catch (ex) { throw new Error('The agent list is not valid JSON.'); }
+    if ((data == null) || (data.schemaVersion !== 1) || !Array.isArray(data.releases) || (data.releases.length > 32)) { throw new Error('The agent list has an unexpected format.'); }
+    const files = new Map(), name = /^[a-zA-Z0-9_][a-zA-Z0-9_.-]{0,127}$/;
+    for (const release of data.releases) {
+        if ((release == null) || (typeof release.repository !== 'string') || !/^[a-zA-Z0-9_.-]+\/[a-zA-Z0-9_.-]+$/.test(release.repository) || (typeof release.tag !== 'string') || !name.test(release.tag) || !Array.isArray(release.files)) { throw new Error('The agent list has an invalid release.'); }
+        for (const file of release.files) {
+            if ((file == null) || (typeof file.filename !== 'string') || !name.test(file.filename) || files.has(file.filename)) { throw new Error('The agent list has an invalid or repeated file name.'); }
+            if (!Number.isSafeInteger(file.size) || (file.size <= 0) || (typeof file.sha384 !== 'string') || !/^[a-f0-9]{96}$/.test(file.sha384)) { throw new Error('The agent list has an invalid size or checksum.'); }
+            files.set(file.filename, { repository: release.repository, tag: release.tag, size: file.size, sha384: file.sha384 });
+        }
+    }
+    return files;
+}
+let agentLabelTable = null;
+function agentLabel(filename) {
+    if (agentLabelTable == null) {
+        agentLabelTable = new Map();
+        try { for (const type of Object.values(require('./agenttypes')())) { if ((type != null) && (typeof type.localname === 'string') && !agentLabelTable.has(type.localname) && (typeof type.desc === 'string')) { agentLabelTable.set(type.localname, type.desc); } } } catch (ex) { }
+    }
+    return agentLabelTable.get(filename) || filename;
+}
+// What changes for the agents between two lists (Maps of parseAgentPins): the files that are new, gone, or point to another release or to other bytes of the same release.
+// Each change: { filename, label, change: 'changed' | 'added' | 'removed', from, to } with from and to like "h264-v1", or "kxd231/MeshAgent h264-v1" when the repository changes too.
+// A file with the same release tag but another checksum has the same text on both sides and rebuilt: true. Sorted by label, at most MAX_AGENT_CHANGES, the rest is counted in more.
+function compareAgentPins(installed, incoming) {
+    const names = new Set([...installed.keys(), ...incoming.keys()]), changes = [];
+    const show = function (entry, other) { return (entry == null) ? null : ((other != null) && (other.repository === entry.repository) ? entry.tag : (entry.repository + ' ' + entry.tag)); };
+    for (const filename of names) {
+        const a = installed.get(filename), b = incoming.get(filename);
+        if ((a != null) && (b != null) && (a.sha384 === b.sha384) && (a.size === b.size)) { continue; } // the same bytes, whatever the tag is called: the agents do not change
+        const item = { filename: filename, label: agentLabel(filename), change: (a == null) ? 'added' : ((b == null) ? 'removed' : 'changed'), from: show(a, b), to: show(b, a) };
+        if ((a != null) && (b != null) && (a.repository === b.repository) && (a.tag === b.tag)) { item.rebuilt = true; }
+        changes.push(item);
+    }
+    changes.sort(function (x, y) { return (x.label < y.label) ? -1 : ((x.label > y.label) ? 1 : (x.filename < y.filename ? -1 : 1)); });
+    return { changes: changes.slice(0, MAX_AGENT_CHANGES), more: Math.max(0, changes.length - MAX_AGENT_CHANGES), total: names.size };
+}
+
+// Own versions of the pages of the server: the file names in these folders that also exist in the folder of the pages of the package. options: [{ label, dir }]; viewsDir: the pages of the package.
+// Only names, no paths. A folder that cannot be read is not reported.
+function listViewOverrides(folders, viewsDir) {
+    let shipped;
+    try { shipped = new Set(fs.readdirSync(viewsDir).filter(function (n) { return /^[A-Za-z0-9_.-]+\.handlebars$/.test(n); })); } catch (ex) { return []; }
+    const result = [];
+    for (const folder of (Array.isArray(folders) ? folders : [])) {
+        if ((folder == null) || (typeof folder.dir !== 'string')) { continue; }
+        let names;
+        try { names = fs.readdirSync(folder.dir); } catch (ex) { continue; }
+        const own = names.filter(function (n) { return shipped.has(n); }).sort().slice(0, 50);
+        if (own.length > 0) { result.push({ label: String(folder.label || 'views').substring(0, 60), files: own }); }
+    }
+    return result;
 }
 
 // ---- signed releases: keys, signature file, manifest ----
@@ -647,6 +829,12 @@ function createServerUpdater(options) {
     const folder = options.folder; // absolute path of the download folder
     const pinsFile = options.pinsFile; // absolute path of serverupdate-pins.json
     const nodeVersion = (typeof options.nodeVersion === 'string') ? options.nodeVersion : process.versions.node; // the Node.js that will run the installed package
+    const installDir = (typeof options.installDir === 'string') ? options.installDir : null; // the folder that holds node_modules (where npm installs the package)
+    const spaceOptions = { statfs: options.statfs, deviceOf: options.deviceOf };
+    // Texts that leave the server (dialog, warning, event) name these folders by a label, not by path
+    const redactPaths = Array.isArray(options.redactPaths) ? options.redactPaths : [[options.pinsFile, PINS_FILE], [options.folder, 'download folder'], [(typeof options.folder === 'string') ? path.dirname(options.folder) : null, 'data folder'], [installDir, 'install folder'], [__dirname, 'server folder']];
+    const agentDefaultsFile = (typeof options.agentDefaultsFile === 'string') ? options.agentDefaultsFile : path.join(__dirname, 'agents', 'agent-defaults.json');
+    const viewsDir = (typeof options.viewsDir === 'string') ? options.viewsDir : path.join(__dirname, 'views');
     const proxy = (options.args && (typeof options.args.npmproxy === 'string')) ? options.args.npmproxy : undefined;
     const client = options.client || httpsDownloads.createClient(undefined, undefined, proxy, 'MeshCentral-ServerUpdate');
     const loggedErrors = new Map();
@@ -944,7 +1132,10 @@ function createServerUpdater(options) {
     }
     async function releaseInfoNow(current) {
         const trusted = trustedKeys();
-        const result = { trust: settings.trust, keys: Array.from(trusted.keys.values()).map(function (k) { return { keyId: k.keyId, comment: k.comment }; }), keysError: trusted.error, releases: [] };
+        let folders = [];
+        try { if (typeof options.viewOverrides === 'function') { folders = options.viewOverrides(); } } catch (ex) { folders = []; }
+        // lastUpdate and customViews are for those who may update (the caller removes them for others)
+        const result = { trust: settings.trust, keys: Array.from(trusted.keys.values()).map(function (k) { return { keyId: k.keyId, comment: k.comment }; }), keysError: trusted.error, releases: [], lastUpdate: lastResult(), customViews: listViewOverrides(folders, viewsDir) };
         const sel = await getSelection(false);
         if (sel == null) { return result; }
         for (const release of [sel.latest, sel.prerelease]) {
@@ -992,6 +1183,105 @@ function createServerUpdater(options) {
         }
         if (!release) { throw new Error('No usable ' + (newest ? 'stable' : String(version).substring(0, 40)) + ' release with a meshcentral-<version>.tgz asset in ' + settings.repository + '.'); }
         return release;
+    }
+
+    // ---- small marker files in the download folder (requested.json, last-result.json): atomic writes, strict reads ----
+    function writeMarker(name, value) {
+        const temp = path.join(folder, '.' + crypto.randomBytes(16).toString('hex') + '.tmp');
+        try {
+            fs.writeFileSync(temp, JSON.stringify(value), { mode: 0o600 });
+            fs.renameSync(temp, path.join(folder, name));
+        } catch (ex) { try { fs.unlinkSync(temp); } catch (ex2) { } throw ex; }
+    }
+    // The parsed content of a marker, or null when it is missing, not a plain file, too large or not what parse accepts
+    function readMarker(name, parse) {
+        if (typeof folder !== 'string') { return null; }
+        try {
+            const file = path.join(folder, name), stat = fs.lstatSync(file);
+            if (!stat.isFile() || (stat.size > MAX_MARKER_BYTES)) { return null; }
+            return parse(fs.readFileSync(file, 'utf8'));
+        } catch (ex) { return null; }
+    }
+    function lastResult() { return readMarker(RESULT_FILE, function (text) { return parseLastResult(text, redactPaths); }); }
+
+    // ---- what an update would change, for the version dialog ----
+    // The package is downloaded and read only after it matched the pin by hand or the signed manifest (size and SHA-384) and the digest of GitHub; nothing is
+    // written to the pins file and nothing is installed. One release at a time, the answer is kept for 10 minutes.
+    const previewCache = new Map();
+    let previewing = null;
+    async function previewRelease(version) {
+        if (settings.source !== 'github') { throw updateError('disabled', settings.error || 'GitHub updates are not enabled.'); }
+        let release;
+        try { release = await resolve(version); } catch (ex) { throw updateError('release', reasonOf(ex) + '.', ex.message); }
+        let manual;
+        try { manual = manualPin(release.version); } catch (ex) { throw updateError('disabled', 'The pins file cannot be used: ' + reasonOf(ex) + '.', ex.message); }
+        let expected;
+        if (settings.trust === 'pin') {
+            if (manual == null) { throw updateError('no-pin', statusMessage('no-pin')); }
+            expected = { size: manual.size, sha384: manual.sha384 };
+        } else {
+            const verdict = await inspect(release);
+            if (verdict.code === 'signed') {
+                if ((manual != null) && ((manual.size !== verdict.manifest.size) || (manual.sha384 !== verdict.manifest.sha384))) { suspicious(release, 'conflict', verdict.keyId, statusMessage('conflict')); throw updateError('conflict', statusMessage('conflict')); }
+                expected = { size: verdict.manifest.size, sha384: verdict.manifest.sha384 };
+            } else {
+                if ((verdict.code === 'invalid') || (verdict.code === 'revoked') || (verdict.code === 'mismatch')) { suspicious(release, verdict.code, verdict.keyId, verdict.message); }
+                if (manual == null) { throw updateError(verdict.code, verdict.message); }
+                expected = { size: manual.size, sha384: manual.sha384 };
+            }
+        }
+        if (release.asset.digest == null) { throw updateError('digest', 'Release ' + release.version + ' has no sha256 digest in the GitHub API; it will not be installed.'); }
+        if (expected.size !== release.asset.size) { throw updateError('mismatch', 'The size of the package on GitHub is not the size in the pin or the signed manifest. Nothing was downloaded.'); }
+        const key = release.version + '|' + expected.size + '|' + expected.sha384 + '|' + release.asset.digest;
+        const cached = previewCache.get(key);
+        if ((cached != null) && (cached.until > now())) { return cached.result; }
+        if (previewing != null) {
+            if (previewing.key === key) { return previewing.promise; }
+            throw updateError('busy', 'Another release is being checked. Try again in a minute.');
+        }
+        if (typeof folder !== 'string') { throw updateError('disabled', 'No download folder.'); }
+        const space = checkFreeSpace(Object.assign({ size: expected.size, downloadDir: folder }, spaceOptions));
+        if (!space.ok) { throw updateError('disk-space', space.message); }
+        const work = (async function () {
+            await fs.promises.mkdir(folder, { recursive: true, mode: 0o700 });
+            const temp = path.join(folder, '.' + crypto.randomBytes(16).toString('hex') + '.tmp');
+            const url = 'https://github.com/' + settings.repository + '/releases/download/' + encodeURIComponent(release.tag) + '/' + encodeURIComponent(release.asset.name);
+            try {
+                const got = await client.download(url, temp, { limit: expected.size, signal: AbortSignal.timeout(10 * 60 * 1000), sha256: release.asset.digest });
+                if ((got.size !== release.asset.size) || (got.sha256 !== release.asset.digest)) { throw updateError('mismatch', 'The downloaded package does not match its digest on GitHub. Nothing was read from it.'); }
+                const local = await fileSha384(temp);
+                if ((local.size !== expected.size) || (local.sha384 !== expected.sha384)) { throw updateError('mismatch', 'The downloaded package does not match the pin or the signed manifest. Nothing was read from it.'); }
+                // Now, and not before, something is read from the package
+                let inner;
+                try { inner = await readTgzPackageJson(temp); } catch (ex) { throw updateError('package', 'The package cannot be read: ' + reasonOf(ex) + '.', ex.message); }
+                if ((inner == null) || (inner.name !== 'meshcentral') || (inner.version !== release.version)) { throw updateError('package', 'The package is not MeshCentral ' + release.version + '.'); }
+                const node = nodeRequirement(inner, nodeVersion);
+                const agents = { status: 'same', changes: [], more: 0, total: 0, message: null };
+                let incoming = null;
+                try { incoming = parseAgentPins(await readTgzEntry(temp, AGENT_DEFAULTS_ENTRY, MAX_AGENT_DEFAULTS_BYTES)); }
+                catch (ex) { if (ex.code === 'ENTRY_MISSING') { agents.status = 'no-list'; } else { agents.status = 'unreadable'; agents.message = 'The agent list of the release cannot be read: ' + reasonOf(ex) + '.'; } }
+                if (incoming != null) {
+                    let installed = null;
+                    try {
+                        const stat = fs.lstatSync(agentDefaultsFile);
+                        if (!stat.isFile() || (stat.size > MAX_AGENT_DEFAULTS_BYTES)) { throw new Error('not a plain file of at most 1 MiB'); }
+                        installed = parseAgentPins(fs.readFileSync(agentDefaultsFile));
+                    } catch (ex) { agents.status = 'unreadable'; agents.message = 'The agent list of this server cannot be read.'; log('The agent list of this server cannot be read (' + agentDefaultsFile + '): ' + ex.message); }
+                    if (installed != null) {
+                        const diff = compareAgentPins(installed, incoming);
+                        Object.assign(agents, { changes: diff.changes, more: diff.more, total: diff.total, status: (diff.changes.length + diff.more > 0) ? 'changes' : 'same' });
+                    }
+                }
+                const result = { version: release.version, node: { range: node.range, required: node.required ? node.required.join('.') : null, status: node.status, running: String(nodeVersion).substring(0, 20) }, agents: agents };
+                previewCache.set(key, { until: now() + 10 * 60 * 1000, result: result });
+                if (previewCache.size > 8) { previewCache.delete(previewCache.keys().next().value); }
+                return result;
+            } finally { await fs.promises.unlink(temp).catch(function () { }); }
+        })();
+        previewing = { key: key, promise: work };
+        try { return await work; }
+        catch (ex) { if (!ex || !ex.uiMessage) { log('Preview of release ' + release.version + ' failed: ' + redactReason(reasonOf(ex), redactPaths)); } throw ex; }
+        finally { previewing = null; }
     }
 
     return {
@@ -1058,7 +1348,7 @@ function createServerUpdater(options) {
             let marker;
             try { marker = JSON.parse(fs.readFileSync(file, 'utf8')); } catch (ex) { return corrupt; }
             if ((marker == null) || (typeof marker !== 'object') || (parseVersion(marker.version) == null) || (['invalid', 'revoked', 'mismatch', 'conflict', 'unknown-key', 'keys-invalid'].indexOf(marker.result) < 0)) { return corrupt; }
-            return { version: marker.version, result: marker.result, keyId: ((typeof marker.keyId === 'string') && /^[a-f0-9]{16}$/.test(marker.keyId)) ? marker.keyId : null, reason: String(marker.reason || ''), message: String(marker.message || '') };
+            return { version: marker.version, result: marker.result, keyId: ((typeof marker.keyId === 'string') && /^[a-f0-9]{16}$/.test(marker.keyId)) ? marker.keyId : null, reason: String(marker.reason || ''), message: String(marker.message || ''), time: Number.isFinite(marker.time) ? marker.time : null };
         },
         clearRefusal: function () { if (typeof folder === 'string') { try { fs.unlinkSync(path.join(folder, REFUSAL_FILE)); } catch (ex) { } } },
 
@@ -1079,6 +1369,8 @@ function createServerUpdater(options) {
             if (pin.size !== release.asset.size) { throw new Error('Release ' + release.tag + ' has ' + release.asset.size + ' bytes in ' + release.asset.name + ', the local pin in ' + pinsFile + ' says ' + pin.size + ' bytes; nothing was downloaded.'); }
             if (release.asset.digest == null) { throw new Error('Release ' + release.tag + ' has no sha256 digest for ' + release.asset.name + ' in the GitHub API; it will not be installed.'); }
             if (typeof folder !== 'string') { throw new Error('No download folder.'); }
+            const space = checkFreeSpace(Object.assign({ size: pin.size, downloadDir: folder, installDir: options.installDir || installDir }, spaceOptions));
+            if (!space.ok) { throw new Error(space.message); }
             await fs.promises.mkdir(folder, { recursive: true, mode: 0o700 });
             const target = path.join(folder, release.asset.name);
             const temp = path.join(folder, '.' + crypto.randomBytes(16).toString('hex') + '.tmp');
@@ -1101,6 +1393,7 @@ function createServerUpdater(options) {
                 if ((again.pin == null) || (again.pin.size !== pin.size) || (again.pin.sha384 !== pin.sha384)) { throw new Error('The pin of ' + release.version + ' does not count any more' + (again.reason || '') + '; nothing was installed.'); }
                 // Last, the package must run on this Node.js: a server that installs it on an older one does not start again
                 const needNode = requiredNodeVersion(inner);
+                if (nodeRequirement(inner, nodeVersion).status === 'unchecked') { log('WARNING: Release ' + release.version + ' has engines.node "' + nodeRequirement(inner, nodeVersion).range + '", which is not a plain lower bound like ">=22.21.1". Only a lower bound in it is checked here; the new version checks Node.js itself when it starts.'); }
                 if ((needNode != null) && !nodeVersionMeets(nodeVersion, needNode)) { throw new Error('Release ' + release.version + ' needs Node.js ' + needNode.join('.') + ' or newer, this server runs Node.js ' + String(nodeVersion).substring(0, 20) + '. Update Node.js first; nothing was installed.'); }
                 await fs.promises.chmod(temp, 0o600);
                 await fs.promises.rename(temp, target);
@@ -1140,7 +1433,48 @@ function createServerUpdater(options) {
                 fs.renameSync(temp, path.join(folder, FAILURE_FILE));
             } catch (ex) { log('Unable to save the update failure marker: ' + ex.message); }
         },
-        clearFailure: function () { try { fs.unlinkSync(path.join(folder, FAILURE_FILE)); } catch (ex) { } }
+        clearFailure: function () { try { fs.unlinkSync(path.join(folder, FAILURE_FILE)); } catch (ex) { } },
+
+        // ---- the result of an update ----
+        // The server process writes requested.json just before it exits for an update (the parent process of any version installs it; one that does not know the file
+        // simply leaves it), and the next server process turns it into a result: detectResult, then storeResult and clearRequest when the event is stored.
+        recordRequest: function (info) {
+            if ((typeof folder !== 'string') || (info == null)) { return false; }
+            try {
+                fs.mkdirSync(folder, { recursive: true, mode: 0o700 });
+                const request = { schemaVersion: 1, version: info.version, fromVersion: (info.fromVersion == null) ? null : info.fromVersion, time: now(), automatic: (info.automatic === true), trust: (info.trust === 'signature') ? 'signature' : 'pin', keyId: info.keyId || null };
+                if (parseRequest(JSON.stringify(request)) == null) { throw new Error('The request is not valid.'); }
+                writeMarker(REQUEST_FILE, request);
+                return true;
+            } catch (ex) { log('Unable to save the update request marker: ' + ex.message); return false; }
+        },
+        clearRequest: function () { if (typeof folder === 'string') { try { fs.unlinkSync(path.join(folder, REQUEST_FILE)); } catch (ex) { } } },
+        // How the update that the previous server process asked for ended, see detectUpdateResult. null when there was none. The markers are only read here.
+        detectResult: function (currentVersion) {
+            if (typeof folder !== 'string') { return null; }
+            const request = readMarker(REQUEST_FILE, parseRequest);
+            if (request == null) { return null; }
+            let failure = null, refusal = null;
+            // A small plain file like the others (no link, 4 KiB at most); anything else is no reason
+            failure = readMarker(FAILURE_FILE, function (text) { const m = JSON.parse(text); return ((m != null) && (typeof m === 'object')) ? { version: m.version, time: m.time, reason: m.reason } : null; });
+            try { const r = this.consumeRefusal(); if ((r != null) && !r.corrupt) { refusal = { version: r.version, time: r.time, message: r.message }; } } catch (ex) { }
+            return detectUpdateResult({ request: request, current: currentVersion, failure: failure, refusal: refusal, now: now(), paths: redactPaths });
+        },
+        // Keeps the result for the dialog (last-result.json). The reason is redacted again here.
+        storeResult: function (result) {
+            if ((typeof folder !== 'string') || (result == null)) { return false; }
+            try {
+                fs.mkdirSync(folder, { recursive: true, mode: 0o700 });
+                writeMarker(RESULT_FILE, { schemaVersion: 1, result: result.result, version: result.version, fromVersion: result.fromVersion, trust: result.trust, keyId: result.keyId, automatic: result.automatic === true, requestedAt: result.requestedAt, time: now(), reason: (result.result === 'failed') ? redactReason(result.reason, redactPaths) : null });
+                return true;
+            } catch (ex) { log('Unable to save the update result: ' + ex.message); return false; }
+        },
+        lastResult: lastResult,
+
+        // Is there room for a package of this size (the download folder and the folder that npm installs into). { ok, message }
+        checkSpace: function (size) { return checkFreeSpace(Object.assign({ size: size, downloadDir: folder, installDir: installDir }, spaceOptions)); },
+        previewRelease: previewRelease,
+        redact: function (text) { return redactReason(text, redactPaths); }
     };
 }
 
@@ -1209,7 +1543,7 @@ function createParentUpdate(ctx) {
         const layout = installLayout({ dirname: ctx.dirname, env: ctx.env || process.env, daemon: fsModule.existsSync(pathModule.join(ctx.dirname, 'daemon')) });
         if (!layout.allowed) { giveUp(target, layout.message); return; }
         var fileName = null;
-        updater.prepare(target, { current: getCurrentVersion(), allowDowngrade: pinned, signal: AbortSignal.timeout(15 * 60 * 1000) }).then(function (pkg) {
+        updater.prepare(target, { current: getCurrentVersion(), allowDowngrade: pinned, signal: AbortSignal.timeout(15 * 60 * 1000), installDir: ctx.parentpath }).then(function (pkg) {
             fileName = pkg.assetName;
             log('Installing MeshCentral ' + pkg.version + ' from ' + updater.settings.repository + ' (' + pkg.size + ' bytes, sha384 ' + pkg.sha384 + ' as pinned in ' + updater.pinsFile + ', sha256 ' + pkg.sha256 + ')...');
             var finished = false;
@@ -1254,5 +1588,6 @@ function loadParentUpdateModule(requireFn, fallback, log) {
 
 module.exports = {
     DEFAULT_REPOSITORY, FOLDER_NAME, PINS_FILE, KEYS_FILE, NPM_INSTALL_BLOCKED, MAX_ASSET_BYTES, MAX_SIGNED_BYTES, PARENT_API_VERSION, readPins, readPinEntries, parseVersion, compareVersions, validRepository, assetNameFor, parseDigest,
-    selectReleases, resolveSettings, trustSettingError, installLayout, updatePermission, updateStatus, sessionLoginToken, isUpdateExit, manifestAssetName, signatureAssetName, keyIdFor, decodeBase64Url, parseKeysDocument, readKeysFile, loadTrustedKeys, parseSignatureFile, verifySignatures, checkManifest, statusMessage, createParentUpdate, loadParentUpdateModule, updateNeeded, selfUpdateValid, selfUpdateIsCurrent, selfUpgradeRequest, npmCommandLine, buildLocalInstall, shellQuote, readTgzPackageJson, requiredNodeVersion, nodeVersionMeets, readTgzEntry, createServerUpdater, FAILURE_RETRY_MS
+    selectReleases, resolveSettings, trustSettingError, installLayout, updatePermission, updateStatus, sessionLoginToken, isUpdateExit, manifestAssetName, signatureAssetName, keyIdFor, decodeBase64Url, parseKeysDocument, readKeysFile, loadTrustedKeys, parseSignatureFile, verifySignatures, checkManifest, statusMessage, createParentUpdate, loadParentUpdateModule, updateNeeded, selfUpdateValid, selfUpdateIsCurrent, selfUpgradeRequest, npmCommandLine, buildLocalInstall, shellQuote, readTgzPackageJson, requiredNodeVersion, nodeVersionMeets, nodeRequirement, readTgzEntry, createServerUpdater, FAILURE_RETRY_MS,
+    REQUEST_FILE, RESULT_FILE, FAILURE_FILE, REFUSAL_FILE, LAYOUT_MESSAGES, PERMISSION_MESSAGE, MYSERVER_MESSAGE, LOGIN_TOKEN_MESSAGE, redactReason, parseRequest, detectUpdateResult, parseLastResult, checkFreeSpace, parseAgentPins, compareAgentPins, listViewOverrides
 };

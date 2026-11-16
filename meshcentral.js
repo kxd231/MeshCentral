@@ -748,6 +748,14 @@ function CreateMeshCentralServer(config, args) {
                 keysFile: obj.path.join(__dirname, serverUpdates.KEYS_FILE), // Public keys of the release owner, part of the package
                 localKeysFile: obj.path.resolve(obj.datapath, serverUpdates.KEYS_FILE), // Optional, written by hand in the data folder
                 log: function (m) { console.log(m); },
+                installDir: obj.parentpath, // where npm installs the package: the free space there is checked before the server restarts
+                // Own versions of the pages (meshcentral-web/views and the views of the domains) that an update does not replace: the version dialog warns about them
+                viewOverrides: function () {
+                    const folders = [];
+                    if (typeof obj.webViewsOverridePath === 'string') { folders.push({ label: 'meshcentral-web/views', dir: obj.webViewsOverridePath }); }
+                    for (const id in obj.config.domains) { if ((id !== '') && (typeof obj.config.domains[id].webviewspath === 'string')) { folders.push({ label: 'meshcentral-web-' + id + '/views', dir: obj.config.domains[id].webviewspath }); } }
+                    return folders;
+                },
                 onSuspicious: onSuspiciousRelease,
                 onWarning: function (m) { obj.addServerWarning(plainText(m), true); }
             });
@@ -854,6 +862,23 @@ function CreateMeshCentralServer(config, args) {
         obj.addServerWarning(plainText(what) + ' was refused: ' + plainText(info.message), true);
     }
 
+    // The result of the update that ended with the restart that started this process (requested.json, see serverupdates.js detectUpdateResult). The event is stored, then the marker of the
+    // request is removed when the event is stored, at the latest after 60 seconds (a restart within that time reports the result again). A database that does not answer
+    // loses only the event: the log, the server warning and last-result.json (the dialog) keep the result.
+    function reportServerUpdateResult() {
+        const updater = obj.getServerUpdater();
+        const result = updater.detectResult(getCurrentVersion());
+        if (result == null) { updater.clearRequest(); return; } // nothing was requested, or the request is too old to be the update that just ended
+        updater.storeResult(result);
+        const ok = (result.result === 'ok');
+        const msg = ok ? ('Server update to ' + result.version + ' succeeded' + ((result.fromVersion != null) ? (' (from ' + result.fromVersion + ')') : '')) : ('Server update to ' + result.version + ' failed: ' + result.reason);
+        console.log(ok ? (msg + '.') : ('WARNING: ' + msg));
+        const clear = function () { updater.clearRequest(); };
+        const timer = setTimeout(clear, 60000); if (timer.unref) { timer.unref(); }
+        obj.DispatchEvent(['*'], obj, { etype: 'server', action: 'serverupdateresult', domain: '', version: result.version, fromVersion: result.fromVersion, result: result.result, reason: ok ? null : result.reason, trust: result.trust, keyId: result.keyId, automatic: result.automatic, msg: msg }, undefined, function (err) { if (err == null) { clear(); } });
+        if (!ok) { obj.addServerWarning(plainText(msg), true, undefined, false); }
+    }
+
     // An update was requested, by an administrator (who = { userid, username }) or by the automatic update (who = null). trusted is the
     // result of ensureTrusted (or the origin of an existing pin). No secrets: the key identifier only. onStored: called when the event is in the database.
     function dispatchServerUpdateRequest(trusted, who, onStored) {
@@ -878,6 +903,11 @@ function CreateMeshCentralServer(config, args) {
         options = options || {};
         const serverUpdates = require('./serverupdates.js');
         if ((trusted == null) || (typeof trusted.version !== 'string') || (serverUpdates.parseVersion(trusted.version) == null) || (serverUpdates.parseVersion(trusted.version).text !== trusted.version) || ((trusted.source !== 'signature') && (trusted.source !== 'pin'))) { throw new Error('startVerifiedUpdate needs a verified release.'); }
+        // Room for the package and its installation, checked before anything is written or the server exits: a full disk makes the update fail after the restart
+        if ((typeof trusted.size === 'number') && (trusted.size > 0)) {
+            const space = obj.getServerUpdater().checkSpace(trusted.size);
+            if (!space.ok) { console.log('ERROR: The update to ' + trusted.version + ' was not started. ' + space.message); const error = new Error(space.message); error.code = 'disk-space'; error.uiMessage = space.message; throw error; }
+        }
         let timedOut = false;
         const stored = await new Promise(function (resolve) {
             const timer = setTimeout(function () { timedOut = true; resolve(new Error('The event was not stored in time.')); }, 5000);
@@ -896,7 +926,14 @@ function CreateMeshCentralServer(config, args) {
             const error = new Error(message); error.code = 'audit'; error.uiMessage = message;
             throw error;
         }
-        const perform = function () { return obj.performServerUpdate((options.announce === false) ? undefined : trusted.version) !== false; };
+        // The next server process finds out from this marker whether the update worked (a missing marker only means that no result is reported)
+        const perform = function () {
+            const updater = obj.getServerUpdater();
+            updater.recordRequest({ version: trusted.version, fromVersion: getCurrentVersion(), automatic: (who == null), trust: (trusted.source === 'signature') ? 'signature' : 'pin', keyId: trusted.keyId || null });
+            const started = (obj.performServerUpdate((options.announce === false) ? undefined : trusted.version) !== false);
+            if (!started) { updater.clearRequest(); }
+            return started;
+        };
         if (options.delayMs > 0) {
             setTimeout(function () { if (!perform()) { obj.serverUpdateInFlight = false; console.log('Server update to ' + trusted.version + ' was not started.'); } }, options.delayMs);
             return true;
@@ -1652,7 +1689,7 @@ function CreateMeshCentralServer(config, args) {
                     var known = null;
                     if (updateSource === 'github') { try { known = updater.pinLookup(require('./serverupdates.js').parseVersion(wantedVersion).text); } catch (ex) { known = null; } }
                     if ((updateSource === 'github') && (known != null) && (known.pin != null)) {
-                        startVerifiedUpdate({ version: known.pin.version, source: (known.origin === 'signature') ? 'signature' : 'pin', keyId: known.keyId }, null, { announce: false }).then(function (started) { if (!started) { sayWhy({ uiMessage: 'the server update could not be started.' }); } }, sayWhy);
+                        startVerifiedUpdate({ version: known.pin.version, size: known.pin.size, source: (known.origin === 'signature') ? 'signature' : 'pin', keyId: known.keyId }, null, { announce: false }).then(function (started) { if (!started) { sayWhy({ uiMessage: 'the server update could not be started.' }); } }, sayWhy);
                     } else if (updateSource === 'github') {
                         updater.ensureTrusted(wantedVersion, { current: getCurrentVersion(), allowOlder: true }).then(function (trusted) { return startVerifiedUpdate(trusted, null, { announce: false }).then(function (started) { if (!started) { sayWhy({ uiMessage: 'the server update could not be started.' }); } }); }).catch(sayWhy);
                     } else if (obj.performServerUpdate() !== false) { return; }
@@ -2283,6 +2320,8 @@ function CreateMeshCentralServer(config, args) {
 
                     // Dispatch an event that the server is now running
                     obj.DispatchEvent(['*'], obj, { etype: 'server', action: 'started', msg: 'Server started' });
+                    // How the update that this server was started by ended: the event serverupdateresult and, when it failed, a server warning
+                    try { reportServerUpdateResult(); } catch (ex) { console.log('ERROR: Unable to report the result of the server update: ' + ex.message); }
                     // A release that the parent process refused (its key was revoked while it downloaded): the parent has no database, so the event is made here
                     try { const refusal = obj.getServerUpdater().consumeRefusal(); if (refusal != null) { onSuspiciousRelease(refusal, function (err) { if (err == null) { obj.getServerUpdater().clearRefusal(); } }); } } catch (ex) { }
 

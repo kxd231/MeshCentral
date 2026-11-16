@@ -6196,6 +6196,7 @@ module.exports.CreateMeshUser = function (parent, db, ws, req, args, domain, use
         'servertimelinestats': serverCommandServerTimelineStats,
         'serverupdate': serverCommandServerUpdate,
         'serverupdateinfo': serverCommandServerUpdateInfo,
+        'serverupdatepreview': serverCommandServerUpdatePreview,
         'serverversion': serverCommandServerVersion,
         'setClip': serverCommandSetClip,
         'smsuser': serverCommandSmsUser,
@@ -7631,8 +7632,31 @@ module.exports.CreateMeshUser = function (parent, db, ws, req, args, domain, use
         if (Date.now() - lastUpdateInfo < 5000) { obj.send({ action: 'serverupdateinfo', responseid: command.responseid, update: serverUpdateStatus(), info: null, message: 'Try again in a few seconds.' }); return; }
         lastUpdateInfo = Date.now();
         parent.parent.getServerUpdater().releaseInfo(parent.parent.currentVer).then(
-            function (info) { obj.send({ action: 'serverupdateinfo', responseid: command.responseid, current: parent.parent.currentVer, update: serverUpdateStatus(), info: info }); },
+            function (info) {
+                // The last update and the own pages of the server are for those who may start an update; the answer is shared by all callers, so a copy is changed
+                if (!serverUpdatePermission().allowed) { info = Object.assign({}, info, { lastUpdate: null, customViews: [] }); }
+                obj.send({ action: 'serverupdateinfo', responseid: command.responseid, current: parent.parent.currentVer, update: serverUpdateStatus(), info: info });
+            },
             function (ex) { obj.send({ action: 'serverupdateinfo', responseid: command.responseid, current: parent.parent.currentVer, update: serverUpdateStatus(), info: null, message: 'Unable to check the releases.' }); }
+        );
+    }
+
+    // What an update to a release would change (the agents it pins, the Node.js it needs), for the version dialog. Only for who may start the update: the server downloads the
+    // package for it. The package is read after it matched the pin or the signed manifest. At most one request in 10 seconds per connection.
+    var lastUpdatePreview = 0;
+    function serverCommandServerUpdatePreview(command) {
+        const reply = r => { try { obj.send(Object.assign({ action: 'serverupdatepreview', responseid: command.responseid, version: (typeof command.version === 'string') ? command.version.substring(0, 40) : null }, r)); } catch (ex) { } };
+        const perm = serverUpdatePermission();
+        if (!perm.allowed) { reply({ preview: null, code: perm.reason, message: perm.message }); return; }
+        const avail = parent.parent.getServerUpdateAvailability();
+        if (!avail.allowed) { reply({ preview: null, code: avail.reason, message: avail.message }); return; }
+        const serverUpdates = require('./serverupdates.js');
+        if ((typeof command.version !== 'string') || (serverUpdates.parseVersion(command.version) == null) || (serverUpdates.parseVersion(command.version).text !== command.version)) { reply({ preview: null, code: 'version', message: 'Invalid version.' }); return; }
+        if (Date.now() - lastUpdatePreview < 10000) { reply({ preview: null, code: 'busy', message: 'Try again in a few seconds.' }); return; }
+        lastUpdatePreview = Date.now();
+        parent.parent.getServerUpdater().previewRelease(command.version).then(
+            function (preview) { reply({ preview: preview }); },
+            function (e) { reply({ preview: null, code: (e && e.code) || 'error', message: (e && e.uiMessage) || 'Unable to read the release.' }); }
         );
     }
 
