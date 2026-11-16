@@ -57,6 +57,7 @@ account and no GitHub token are needed.
    The automatic update (`selfUpdate`) does not try the same version again for 24 hours;
    an administrator who starts the update by hand (button, `serverupdate`) always gets a
    new attempt. A pinned `selfUpdate` version is retried at the first server start after the 24 hours. A successful update removes the marker.
+   The files of the result (`requested.json`, `last-result.json`, `last-refusal.json`) are described in [What the update did](#what-the-update-did-and-what-it-will-change).
 6. After a successful install the server restarts and older downloaded packages are
    deleted. The installed package stays in `meshcentral-data/serverupdates/`: npm records
    it in `package.json` as a `file:` dependency and needs it for later `npm install` runs.
@@ -194,6 +195,45 @@ and the server turns it into the event `serverupdateverify` when it starts. A ne
 **Pins written by hand always work** (a signature is not needed) and they win over a missing or wrong
 signature, which is then reported. They lose only against a valid but different signed manifest: that is
 a `conflict`, nothing is installed, and you decide which one is right.
+
+### What the update did, and what it will change
+
+**The result.** Just before the server exits for an update it writes `meshcentral-data/serverupdates/requested.json` (version, the version it came from,
+time, automatic or not, how the release was trusted, key id; no checksum). The first start afterwards compares it with the version that runs: the running version is the
+requested one, the result is `ok`; otherwise it is `failed`. The reason of a failure is, in this order: the failure marker `last-failure.json` of that version if it is
+newer than the request, the refusal marker `last-refusal.json` (a release that the parent process refused because of its signature), or the statement that the
+server is still on the old version and no reason was recorded (the log of the server has it). This works with any parent process that installed the package, including the
+one of 1.3.1-custom.2, because the parent only needs to leave the failure marker that it always left. A request older than 7 days is
+dropped. Only a server that already has this feature writes `requested.json`, so the update **into** the first version with it reports nothing (no event, no "Last update"); the next update does. The server then
+
+- writes the event `serverupdateresult` (`server` type: `version`, `fromVersion`, `result` `ok` or `failed`, `reason` for a failure, `trust`, `keyId`, `automatic`) and removes
+  `requested.json` when the event is stored (at the latest after 60 seconds, whatever the database says; a restart within that time reports the result again, and a database that does not answer loses only the event, the log, the warning and `last-result.json` keep the result);
+- shows a failure as a server warning;
+- keeps `serverupdates/last-result.json`, which the version dialog shows as **Last update**.
+
+Every reason is shortened to 300 characters, and checksums and long encoded strings are replaced by `...` and the installation folders by labels
+(`<serverupdate-pins.json>`, `<data folder>`) before they reach the events, the warning or the dialog. The files are read as small plain files (4 KiB at most, no links; `last-failure.json` too) and the
+dialog, which shows them only to a full administrator of the default domain, escapes every text.
+
+**Checks before the server restarts.**
+
+- *Free disk space.* The package needs its size plus 64 MiB in `meshcentral-data/serverupdates`, and `npm install` roughly 4 times the size plus 128 MiB in the folder that holds
+  `node_modules` (the two numbers are added when both folders are on one disk). These are rough, generous numbers. The server looks before it writes the audit event and exits, so
+  the button, the console and the nightly update refuse with the reason; the parent process looks again before it downloads. A disk whose free space cannot be read is not a reason to refuse.
+- *Node.js.* The package says in `engines.node` which Node.js it needs. A plain lower bound (`>=22.21.1`) is compared with the Node.js that runs the server and the update is
+  refused when it is too old (after the download, before anything is installed: the server restarts on the old version and the result says why). Any other form of range
+  (`^22 || >=24`, `22.x`, or an upper bound after the lower one such as `>=22.21.1 <26`) is not checked beyond a lower bound: the parent logs a warning, the preview in the dialog says so, and the new version checks Node.js itself when it starts. The
+  Node.js itself can only be updated on the host.
+
+**In the version dialog** (full administrators only). Next to each release that can be installed (and only for a user who may start the update), **Show changes for the agents** asks the server to download the package, check it
+against the pin by hand or the signed manifest (size and SHA-384, and the SHA-256 that GitHub reports) and only then read two files from it: `package/package.json`
+(Node.js requirement) and `package/agents/agent-defaults.json`. It compares the agent files that the release pins with the ones of the running server and lists the agents that change,
+for example `Windows x86-64 service: dxgi-2 -> dxgi-3`, with `Agents update when they connect.` Nothing is installed and no pin is written; the package is deleted. At most one release is
+checked at a time, the answer is kept for 10 minutes, the list may have 1 MiB at most, and a connection can ask once in 10 seconds. A server with a different list in `agentDownloads.manifest`
+is compared by the list in its package, not by the one of the setting.
+
+The dialog also warns when the server has **its own web pages**: a file in `meshcentral-web/views` (or in the views folder of a domain) with the name of a page of the package
+is not replaced by an update and may not fit the new version. Only the file names are shown. Look at them after the update.
 
 ### Rotating and losing keys
 
