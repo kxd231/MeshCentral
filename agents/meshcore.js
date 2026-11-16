@@ -2010,7 +2010,11 @@ function handleServerCommand(data) {
                     try {
                         var wu = require('win-updates');
                         var wuOnline = (data.online === true);
-                        wu.getAvailableUpdates({ online: wuOnline }).then(function (u) { sendWuList({ updates: u, online: wuOnline, installing: wu.isInstallInProgress() }); }, function (e) { sendWuList({ error: e.toString(), online: wuOnline }); });
+                        // One search at a time and none during an installation: each one holds callback slots of the agent, and there are few of them
+                        if (wu.isInstallInProgress()) { sendWuList({ error: "A Windows Update installation is in progress on this device, check again when it ends", online: wuOnline, installing: true }); return; }
+                        if ((typeof wu._listBusyAt == 'number') && ((Date.now() - wu._listBusyAt) < 1800000)) { sendWuList({ error: "A Windows Update check is already running on this device", online: wuOnline }); return; }
+                        wu._listBusyAt = Date.now(); // A search that never answers stops counting after 30 minutes
+                        wu.getAvailableUpdates({ online: wuOnline }).then(function (u) { wu._listBusyAt = null; sendWuList({ updates: u, online: wuOnline, installing: wu.isInstallInProgress() }); }, function (e) { wu._listBusyAt = null; sendWuList({ error: e.toString(), online: wuOnline }); });
                     } catch (e) { sendWuList({ error: e.toString() }); }
                 } else if (data.type == 'installwinupdates') {
                     // Download and install the selected Windows Updates using the Windows Update Agent COM API (no external process)
@@ -2022,6 +2026,8 @@ function handleServerCommand(data) {
                     try {
                         var wui = require('win-updates');
                         if (wui.isInstallInProgress()) { sendWuInstall({ error: "An update installation is already in progress" }); return; }
+                        // A check that is still running holds callback slots the installation needs
+                        if ((typeof wui._listBusyAt == 'number') && ((Date.now() - wui._listBusyAt) < 1800000)) { sendWuInstall({ error: "A Windows Update check is running on this device, start the installation when it ends" }); return; }
                         wui.installUpdates(ids).then(function (r) { r.done = true; sendWuInstall(r); }, function (e) { sendWuInstall({ done: true, error: e.toString() }); });
                         sendWuInstall({ status: 'started', count: ids.length });
                     } catch (e) { sendWuInstall({ error: e.toString() }); }

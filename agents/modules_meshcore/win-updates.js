@@ -252,7 +252,16 @@ function makeSearchCallback(GM, COM, p, searcher) {
                     catch (e) { this.p._rej(e); }
                 }
                 var self = this;
-                setImmediate(function () { if (--self.refcount === 0) { cleanup(self); } });
+                whenCallbacksQuiet([self], function (quiet) {
+                    // Give back what this search holds. WUA keeps the callback (and its callback slots of the agent) as long as the job lives,
+                    // so the job is released here, once WUA is done with this call (see whenCallbacksQuiet).
+                    if (quiet) {
+                        try { var job = self.jobPtr.Deref(); job.funcs = COM.marshalFunctions(job, SearchJobFunctions); job.funcs.Release(job); } catch (e) { }
+                        releaseCOM(self.searcher);
+                        releaseCOM(self.session);
+                    }
+                    if (--self.refcount === 0) { cleanup(self); }
+                });
                 return GM.CreateVariable(4).increment(0, true);
             }
         }
@@ -294,6 +303,8 @@ function getAvailableUpdates(options) {
         var searchJobPtr = GM.CreatePointer();
         var stateV = GM.CreateVariable(16); // VT_EMPTY VARIANT
         var callback = makeSearchCallback(GM, COM, ret, searcher);
+        callback.session = session;
+        callback.jobPtr = searchJobPtr;
 
         hr = searcher.funcs.BeginSearch(searcher, criteriaBSTR, callback, stateV, searchJobPtr).Val;
         OleAut32.SysFreeString(criteriaBSTR);
@@ -304,6 +315,7 @@ function getAvailableUpdates(options) {
             releaseCOM(session);
             throw new Error('BeginSearch failed: 0x' + (hr >>> 0).toString(16));
         }
+        callback.baseRef = callback.refcount;
 
     } catch (ex) {
         ret._rej(ex);
@@ -333,6 +345,8 @@ function getInstalledUpdates() {
         var searchJobPtr = GM.CreatePointer();
         var stateV = GM.CreateVariable(16);
         var callback = makeSearchCallback(GM, COM, ret, searcher);
+        callback.session = session;
+        callback.jobPtr = searchJobPtr;
 
         hr = searcher.funcs.BeginSearch(searcher, criteriaBSTR, callback, stateV, searchJobPtr).Val;
         OleAut32.SysFreeString(criteriaBSTR);
@@ -343,6 +357,7 @@ function getInstalledUpdates() {
             releaseCOM(session);
             throw new Error('BeginSearch failed: 0x' + (hr >>> 0).toString(16));
         }
+        callback.baseRef = callback.refcount;
 
     } catch (ex) {
         ret._rej(ex);
@@ -508,6 +523,14 @@ var UpdateJobFunctions = [
     'get_AsyncState', 'get_IsCompleted', 'get_Updates', 'CleanUp', 'GetProgress', 'RequestAbort'
 ];
 
+// ISearchJob is shorter: it has no get_Updates and no GetProgress, so CleanUp and RequestAbort sit at other places.
+// A search job must never be called through UpdateJobFunctions, its RequestAbort would be past the end of the table.
+var SearchJobFunctions = [
+    'QueryInterface', 'AddRef', 'Release',
+    'GetTypeInfoCount', 'GetTypeInfo', 'GetIDsOfNames', 'Invoke',
+    'get_AsyncState', 'get_IsCompleted', 'CleanUp', 'RequestAbort'
+];
+
 var DownloadResultFunctions = [
     'QueryInterface', 'AddRef', 'Release',
     'GetTypeInfoCount', 'GetTypeInfo', 'GetIDsOfNames', 'Invoke',
@@ -588,6 +611,21 @@ function releaseCallback(h) {
     if (--h.refcount <= 0) { cleanup(h); }
 }
 
+// Runs func(quiet) once WUA has given back the references it took on these callback objects for a call (refcount back to baseRef,
+// the count right after Begin* returned). Every call WUA makes on a callback, Release included, is answered on the thread of the agent.
+// Releasing a job while its worker thread still waits for such an answer stops both threads for good, so nothing of WUA is released
+// before the callbacks are quiet. After 5 seconds func(false) is called: the caller then releases nothing (a leak until the agent
+// restarts is better than an agent that stops).
+function whenCallbacksQuiet(handlers, func) {
+    var tries = 0;
+    function check() {
+        var quiet = true;
+        for (var i = 0; i < handlers.length; i++) { var h = handlers[i]; if ((h != null) && (typeof h.baseRef == 'number') && (h.refcount > h.baseRef)) { quiet = false; } }
+        if (quiet) { func(true); } else if (++tries >= 100) { func(false); } else { setTimeout(check, 50); }
+    }
+    setTimeout(check, 50);
+}
+
 function readInt32(v) { try { return v.toBuffer().readInt32LE(); } catch (e) { return -1; } }
 
 // installUpdates(updateIds) - updateIds is an array of WUA UpdateID GUID strings, as returned by getAvailableUpdates().
@@ -605,10 +643,10 @@ function installUpdates(updateIds) {
     var state = { session: null, searcher: null, coll: null, downloader: null, installer: null, job: null, callbacks: [], entries: [], done: false, timer: null };
     installInProgress = state;
 
-    function releaseJob(abort) {
+    // Releases the current job, which makes WUA let go of its callbacks. Only called when the callbacks are quiet (whenCallbacksQuiet).
+    // CleanUp is not used: it waits for the worker thread of WUA.
+    function releaseJob() {
         if (state.job == null) return;
-        if (abort === true) { try { state.job.funcs.RequestAbort(state.job); } catch (e) { } }
-        try { state.job.funcs.CleanUp(state.job); } catch (e) { }
         releaseCOM(state.job);
         state.job = null;
     }
@@ -618,28 +656,34 @@ function installUpdates(updateIds) {
         state.done = true;
         if (state.timer != null) { clearTimeout(state.timer); state.timer = null; }
         // Let the current WUA callback return before tearing things down
-        setImmediate(function () {
-            releaseJob(err != null);
-            for (var i = 0; i < state.callbacks.length; i++) { releaseCallback(state.callbacks[i]); }
-            state.callbacks = [];
-            releaseCOM(state.installer);
-            releaseCOM(state.downloader);
-            releaseCOM(state.coll);
-            releaseCOM(state.searcher);
-            releaseCOM(state.session);
+        if ((err != null) && (state.job != null)) { try { state.job.funcs.RequestAbort(state.job); } catch (e) { } } // Ask WUA to stop what is running
+        var held = state.callbacks;
+        state.callbacks = [];
+        whenCallbacksQuiet(held, function (quiet) {
+            if (quiet) {
+                releaseJob();
+                releaseCOM(state.installer);
+                releaseCOM(state.downloader);
+                releaseCOM(state.coll);
+                releaseCOM(state.searcher);
+                releaseCOM(state.session);
+            }
+            state.job = null;
+            for (var i = 0; i < held.length; i++) { releaseCallback(held[i]); }
             installInProgress = null;
             if (err) { ret._rej(err); } else { ret._res(result); }
         });
     }
 
-    function wrapJob(jobPtr) {
+    function wrapJob(jobPtr, functions) {
         var job = jobPtr.Deref();
-        job.funcs = COM.marshalFunctions(job, UpdateJobFunctions);
+        job.funcs = COM.marshalFunctions(job, functions);
         return job;
     }
 
     // Step 3: install the downloaded updates
     function startInstall() {
+        if (state.done) return;
         try {
             var installerPtr = GM.CreatePointer();
             var hr = state.session.funcs.CreateUpdateInstaller(state.session, installerPtr).Val;
@@ -683,12 +727,14 @@ function installUpdates(updateIds) {
             var jobPtr = GM.CreatePointer();
             hr = state.installer.funcs.BeginInstall(state.installer, progress, completed, GM.CreateVariable(16), jobPtr).Val;
             if (hr !== 0) { finish(new Error('BeginInstall failed: ' + hrHex(hr))); return; }
-            state.job = wrapJob(jobPtr);
+            state.job = wrapJob(jobPtr, UpdateJobFunctions);
+            progress.baseRef = progress.refcount; completed.baseRef = completed.refcount;
         } catch (ex) { finish(ex); }
     }
 
     // Step 2: download the selected updates
     function startDownload() {
+        if (state.done) return;
         try {
             var downloaderPtr = GM.CreatePointer();
             var hr = state.session.funcs.CreateUpdateDownloader(state.session, downloaderPtr).Val;
@@ -723,7 +769,7 @@ function installUpdates(updateIds) {
                 }
                 releaseCOM(r);
                 if ((rc !== 2) && (rc !== 3)) { finish(null, { resultCode: rc, result: 'Download' + orcName(rc), rebootRequired: false, updates: state.entries }); return; }
-                setImmediate(startInstall);
+                whenCallbacksQuiet(state.callbacks, function (quiet) { if (!quiet) { state.job = null; } startInstall(); });
             });
             state.callbacks.push(progress, completed);
 
@@ -731,7 +777,8 @@ function installUpdates(updateIds) {
             var jobPtr = GM.CreatePointer();
             hr = state.downloader.funcs.BeginDownload(state.downloader, progress, completed, GM.CreateVariable(16), jobPtr).Val;
             if (hr !== 0) { finish(new Error('BeginDownload failed: ' + hrHex(hr))); return; }
-            state.job = wrapJob(jobPtr);
+            state.job = wrapJob(jobPtr, UpdateJobFunctions);
+            progress.baseRef = progress.refcount; completed.baseRef = completed.refcount;
         } catch (ex) { finish(ex); }
     }
 
@@ -802,7 +849,7 @@ function installUpdates(updateIds) {
             releaseCOM(sr);
             for (var w in wanted) { if (found[w] == null) { state.entries.push({ updateID: w, title: '', status: 'NotFound' }); } }
             if (queued == 0) { finish(null, { resultCode: -1, result: 'NothingToInstall', rebootRequired: false, updates: state.entries }); return; }
-            setImmediate(startDownload);
+            whenCallbacksQuiet(state.callbacks, function (quiet) { if (!quiet) { state.job = null; } startDownload(); });
         });
         state.callbacks.push(searchDone);
 
@@ -811,7 +858,8 @@ function installUpdates(updateIds) {
         hr = state.searcher.funcs.BeginSearch(state.searcher, criteriaBSTR, searchDone, GM.CreateVariable(16), jobPtr).Val;
         OleAut32.SysFreeString(criteriaBSTR);
         if (hr !== 0) { throw new Error('BeginSearch failed: ' + hrHex(hr)); }
-        state.job = wrapJob(jobPtr);
+        state.job = wrapJob(jobPtr, SearchJobFunctions);
+        searchDone.baseRef = searchDone.refcount;
     } catch (ex) {
         finish(ex);
     }
