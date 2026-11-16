@@ -433,6 +433,24 @@ function readTgzPackageJson(file, limit) {
     });
 }
 
+// The lowest Node.js version a package asks for in engines.node, as [major, minor, patch], or null. Only a plain lower bound is read
+// (">=22.21.1", also followed by further terms such as "<26"). A missing field or any other form of range is not checked here: the new
+// version still checks Node.js itself when it starts.
+function requiredNodeVersion(pkg) {
+    const range = (pkg != null) && (pkg.engines != null) && (typeof pkg.engines === 'object') ? pkg.engines.node : null;
+    if ((typeof range !== 'string') || (range.length > 64) || (range.indexOf('||') >= 0)) { return null; }
+    const m = /^\s*>=\s*v?(\d{1,4})(?:\.(\d{1,4}))?(?:\.(\d{1,4}))?(?=\s|$)/.exec(range);
+    return (m == null) ? null : [Number(m[1]), Number(m[2] || 0), Number(m[3] || 0)];
+}
+// true when the Node.js version text (process.versions.node, "22.12.0") is at least the [major, minor, patch] a package asks for.
+// The parts are read the way the start check of the server reads them (common.versionAtLeast): a part that is not a plain number counts
+// as 0, so "22.21.1-pre" is below 22.21.1 here as it is there, and a text that cannot be read is 0.0.0.
+function nodeVersionMeets(running, required) {
+    const have = String(running).replace(/^v/, '').split('.').map(Number);
+    for (let i = 0; i < 3; i++) { const x = have[i] || 0; if (x !== required[i]) { return x > required[i]; } }
+    return true;
+}
+
 // ---- signed releases: keys, signature file, manifest ----
 // An error with a code and a text for the user. The text never holds a checksum.
 function updateError(code, uiMessage, detail) {
@@ -628,6 +646,7 @@ function createServerUpdater(options) {
     const now = options.now || Date.now;
     const folder = options.folder; // absolute path of the download folder
     const pinsFile = options.pinsFile; // absolute path of serverupdate-pins.json
+    const nodeVersion = (typeof options.nodeVersion === 'string') ? options.nodeVersion : process.versions.node; // the Node.js that will run the installed package
     const proxy = (options.args && (typeof options.args.npmproxy === 'string')) ? options.args.npmproxy : undefined;
     const client = options.client || httpsDownloads.createClient(undefined, undefined, proxy, 'MeshCentral-ServerUpdate');
     const loggedErrors = new Map();
@@ -1080,6 +1099,9 @@ function createServerUpdater(options) {
                 const again = pinLookup(release.version);
                 if ((again.pin != null) && ((again.pin.size !== pin.size) || (again.pin.sha384 !== pin.sha384))) { try { onSuspicious({ version: release.version, result: 'conflict', keyId: null, reason: 'pin changed during the download', message: statusMessage('conflict') }); } catch (ex) { } }
                 if ((again.pin == null) || (again.pin.size !== pin.size) || (again.pin.sha384 !== pin.sha384)) { throw new Error('The pin of ' + release.version + ' does not count any more' + (again.reason || '') + '; nothing was installed.'); }
+                // Last, the package must run on this Node.js: a server that installs it on an older one does not start again
+                const needNode = requiredNodeVersion(inner);
+                if ((needNode != null) && !nodeVersionMeets(nodeVersion, needNode)) { throw new Error('Release ' + release.version + ' needs Node.js ' + needNode.join('.') + ' or newer, this server runs Node.js ' + String(nodeVersion).substring(0, 20) + '. Update Node.js first; nothing was installed.'); }
                 await fs.promises.chmod(temp, 0o600);
                 await fs.promises.rename(temp, target);
             } finally { await fs.promises.unlink(temp).catch(function () { }); }
@@ -1232,5 +1254,5 @@ function loadParentUpdateModule(requireFn, fallback, log) {
 
 module.exports = {
     DEFAULT_REPOSITORY, FOLDER_NAME, PINS_FILE, KEYS_FILE, NPM_INSTALL_BLOCKED, MAX_ASSET_BYTES, MAX_SIGNED_BYTES, PARENT_API_VERSION, readPins, readPinEntries, parseVersion, compareVersions, validRepository, assetNameFor, parseDigest,
-    selectReleases, resolveSettings, trustSettingError, installLayout, updatePermission, updateStatus, sessionLoginToken, isUpdateExit, manifestAssetName, signatureAssetName, keyIdFor, decodeBase64Url, parseKeysDocument, readKeysFile, loadTrustedKeys, parseSignatureFile, verifySignatures, checkManifest, statusMessage, createParentUpdate, loadParentUpdateModule, updateNeeded, selfUpdateValid, selfUpdateIsCurrent, selfUpgradeRequest, npmCommandLine, buildLocalInstall, shellQuote, readTgzPackageJson, readTgzEntry, createServerUpdater, FAILURE_RETRY_MS
+    selectReleases, resolveSettings, trustSettingError, installLayout, updatePermission, updateStatus, sessionLoginToken, isUpdateExit, manifestAssetName, signatureAssetName, keyIdFor, decodeBase64Url, parseKeysDocument, readKeysFile, loadTrustedKeys, parseSignatureFile, verifySignatures, checkManifest, statusMessage, createParentUpdate, loadParentUpdateModule, updateNeeded, selfUpdateValid, selfUpdateIsCurrent, selfUpgradeRequest, npmCommandLine, buildLocalInstall, shellQuote, readTgzPackageJson, requiredNodeVersion, nodeVersionMeets, readTgzEntry, createServerUpdater, FAILURE_RETRY_MS
 };
