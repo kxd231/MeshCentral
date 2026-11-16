@@ -4088,7 +4088,7 @@
                     break;
                 }
                 case 'serverupdate': {
-                    if (message.result == 'error') { messagebox("MeshCentral Version", EscapeHtml(message.message)); }
+                    if (message.result == 'error') { messagebox("MeshCentral Version", EscapeHtml(server_updateReasonText({ reason: message.code, message: message.message }))); }
                     else if (message.result == 'ok') { messagebox("MeshCentral Version", "Release " + EscapeHtml(message.version) + " verified. The server restarts to install it."); }
                     break;
                 }
@@ -4108,8 +4108,8 @@
                         x += '<hr />';
                         x += addHtmlValue2('<label><input id=d2updateCheck1 type=checkbox class="form-check-input me-2" onclick=server_showVersionDlgUpdate()' + (((message.tags.stable == "Unknown") || (message.tags.current == message.tags.stable) || ((features & 2048) == 0) || updateBlocked) ? ' disabled' : '') + ' /> ' + "Stable Version" + '</label>', '<b>' + EscapeHtml(message.tags.stable) + '</b>');
                         x += addHtmlValue2('<label><input id=d2updateCheck2 type=checkbox class="form-check-input me-2" onclick=server_showVersionDlgUpdate()' + (((message.tags.latest == "Unknown") || (message.tags.current == message.tags.latest) || ((features & 2048) == 0) || updateBlocked) ? ' disabled' : '') + ' /> ' + "Latest Version" + '</label>', '<b>' + EscapeHtml(message.tags.latest) + '</b>');
-                        if (updateBlocked) { x += '<div class=dialogText>' + EscapeHtml(message.update.message) + '</div>'; }
-                        x += '<div id=d2updateInfo>Checking the release signature...</div>';
+                        if (updateBlocked) { x += '<div>' + EscapeHtml(server_updateReasonText(message.update)) + '</div>'; }
+                        x += '<div id=d2updateInfo>' + "Checking the release signature..." + '</div>';
                         x += '</div>';
                         if (((message.tags.current == message.tags.latest) && (message.tags.current == message.tags.stable)) || ((features & 2048) == 0) || updateBlocked) {
                             setModalContent('xxAddAgent', "MeshCentral Version", x);
@@ -4130,6 +4130,10 @@
                 case 'serverupdateinfo': {
                     serverUpdateInfo = message;
                     server_fillUpdateInfo();
+                    break;
+                }
+                case 'serverupdatepreview': {
+                    server_fillPreview(message);
                     break;
                 }
                 case 'servererrors': {
@@ -18313,28 +18317,90 @@
         // The signature status of the newest releases (answer of serverupdateinfo) in the version dialog. A release can be selected only when the
         // server says that it is signed (or pinned by hand), newer than this server, and this user may start the update.
         var serverUpdateInfo = null, serverUpdateInstallable = null, serverUpdateAllowed = false, serverUpdateChannel = {};
+        // The texts that the server gives for a reason that stops an update (update.reason, or the code of a refused serverupdate). They are the same texts as in serverupdates.js, written
+        // here in double quotes so that the translation of the page finds them; a reason that is not in the list shows the text of the server.
+        var serverUpdateReasons = {
+            'windows-service': "MeshCentral runs as a Windows service and cannot update itself. Update it by hand.",
+            'container': "MeshCentral runs in a container. Update the container image to install a new version.",
+            'not-package': "MeshCentral is not installed as node_modules/meshcentral, so it cannot update itself. Update it by hand (see docs/fork-updates.md).",
+            'not-writable': "The server cannot write to its data folder, so it cannot update itself.",
+            'login-token': "Sign in with your password, not a login token, to start a server update.",
+            'not-full-admin': "Only a full administrator of the default domain can start a server update.",
+            'not-default-domain': "Only a full administrator of the default domain can start a server update.",
+            'myserver': "Server updates are turned off for your account (My Server rights)."
+        };
+        function server_updateReasonText(update) {
+            if ((update == null) || (typeof update != 'object')) { return ''; }
+            if ((typeof update.reason == 'string') && Object.prototype.hasOwnProperty.call(serverUpdateReasons, update.reason)) { return serverUpdateReasons[update.reason]; }
+            return (typeof update.message == 'string') ? update.message : '';
+        }
         function server_updateInstallable(version) { return (serverUpdateAllowed && (serverUpdateInstallable != null) && (serverUpdateInstallable[version] === true)); }
         function server_fillUpdateInfo() {
             if ((serverUpdateInfo == null) || (Q('d2updateInfo') == null)) { return; }
             var x = '', info = serverUpdateInfo.info;
-            if (info == null) { x = EscapeHtml(serverUpdateInfo.message || 'Unable to check the releases.'); }
+            if (info == null) { x = EscapeHtml(serverUpdateInfo.message || "Unable to check the releases."); }
             else {
                 serverUpdateInstallable = {};
+                // The update that this server went through last (the server writes it when it starts again after an update)
+                if (info.lastUpdate) {
+                    var lu = info.lastUpdate;
+                    x += '<div><b>' + "Last update" + ':</b> ' + EscapeHtml(lu.fromVersion ? (lu.fromVersion + ' > ' + lu.version) : lu.version) + ', ' + ((lu.result == 'ok') ? "update succeeded" : "update failed") + ', ' + EscapeHtml(new Date(lu.time).toLocaleString()) + ', ' + (lu.automatic ? "started automatically" : "started by an administrator") + ((lu.result == 'failed' && lu.reason) ? ('. ' + EscapeHtml(lu.reason)) : '') + '</div>';
+                }
+                // Own versions of pages of the server are not replaced by an update
+                if (info.customViews && (info.customViews.length > 0)) {
+                    x += '<div><b>' + "This server uses its own web pages" + ':</b> ' + info.customViews.map(function (v) { return EscapeHtml(v.label + ': ' + v.files.join(', ')); }).join('; ') + '. ' + "An update does not change them. After the update compare them with the pages of the new version, they may no longer fit." + '</div>';
+                }
                 for (var i in info.releases) {
                     var r = info.releases[i];
                     serverUpdateInstallable[r.version] = (r.installable === true);
                     serverUpdateChannel[r.version] = r.channel; // "Stable Version" can only be a release that is stable by its signed manifest
                     var link = (typeof r.url == 'string' && r.url.startsWith('https://github.com/')) ? ('<a href="' + EscapeHtml(r.url) + '" target=_blank rel="noopener noreferrer">' + EscapeHtml(r.version) + '</a>') : EscapeHtml(r.version);
-                    x += '<div><b>' + link + '</b>: ' + EscapeHtml(r.message) + (r.channel == 'prerelease' || r.prerelease ? (' ' + EscapeHtml('Test release, never installed automatically.')) : '') + '</div>';
+                    x += '<div><b>' + link + '</b>: ' + EscapeHtml(r.message) + (r.channel == 'prerelease' || r.prerelease ? (' ' + EscapeHtml("Test release, never installed automatically.")) : '');
+                    if ((r.installable === true) && serverUpdateAllowed) { x += ' <a href=# data-version="' + EscapeHtml(r.version) + '" onclick="return server_previewRelease(this)">' + "Show changes for the agents" + '</a>'; }
+                    x += '</div>';
                 }
-                if (info.releases.length == 0) { x += '<div>No release information.</div>'; }
-                if (xxdialogTag && (serverUpdateChannel[xxdialogTag.latest] === 'prerelease')) { x += '<div><b>' + EscapeHtml(xxdialogTag.latest) + ' is a test release.</b> ' + EscapeHtml('Installing it asks for a second confirmation.') + '</div>'; }
-                if (info.keysError) { x += '<div>' + EscapeHtml('The release key list is invalid; signed updates are disabled.') + '</div>'; }
-                else if (info.keys.length == 0) { x += '<div>' + EscapeHtml('This server version has no release keys. Updates need a pin in serverupdate-pins.json.') + '</div>'; }
-                else { x += '<div>Trusted release keys: ' + info.keys.map(function (k) { return EscapeHtml(k.keyId + (k.comment ? (' (' + k.comment + ')') : '')); }).join(', ') + '</div>'; }
+                if (info.releases.length == 0) { x += '<div>' + "No release information." + '</div>'; }
+                x += '<div id=d2updatePreview></div>';
+                if (xxdialogTag && (serverUpdateChannel[xxdialogTag.latest] === 'prerelease')) { x += '<div><b>' + EscapeHtml(xxdialogTag.latest) + ' ' + "is a test release." + '</b> ' + EscapeHtml("Installing it asks for a second confirmation.") + '</div>'; }
+                if (info.keysError) { x += '<div>' + EscapeHtml("The release key list is invalid; signed updates are disabled.") + '</div>'; }
+                else if (info.keys.length == 0) { x += '<div>' + EscapeHtml("This server version has no release keys. Updates need a pin in serverupdate-pins.json.") + '</div>'; }
+                else { x += '<div>' + "Trusted release keys" + ': ' + info.keys.map(function (k) { return EscapeHtml(k.keyId + (k.comment ? (' (' + k.comment + ')') : '')); }).join(', ') + '</div>'; }
             }
             QH('d2updateInfo', x);
             if ((typeof xxdialogTag == 'object') && (xxdialogTag != null) && Q('d2updateCheck1') && Q('idx_dlgOkButton')) { server_showVersionDlgUpdate(); }
+        }
+
+        // What an update to a release changes for the agents and for the Node.js it needs (the server downloads and checks the package first, this can take a minute)
+        function server_previewRelease(link) {
+            var version = link.getAttribute('data-version');
+            if ((typeof version != 'string') || (Q('d2updatePreview') == null)) { return false; }
+            QH('d2updatePreview', '<div><b>' + EscapeHtml(version) + '</b>: ' + "The server checks the package, this can take a minute..." + '</div>');
+            meshserver.send({ action: 'serverupdatepreview', version: version });
+            return false;
+        }
+        function server_fillPreview(message) {
+            if (Q('d2updatePreview') == null) { return; }
+            var x = '';
+            if ((message.preview == null) || (typeof message.preview != 'object')) { x = '<div>' + EscapeHtml(server_updateReasonText({ reason: message.code, message: message.message })) + '</div>'; }
+            else {
+                var p = message.preview, node = p.node, agents = p.agents;
+                x += '<div><b>' + EscapeHtml(p.version) + '</b></div>';
+                if (node && (node.status == 'too-old')) { x += '<div><b>' + (format("Needs Node.js {0} or newer, this server runs Node.js {1}. Update Node.js first, the update is refused before it changes anything.", node.required, node.running)) + '</b></div>'; }
+                else if (node && (node.status == 'ok')) { x += '<div>' + (format("Node.js requirement ({0}) is met by Node.js {1}.", node.range, node.running)) + '</div>'; }
+                else if (node && (node.status == 'unchecked')) { x += '<div>' + (format("The Node.js requirement of this release ({0}) is not a plain lower bound, so it is not checked before the update.", node.range)) + '</div>'; }
+                if (agents.status == 'changes') {
+                    x += '<div>' + "Agents that this release pins" + ':</div><ul>';
+                    for (var i in agents.changes) {
+                        var c = agents.changes[i];
+                        x += '<li>' + EscapeHtml(c.label) + ': ' + EscapeHtml(c.from == null ? "not pinned yet" : c.from) + ' &rarr; ' + EscapeHtml(c.to == null ? "no longer pinned" : c.to) + (c.rebuilt ? (' (' + EscapeHtml("same release, rebuilt") + ')') : '') + '</li>';
+                    }
+                    if (agents.more > 0) { x += '<li>' + (format("and {0} more", agents.more)) + '</li>'; }
+                    x += '</ul><div>' + "Agents update when they connect." + '</div>';
+                } else if (agents.status == 'same') { x += '<div>' + "This release changes no agent." + '</div>'; }
+                else if (agents.status == 'no-list') { x += '<div>' + "This release has no agent list." + '</div>'; }
+                else { x += '<div>' + EscapeHtml(agents.message || '') + '</div>'; }
+            }
+            QH('d2updatePreview', x);
         }
 
         function server_showVersionDlgUpdate() {

@@ -96378,6 +96378,150 @@
     {
       "en": "Auto: no link measurement (Medium)",
       "pl": "Auto: brak pomiaru łącza (Medium)"
+    },
+    {
+      "en": "MeshCentral runs as a Windows service and cannot update itself. Update it by hand.",
+      "pl": "MeshCentral działa jako usługa Windows i nie może sam się zaktualizować. Zaktualizuj go ręcznie."
+    },
+    {
+      "en": "MeshCentral runs in a container. Update the container image to install a new version.",
+      "pl": "MeshCentral działa w kontenerze. Zaktualizuj obraz kontenera, aby zainstalować nową wersję."
+    },
+    {
+      "en": "MeshCentral is not installed as node_modules/meshcentral, so it cannot update itself. Update it by hand (see docs/fork-updates.md).",
+      "pl": "MeshCentral nie jest zainstalowany jako node_modules/meshcentral, więc nie może sam się zaktualizować. Zaktualizuj go ręcznie (zobacz docs/fork-updates.md)."
+    },
+    {
+      "en": "The server cannot write to its data folder, so it cannot update itself.",
+      "pl": "Serwer nie może zapisywać w swoim folderze danych, więc nie może sam się zaktualizować."
+    },
+    {
+      "en": "Sign in with your password, not a login token, to start a server update.",
+      "pl": "Zaloguj się hasłem, a nie tokenem logowania, aby rozpocząć aktualizację serwera."
+    },
+    {
+      "en": "Only a full administrator of the default domain can start a server update.",
+      "pl": "Tylko pełny administrator domeny domyślnej może rozpocząć aktualizację serwera."
+    },
+    {
+      "en": "Server updates are turned off for your account (My Server rights).",
+      "pl": "Aktualizacje serwera są wyłączone dla Twojego konta (uprawnienia Mój Serwer)."
+    },
+    {
+      "en": "Unable to check the releases.",
+      "pl": "Nie można sprawdzić wydań."
+    },
+    {
+      "en": "Last update",
+      "pl": "Ostatnia aktualizacja"
+    },
+    {
+      "en": "update succeeded",
+      "pl": "aktualizacja udana"
+    },
+    {
+      "en": "update failed",
+      "pl": "aktualizacja nieudana"
+    },
+    {
+      "en": "started automatically",
+      "pl": "uruchomiona automatycznie"
+    },
+    {
+      "en": "started by an administrator",
+      "pl": "uruchomiona przez administratora"
+    },
+    {
+      "en": "This server uses its own web pages",
+      "pl": "Ten serwer używa własnych stron WWW"
+    },
+    {
+      "en": "An update does not change them. After the update compare them with the pages of the new version, they may no longer fit.",
+      "pl": "Aktualizacja ich nie zmienia. Po aktualizacji porównaj je ze stronami nowej wersji, mogą już nie pasować."
+    },
+    {
+      "en": "Test release, never installed automatically.",
+      "pl": "Wydanie testowe, nigdy nie instalowane automatycznie."
+    },
+    {
+      "en": "Show changes for the agents",
+      "pl": "Pokaż zmiany dla agentów"
+    },
+    {
+      "en": "No release information.",
+      "pl": "Brak informacji o wydaniach."
+    },
+    {
+      "en": "is a test release.",
+      "pl": "jest wydaniem testowym."
+    },
+    {
+      "en": "Installing it asks for a second confirmation.",
+      "pl": "Instalacja wymaga drugiego potwierdzenia."
+    },
+    {
+      "en": "The release key list is invalid; signed updates are disabled.",
+      "pl": "Lista kluczy wydań jest nieprawidłowa; aktualizacje podpisane są wyłączone."
+    },
+    {
+      "en": "This server version has no release keys. Updates need a pin in serverupdate-pins.json.",
+      "pl": "Ta wersja serwera nie ma kluczy wydań. Aktualizacje wymagają przypięcia w serverupdate-pins.json."
+    },
+    {
+      "en": "Trusted release keys",
+      "pl": "Zaufane klucze wydań"
+    },
+    {
+      "en": "The server checks the package, this can take a minute...",
+      "pl": "Serwer sprawdza paczkę, to może potrwać minutę..."
+    },
+    {
+      "en": "Needs Node.js {0} or newer, this server runs Node.js {1}. Update Node.js first, the update is refused before it changes anything.",
+      "pl": "Wymaga Node.js {0} lub nowszego, ten serwer działa na Node.js {1}. Najpierw zaktualizuj Node.js; aktualizacja zostanie odrzucona, zanim cokolwiek zmieni."
+    },
+    {
+      "en": "Node.js requirement ({0}) is met by Node.js {1}.",
+      "pl": "Wymaganie Node.js ({0}) jest spełnione przez Node.js {1}."
+    },
+    {
+      "en": "The Node.js requirement of this release ({0}) is not a plain lower bound, so it is not checked before the update.",
+      "pl": "Wymaganie Node.js tego wydania ({0}) nie jest zwykłą dolną granicą, więc nie jest sprawdzane przed aktualizacją."
+    },
+    {
+      "en": "Agents that this release pins",
+      "pl": "Agenty przypięte w tym wydaniu"
+    },
+    {
+      "en": "not pinned yet",
+      "pl": "jeszcze nieprzypięty"
+    },
+    {
+      "en": "no longer pinned",
+      "pl": "już nieprzypięty"
+    },
+    {
+      "en": "same release, rebuilt",
+      "pl": "to samo wydanie, zbudowane ponownie"
+    },
+    {
+      "en": "and {0} more",
+      "pl": "i {0} więcej"
+    },
+    {
+      "en": "Agents update when they connect.",
+      "pl": "Agenty aktualizują się przy połączeniu."
+    },
+    {
+      "en": "This release changes no agent.",
+      "pl": "To wydanie nie zmienia żadnego agenta."
+    },
+    {
+      "en": "This release has no agent list.",
+      "pl": "To wydanie nie ma listy agentów."
+    },
+    {
+      "en": "Checking the release signature...",
+      "pl": "Sprawdzanie podpisu wydania..."
     }
   ]
 }
