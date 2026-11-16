@@ -91,10 +91,10 @@ Details, including the trust model and how releases are made: [docs/fork-updates
 ## Installing
 
 Download `meshcentral-<version>.tgz` from the [releases](https://github.com/kxd231/MeshCentral/releases) and install
-it in the folder that holds (or will hold) `node_modules`:
+it in the folder that holds (or will hold) `node_modules`. Node.js 22.21.1 or newer is needed, as in upstream:
 
 ```sh
-npm install --save-exact --no-audit ./meshcentral-1.3.1-custom.3.tgz
+npm install --save-exact --no-audit ./meshcentral-1.3.1-custom.4.tgz
 node node_modules/meshcentral
 ```
 
@@ -106,6 +106,9 @@ Configuration, databases, TLS, reverse proxies, users and everything else not li
 ## Updating
 
 - **From 1.3.1-custom.3 on:** the Update button in the web interface, or `selfUpdate`, as described above.
+- **Node.js first:** 1.3.1-custom.4 and newer need Node.js 22.21.1 or newer (the upstream requirement). 1.3.1-custom.3
+  and older do not check this before an update: on an older Node.js they install the new version and it does not
+  start. Update Node.js before the server. From 1.3.1-custom.4 on the update is refused with a message instead.
 - **From 1.3.1-custom.2 or older, once:** these versions do not know the signing key yet. Add the pin of the new
   version to `meshcentral-data/serverupdate-pins.json` (the release notes show it; your own build of the tag with
   `tools/release/build-server-tgz.sh` prints the same), start the update in the web interface and restart the service

@@ -16,7 +16,7 @@ The MeshAgent remote desktop (KVM) changes of this fork are described in [kvm.md
 
 ## Requirements and access
 
-- Node.js 20 or newer, as required by MeshCentral. Use a supported Node release
+- Node.js 22.21.1 or newer, as required by MeshCentral. Use a supported Node release
   with its permission model available for process isolation.
 - An RDP server offering TLS 1.2 or newer, or Network Level Authentication (NLA/CredSSP) over TLS 1.2 or newer.
   Standard RDP Security (RC4) is unsupported. Enable Remote Desktop and allow
