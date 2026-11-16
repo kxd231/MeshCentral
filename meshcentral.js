@@ -4510,7 +4510,7 @@ function InstallModules(modules, args, func) {
         }
 
         if (missingModules.length > 0) { if (args.debug) { console.log('Missing Modules: ' + missingModules.join(', ')); } InstallModuleEx(missingModules, args, func); } else { func(); }
-    }
+    } else { func(); } // Nothing optional is needed (the base modules come with the package), go on
 }
 
 // Install all missing modules at once. We will be running "npm install" once, with a full list of all modules we need, no matter if they area already installed or not,
