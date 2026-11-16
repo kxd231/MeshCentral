@@ -1267,6 +1267,38 @@ module.exports.CreateMeshAgent = function (parent, db, ws, req, args, domain) {
         return true;
     }
 
+    // Audit the outcome of an installation started from the Software tab, also when the user who asked for it is no longer connected.
+    // Everything in the reply comes from the agent, so only plain strings and numbers are used from it. The event names a user only
+    // when this server sent that user's request of this type to this device (softwarePending, set in meshuser.js).
+    function softwareInstallAudit(command) {
+        if ((command.type != 'installwinupdates') && (command.type != 'installmsi') && (command.type != 'installpackage') && (command.type != 'installflatpak')) return;
+        if ((typeof command.value != 'string') || (command.value.length > 65536) || (parent.meshes[obj.dbMeshKey] == null)) return;
+        var r = null;
+        try { r = JSON.parse(command.value); } catch (ex) { return; }
+        if ((r == null) || (typeof r != 'object') || (r.done !== true)) return;
+        const text = function (v, max) { return ((typeof v == 'string') || ((typeof v == 'number') && isFinite(v))) ? String(v).substring(0, max) : '?'; };
+        var event = null;
+        if (command.type == 'installwinupdates') {
+            const outcome = (typeof r.error == 'string') ? ('Error: ' + r.error.substring(0, 256)) : text(r.result, 64);
+            const reboot = (r.rebootRequired === true) ? 'Yes' : 'No';
+            event = { etype: 'node', action: 'winupdatesinstalled', nodeid: obj.dbNodeKey, domain: domain.id, msgid: 173, msgArgs: [outcome, reboot], msg: 'Windows Update installation finished: ' + outcome + ', reboot required: ' + reboot };
+        } else {
+            const name = text(r.name, 256);
+            const outcome = (typeof r.error == 'string') ? ('Error: ' + r.error.substring(0, 256)) : (text(r.result, 64) + ' (' + text(r.code, 12) + ')');
+            event = (command.type == 'installmsi') ?
+                { etype: 'node', action: 'msiinstalled', nodeid: obj.dbNodeKey, domain: domain.id, msgid: 176, msgArgs: [name, outcome], msg: 'MSI installation of ' + name + ' finished: ' + outcome } :
+                { etype: 'node', action: 'packageinstalled', nodeid: obj.dbNodeKey, domain: domain.id, msgid: 178, msgArgs: [name, outcome], msg: 'Installation of package ' + name + ' finished: ' + outcome };
+        }
+        const targets = parent.CreateMeshDispatchTargets(obj.dbMeshKey, [obj.dbNodeKey]);
+        const pending = (parent.softwarePending != null) ? parent.softwarePending[obj.dbNodeKey] : null;
+        if ((pending != null) && (pending[command.type] != null) && (typeof command.sessionid == 'string') && (pending[command.type].sessionid === command.sessionid)) {
+            const user = parent.users[pending[command.type].userid];
+            delete pending[command.type];
+            if (user != null) { event.userid = user._id; event.username = user.name; targets.push(user._id); }
+        }
+        parent.parent.DispatchEvent(targets, obj, event);
+    }
+
     // Process incoming agent JSON data
     function processAgentData(msg) {
         if (obj.agentInfo == null) return;
@@ -1308,40 +1340,7 @@ module.exports.CreateMeshAgent = function (parent, db, ws, req, args, domain) {
                 case 'software':
                     {
                         // Todo - save software into database for offline access but send to web clients for now
-                        if ((command.type == 'installwinupdates') && (typeof command.value == 'string') && (parent.meshes[obj.dbMeshKey] != null)) {
-                            // Audit the outcome of a Windows Update installation, even if the requesting user is no longer connected
-                            var wuResult = null;
-                            try { wuResult = JSON.parse(command.value); } catch (ex) { }
-                            if ((wuResult != null) && (wuResult.done === true)) {
-                                var wuOutcome = (typeof wuResult.error == 'string') ? ('Error: ' + wuResult.error.substring(0, 256)) : String(wuResult.result).substring(0, 64);
-                                var wuReboot = (wuResult.rebootRequired === true) ? 'Yes' : 'No';
-                                var wuEvent = { etype: 'node', action: 'winupdatesinstalled', nodeid: obj.dbNodeKey, domain: domain.id, msgid: 166, msgArgs: [wuOutcome, wuReboot], msg: 'Windows Update installation finished: ' + wuOutcome + ', reboot required: ' + wuReboot };
-                                var wuTargets = parent.CreateMeshDispatchTargets(obj.dbMeshKey, [obj.dbNodeKey]);
-                                if (typeof command.sessionid == 'string') {
-                                    var wuSplit = command.sessionid.split('/');
-                                    if (wuSplit.length == 4) { var wuUser = parent.users[wuSplit[0] + '/' + wuSplit[1] + '/' + wuSplit[2]]; if (wuUser != null) { wuEvent.userid = wuUser._id; wuEvent.username = wuUser.name; wuTargets.push(wuUser._id); } }
-                                }
-                                parent.parent.DispatchEvent(wuTargets, obj, wuEvent);
-                            }
-                        }
-                        if (((command.type == 'installmsi') || (command.type == 'installpackage') || (command.type == 'installflatpak')) && (typeof command.value == 'string') && (parent.meshes[obj.dbMeshKey] != null)) {
-                            // Audit the outcome of a package installation
-                            var msiResult = null;
-                            try { msiResult = JSON.parse(command.value); } catch (ex) { }
-                            if ((msiResult != null) && (msiResult.done === true)) {
-                                var msiName = (typeof msiResult.name == 'string') ? msiResult.name.substring(0, 256) : '';
-                                var msiOutcome = (typeof msiResult.error == 'string') ? ('Error: ' + msiResult.error.substring(0, 256)) : (String(msiResult.result).substring(0, 64) + ' (' + parseInt(msiResult.code) + ')');
-                                var msiEvent = (command.type == 'installmsi') ?
-                                    { etype: 'node', action: 'msiinstalled', nodeid: obj.dbNodeKey, domain: domain.id, msgid: 169, msgArgs: [msiName, msiOutcome], msg: 'MSI installation of ' + msiName + ' finished: ' + msiOutcome } :
-                                    { etype: 'node', action: 'packageinstalled', nodeid: obj.dbNodeKey, domain: domain.id, msgid: 171, msgArgs: [msiName, msiOutcome], msg: 'Installation of package ' + msiName + ' finished: ' + msiOutcome };
-                                var msiTargets = parent.CreateMeshDispatchTargets(obj.dbMeshKey, [obj.dbNodeKey]);
-                                if (typeof command.sessionid == 'string') {
-                                    var msiSplit = command.sessionid.split('/');
-                                    if (msiSplit.length == 4) { var msiUser = parent.users[msiSplit[0] + '/' + msiSplit[1] + '/' + msiSplit[2]]; if (msiUser != null) { msiEvent.userid = msiUser._id; msiEvent.username = msiUser.name; msiTargets.push(msiUser._id); } }
-                                }
-                                parent.parent.DispatchEvent(msiTargets, obj, msiEvent);
-                            }
-                        }
+                        try { softwareInstallAudit(command); } catch (ex) { } // The reply comes from the agent: nothing in it may stop the server
                         parent.routeAgentCommand(command, obj.domain.id, obj.dbNodeKey, obj.dbMeshKey);
                         break;
                     }

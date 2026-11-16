@@ -16928,6 +16928,7 @@
         function p18pkgUpload(nodeid, file, type, properties) {
             var fd = new FormData();
             fd.append('auth', authCookie);
+            fd.append('nodeid', nodeid);
             fd.append('files', file, file.name);
             msiInstalling = true;
             p18msiShow('<i>' + EscapeHtml(format("Uploading {0}...", file.name)) + '</i>');
@@ -20372,13 +20373,13 @@
             162: "Started messenger session \"{0}\" from {1} to {2}",
             163: "Removed device {0} from user group {1}",
             164: "Create file: \"{0}\"",
-            165: "Started Windows Update installation of {0} update(s)",
-            166: "Windows Update installation finished: {0}, reboot required: {1}",
-            167: "Uninstall software: {0}",
-            168: "Started MSI installation of {0}",
-            169: "MSI installation of {0} finished: {1}",
-            170: "Started installation of package {0}",
-            171: "Installation of package {0} finished: {1}"
+            172: "Started Windows Update installation of {0} update(s)",
+            173: "Windows Update installation finished: {0}, reboot required: {1}",
+            174: "Uninstall software: {0}",
+            175: "Started MSI installation of {0}",
+            176: "MSI installation of {0} finished: {1}",
+            177: "Started installation of package {0}",
+            178: "Installation of package {0} finished: {1}"
         };
 
         var eventsShortMessageId = {

@@ -275,6 +275,7 @@ module.exports.CreateWebServer = function (parent, db, args, certificates, doneF
     const MESHRIGHT_RELAY = 0x00200000;
     const MESHRIGHT_NOREGISTRY = 0x00400000;
     const MESHRIGHT_NOSOFTWARE = 0x00800000;
+    const MESHRIGHT_SOFTWAREMANAGE = 0x01000000;
     const MESHRIGHT_ADMIN = 0xFFFFFFFF;
 
     // Site rights
@@ -5297,11 +5298,13 @@ module.exports.CreateWebServer = function (parent, db, args, certificates, doneF
     // Upload a file to the server and then batch upload to many agents
     // Handle the upload of a software package that will be installed on a device from the Software tab.
     // Windows: .msi. Linux: .deb, .rpm, .flatpak, .flatpakref, .AppImage. The file signature is checked for each type.
-    // The package is held in the server temporary folder and referenced by a random id that only the uploading user can use.
-    // Rights are checked when the install is requested (see the "software" command, type "installmsi", in meshuser.js).
+    // The package is held in the server temporary folder and referenced by a random id that only the uploading user can use, for the device it was uploaded for.
+    // The upload needs the rights an installation on that device needs; they are checked again when the install is requested (the "software" command in meshuser.js).
     obj.softwareUploads = {};
+    obj.softwarePending = {}; // nodeid -> { install type -> { sessionid, userid, time } }: who asked for an installation, for the audit of its result (meshagent.js)
     const SOFTWARE_UPLOAD_MAX_SIZE = 2 * 1024 * 1024 * 1024; // 2 GB
-    const SOFTWARE_UPLOAD_LIFETIME = 2 * 60 * 60 * 1000; // Packages are removed after 2 hours
+    const SOFTWARE_UPLOAD_LIFETIME = 25 * 60 * 1000; // Packages are removed after 25 minutes, before the clean up of the temporary folder (30 minutes) takes the file
+    const SOFTWARE_UPLOAD_MAX_PER_USER = 3; // Packages one user can hold at a time, the oldest one makes room for a new one
     function handleUploadSoftware(req, res) {
         const domain = checkUserIpAddress(req, res);
         if (domain == null) { return; }
@@ -5316,62 +5319,73 @@ module.exports.CreateWebServer = function (parent, db, args, certificates, doneF
             // If an authentication cookie is embedded in the form, use that.
             if ((fields != null) && (fields.auth != null) && (fields.auth.length == 1) && (typeof fields.auth[0] == 'string')) {
                 var loginCookie = obj.parent.decodeCookie(fields.auth[0], obj.parent.loginCookieEncryptionKey, 60); // 60 minute timeout
-                if ((loginCookie != null) && (loginCookie.ip != null) && !checkCookieIp(loginCookie.ip, req.clientIp)) { loginCookie = null; } // Check cookie IP binding.
+                if ((loginCookie != null) && (checkAuthCookie(loginCookie, req) == false)) { loginCookie = null; } // Check cookie IP and session binding.
                 if ((loginCookie != null) && (domain.id == loginCookie.domainid)) { authUserid = loginCookie.userid; } // Use cookie authentication
             }
             if ((authUserid == null) || (obj.users[authUserid] == null)) { removeUploads(); res.sendStatus(401); return; }
-            if ((files == null) || (files.files == null) || (files.files.length != 1)) { removeUploads(); res.status(400).json({ error: 'Select one MSI file' }); return; }
+            const user = obj.users[authUserid];
+            if ((user.domain != domain.id) || obj.force2factorPending(domain, user, req)) { removeUploads(); res.sendStatus(401); return; } // 2FA setup is still required for this account
+            const nodeid = ((fields != null) && (fields.nodeid != null) && (fields.nodeid.length == 1) && (typeof fields.nodeid[0] == 'string') && (fields.nodeid[0].length <= 128)) ? fields.nodeid[0] : null;
+            if (nodeid == null) { removeUploads(); res.status(400).json({ error: 'No device' }); return; }
+            // A package is accepted only from a user who may install it on that device
+            obj.GetNodeWithRights(domain, user, nodeid, function (node, rights, visible) {
+                if ((node == null) || (visible == false) || ((rights != MESHRIGHT_ADMIN) && (((rights & MESHRIGHT_REMOTECONTROL) == 0) || ((rights & MESHRIGHT_NOSOFTWARE) != 0) || ((rights & MESHRIGHT_SOFTWAREMANAGE) == 0) || ((rights & MESHRIGHT_REMOTECOMMAND) == 0)))) { removeUploads(); res.sendStatus(403); return; }
+                if ((files == null) || (files.files == null) || (files.files.length != 1)) { removeUploads(); res.status(400).json({ error: 'Select one MSI file' }); return; }
 
-            const file = files.files[0];
-            const originalFilename = (typeof file.originalFilename === 'string') ? obj.path.basename(file.originalFilename) : '';
-            const uploadTempPath = resolveSafeUploadTempPath(file.path);
-            if (uploadTempPath == null) { res.sendStatus(400); return; }
-            const lname = originalFilename.toLowerCase();
-            var kind = null;
-            if (lname.endsWith('.msi')) { kind = 'msi'; }
-            else if (lname.endsWith('.deb')) { kind = 'deb'; }
-            else if (lname.endsWith('.rpm')) { kind = 'rpm'; }
-            else if (lname.endsWith('.flatpak')) { kind = 'flatpak'; }
-            else if (lname.endsWith('.flatpakref')) { kind = 'flatpakref'; }
-            else if (lname.endsWith('.appimage')) { kind = 'appimage'; }
-            if ((obj.common.IsFilenameValid(originalFilename) == false) || (kind == null) || (originalFilename.length > 255)) { removeUploads(); res.status(400).json({ error: 'Unsupported package type, use .msi, .deb, .rpm, .flatpak, .flatpakref or .AppImage' }); return; }
+                const file = files.files[0];
+                const originalFilename = (typeof file.originalFilename === 'string') ? obj.path.basename(file.originalFilename) : '';
+                const uploadTempPath = resolveSafeUploadTempPath(file.path);
+                if (uploadTempPath == null) { res.sendStatus(400); return; }
+                const lname = originalFilename.toLowerCase();
+                var kind = null;
+                if (lname.endsWith('.msi')) { kind = 'msi'; }
+                else if (lname.endsWith('.deb')) { kind = 'deb'; }
+                else if (lname.endsWith('.rpm')) { kind = 'rpm'; }
+                else if (lname.endsWith('.flatpak')) { kind = 'flatpak'; }
+                else if (lname.endsWith('.flatpakref')) { kind = 'flatpakref'; }
+                else if (lname.endsWith('.appimage')) { kind = 'appimage'; }
+                if ((obj.common.IsFilenameValid(originalFilename) == false) || (kind == null) || (originalFilename.length > 255)) { removeUploads(); res.status(400).json({ error: 'Unsupported package type, use .msi, .deb, .rpm, .flatpak, .flatpakref or .AppImage' }); return; }
 
-            // Check the file signature of the package
-            var header = Buffer.alloc(64);
-            try { const fd = obj.fs.openSync(uploadTempPath, 'r'); obj.fs.readSync(fd, header, 0, 64, 0); obj.fs.closeSync(fd); } catch (ex) { }
-            var signatureOk = false;
-            if (kind == 'msi') { signatureOk = (header.toString('hex', 0, 8) == 'd0cf11e0a1b11ae1'); } // OLE compound file
-            else if (kind == 'deb') { signatureOk = (header.toString('binary', 0, 8) == '!<arch>\n'); } // ar archive
-            else if (kind == 'rpm') { signatureOk = (header.toString('hex', 0, 4) == 'edabeedb'); } // RPM lead
-            else if (kind == 'flatpakref') { signatureOk = (file.size <= 65536) && (header.toString('utf8').replace(/^\uFEFF/, '').trim().startsWith('[Flatpak Ref]')); }
-            else if (kind == 'appimage') { signatureOk = (header.toString('hex', 0, 4) == '7f454c46') && (header.toString('hex', 8, 10) == '4149'); } // ELF with AppImage marker
-            else if (kind == 'flatpak') { signatureOk = (file.size > 0); } // Flatpak bundles are checked by flatpak itself
-            if (signatureOk == false) { removeUploads(); res.status(400).json({ error: 'This file is not a valid ' + kind + ' package' }); return; }
+                // Check the file signature of the package
+                var header = Buffer.alloc(64);
+                try { const fd = obj.fs.openSync(uploadTempPath, 'r'); obj.fs.readSync(fd, header, 0, 64, 0); obj.fs.closeSync(fd); } catch (ex) { }
+                var signatureOk = false;
+                if (kind == 'msi') { signatureOk = (header.toString('hex', 0, 8) == 'd0cf11e0a1b11ae1'); } // OLE compound file
+                else if (kind == 'deb') { signatureOk = (header.toString('binary', 0, 8) == '!<arch>\n'); } // ar archive
+                else if (kind == 'rpm') { signatureOk = (header.toString('hex', 0, 4) == 'edabeedb'); } // RPM lead
+                else if (kind == 'flatpakref') { signatureOk = (file.size <= 65536) && (header.toString('utf8').replace(/^\uFEFF/, '').trim().startsWith('[Flatpak Ref]')); }
+                else if (kind == 'appimage') { signatureOk = (header.toString('hex', 0, 4) == '7f454c46') && (header.toString('hex', 8, 10) == '4149'); } // ELF with AppImage marker
+                else if (kind == 'flatpak') { signatureOk = (file.size > 0); } // Flatpak bundles are checked by flatpak itself
+                if (signatureOk == false) { removeUploads(); res.status(400).json({ error: 'This file is not a valid ' + kind + ' package' }); return; }
 
-            // Move the package to the server temporary folder and hash it, the agent checks this hash after download
-            const serverpath = obj.path.join(obj.filespath, 'tmp');
-            try { obj.fs.mkdirSync(obj.parent.filespath); } catch (ex) { }
-            try { obj.fs.mkdirSync(serverpath); } catch (ex) { }
-            const id = obj.crypto.randomBytes(16).toString('hex');
-            const target = 'sw-' + id + '.' + kind;
-            const targetPath = obj.path.join(serverpath, target);
-            const registerUpload = function () {
-                const hash = require('crypto').createHash('sha384');
-                const stream = obj.fs.createReadStream(targetPath);
-                stream.on('error', function () { try { obj.fs.unlinkSync(targetPath); } catch (ex) { } res.status(500).json({ error: 'Upload failed' }); });
-                stream.on('data', function (d) { hash.update(d); });
-                stream.on('end', function () {
-                    const entry = { userid: authUserid, domainid: domain.id, name: originalFilename, kind: kind, target: target, hash: hash.digest('hex'), size: file.size, time: Date.now() };
-                    entry.timer = setTimeout(function () { delete obj.softwareUploads[id]; try { obj.fs.unlinkSync(targetPath); } catch (ex) { } }, SOFTWARE_UPLOAD_LIFETIME);
-                    obj.softwareUploads[id] = entry;
-                    res.json({ id: id, name: entry.name, kind: kind, size: entry.size });
+                // Move the package to the server temporary folder and hash it, the agent checks this hash after download
+                const serverpath = obj.path.join(obj.filespath, 'tmp');
+                try { obj.fs.mkdirSync(obj.parent.filespath); } catch (ex) { }
+                try { obj.fs.mkdirSync(serverpath); } catch (ex) { }
+                const id = obj.crypto.randomBytes(16).toString('hex');
+                const target = 'sw-' + id + '.' + kind;
+                const targetPath = obj.path.join(serverpath, target);
+                const registerUpload = function () {
+                    const hash = require('crypto').createHash('sha384');
+                    const stream = obj.fs.createReadStream(targetPath);
+                    stream.on('error', function () { try { obj.fs.unlinkSync(targetPath); } catch (ex) { } res.status(500).json({ error: 'Upload failed' }); });
+                    stream.on('data', function (d) { hash.update(d); });
+                    stream.on('end', function () {
+                        const entry = { userid: authUserid, domainid: domain.id, nodeid: node._id, name: originalFilename, kind: kind, target: target, hash: hash.digest('hex'), size: file.size, time: Date.now() };
+                        // One user holds a few packages at most: the oldest ones make room
+                        const mine = Object.keys(obj.softwareUploads).filter(function (k) { return obj.softwareUploads[k].userid === authUserid; }).sort(function (a, b) { return obj.softwareUploads[a].time - obj.softwareUploads[b].time; });
+                        while (mine.length >= SOFTWARE_UPLOAD_MAX_PER_USER) { const old = mine.shift(), o = obj.softwareUploads[old]; clearTimeout(o.timer); delete obj.softwareUploads[old]; try { obj.fs.unlinkSync(obj.path.join(serverpath, o.target)); } catch (ex) { } }
+                        entry.timer = setTimeout(function () { delete obj.softwareUploads[id]; try { obj.fs.unlinkSync(targetPath); } catch (ex) { } }, SOFTWARE_UPLOAD_LIFETIME);
+                        obj.softwareUploads[id] = entry;
+                        res.json({ id: id, name: entry.name, kind: kind, size: entry.size });
+                    });
+                };
+                obj.fs.rename(uploadTempPath, targetPath, function (err) {
+                    if (err && (err.code === 'EXDEV')) {
+                        // On some Linux, the rename will fail with a "EXDEV" error, do a copy+unlink instead.
+                        obj.common.copyFile(uploadTempPath, targetPath, function (err) { obj.fs.unlink(uploadTempPath, function () { }); if (err) { res.status(500).json({ error: 'Upload failed' }); } else { registerUpload(); } });
+                    } else if (err) { res.status(500).json({ error: 'Upload failed' }); } else { registerUpload(); }
                 });
-            };
-            obj.fs.rename(uploadTempPath, targetPath, function (err) {
-                if (err && (err.code === 'EXDEV')) {
-                    // On some Linux, the rename will fail with a "EXDEV" error, do a copy+unlink instead.
-                    obj.common.copyFile(uploadTempPath, targetPath, function (err) { obj.fs.unlink(uploadTempPath, function () { }); if (err) { res.status(500).json({ error: 'Upload failed' }); } else { registerUpload(); } });
-                } else if (err) { res.status(500).json({ error: 'Upload failed' }); } else { registerUpload(); }
             });
         });
     }
