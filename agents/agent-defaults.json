@@ -165,13 +165,13 @@
     },
     {
       "repository": "kxd231/MeshAgent",
-      "tag": "h264-v1",
+      "tag": "h264-v2",
       "files": [
         {
           "filename": "MeshService64.exe",
           "asset": "MeshService64.exe",
           "size": 4291584,
-          "sha384": "aa6e6ae3019232c6f1999de9dfdd3ef5c1362d0e0898fe43e7647a1cbc730252489199707bd3b8aa7c82d1cfc01811f6"
+          "sha384": "ddf231c2d457d18a7cb2d584fd2ff643c3a0186a64bb8953da15d655c2f86c7bda59f6d86d61a0fc5446553e69349905"
         }
       ]
     },

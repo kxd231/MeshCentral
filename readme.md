@@ -45,7 +45,7 @@ control on the server. Details: [docs/kvm.md](docs/kvm.md).
 
 ### Windows x64 agent of this fork
 
-The default `MeshService64.exe` comes from the [h264-v1 release of kxd231/MeshAgent](https://github.com/kxd231/MeshAgent/releases/tag/h264-v1).
+The default `MeshService64.exe` comes from the [h264-v2 release of kxd231/MeshAgent](https://github.com/kxd231/MeshAgent/releases/tag/h264-v2).
 Computers that run the Windows x64 agent update to it like to any new default agent. Compared with the upstream
 agent it:
 
