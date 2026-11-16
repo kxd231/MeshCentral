@@ -72,6 +72,14 @@ The RDP client is a new engine written in JavaScript, isolated per session, with
 resize and the graphics pipeline (RDPGFX): Progressive, RemoteFX, ClearCodec and H.264 (AVC420 / AVC444, decoded with
 WebCodecs and WebAssembly SIMD in a worker). It replaces node-rdpjs. See [docs/webrdp.md](docs/webrdp.md).
 
+### Software tab (from upstream pull request #8357)
+
+The Software tab of a device can install Windows updates, MSI packages and Linux packages (deb, rpm, Flatpak,
+AppImage), controlled by the new **Manage Software** user right. The code is that of the upstream pull request
+[#8357](https://github.com/Ylianst/MeshCentral/pull/8357), which is still open there, with fixes of this fork. Not
+yet tested: the online scan for updates, updates that need a restart, EULA prompts and 32-bit Windows. Installing an
+MSI or downloading a package has no time limit yet.
+
 ### Server updates from the web interface, signed
 
 The server updates itself from the releases of this repository, not from the upstream npm package.
@@ -82,7 +90,10 @@ The server updates itself from the releases of this repository, not from the ups
 - Every release is signed with a key of the fork's owner that is never stored on GitHub. Before it installs anything
   the server checks that signature and the size and hashes of the package. Somebody who took over the GitHub
   repository or its build system still could not make a server install a package of their own.
-- A failed update installs nothing; the server keeps running on its current version and says why.
+- A failed update installs nothing; the server keeps running on its current version and says why. After a restart
+  the version dialog shows the result of the last update, and next to a new release **Show changes for the agents**
+  lists which agents it would update (nothing is installed). The dialog also warns about own web pages of the server,
+  which an update does not replace.
 - Where the server cannot update itself (as a Windows service, in a Docker container, from a git clone) the version
   dialog says so. Containers are updated by pulling the new image.
 
