@@ -321,10 +321,14 @@ function install_stylishui() {
         meshcentral_version=$(jq -r '.version' /opt/meshcentral/meshcentral/package.json)
         # The fork's own releases (1.3.1-custom.2) are matched by the upstream version they are based on (1.3.1)
         meshcentral_version=${meshcentral_version%%-custom.*}
-        # Target the StylishUI version we need for our present Meshcentral version
+        # Target the StylishUI version we need for our present Meshcentral version, the first match is the newest one
         compat_version=$(echo "$compat_data" | jq -r --arg mcv "$meshcentral_version" \
-            '.compatibility[] | select(.meshcentral==$mcv) | .stylishui')
+            'first(.compatibility[] | select(.meshcentral==$mcv)) | .stylishui')
         echo "Data: MeshCentral: $meshcentral_version, matched StylishUI: $compat_version"
+        if [[ -z "$compat_version" ]]; then
+            echo "No StylishUI version is listed as compatible with MeshCentral $meshcentral_version, set STYLISHUI_FORCE_LATEST=true to install the latest one."
+            return 1
+        fi
 
         # From the data gathered above, compile the whole URL.
         full_url="${stylishui_base_url}/tags/${compat_version}.tar.gz"
@@ -413,7 +417,7 @@ if [[ ${INSTALL_STYLISHUI,,} =~ ^(true|yes)$ ]]; then
 fi
 
 # Actually start MeshCentral.
-node /opt/meshcentral/meshcentral/meshcentral --configfile "${CONFIG_FILE}" "${ARGS}" >> /proc/1/fd/1 &
+node /opt/meshcentral/meshcentral/meshcentral --configfile "${CONFIG_FILE}" "${ARGS}" &
 meshcentral_pid=$!
 
 wait "$meshcentral_pid"

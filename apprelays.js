@@ -788,6 +788,7 @@ module.exports.CreateMstscRelay = function (parent, db, ws, req, args, domain) {
 module.exports.CreateSshRelay = function (parent, db, ws, req, args, domain) {
     const Net = require('net');
     const WebSocket = require('ws');
+    ws._socket.pause();
     
     // SerialTunnel object is used to embed SSH within another connection.
     function SerialTunnel(options) {
@@ -1119,10 +1120,12 @@ module.exports.CreateSshRelay = function (parent, db, ws, req, args, domain) {
                 const cookieContent = { userid: obj.cookie.userid, domainid: obj.cookie.domainid, nodeid: mesh.relayid, tcpaddr: node.host, tcpport: obj.cookie.tcpport };
                 if (obj.expire != null) { cookieContent.sessionExpire = obj.expire; }
                 obj.xcookie = parent.parent.encodeCookie(cookieContent, parent.parent.loginCookieEncryptionKey);
+                ws._socket.resume();
             }, 11);
         } else {
             if (obj.expire != null) { obj.cookie.sessionExpire = obj.expire; }
             obj.xcookie = (obj.expire == null) ? req.query.auth : parent.parent.encodeCookie(obj.cookie, parent.parent.loginCookieEncryptionKey);
+            ws._socket.resume();
         }
     });
 
@@ -1434,11 +1437,11 @@ module.exports.CreateSshTerminalRelay = function (parent, db, ws, req, domain, u
     if ((user == null) || (req.query.nodeid == null)) { obj.close(); return; } // Invalid nodeid
     parent.GetNodeWithRights(domain, user, req.query.nodeid, function (node, rights, visible) {
         if (obj.ws == null) return; // obj has been cleaned up, just exit.
-        node = parent.common.unEscapeLinksFieldName(node); // unEscape node data for rdp/ssh credentials
 
         // Check permissions
-        if ((rights & 8) == 0) { obj.close(); return; } // No MESHRIGHT_REMOTECONTROL rights
-        if ((rights != 0xFFFFFFFF) && (rights & 0x00000200)) { obj.close(); return; } // MESHRIGHT_NOTERMINAL is set
+        if ((node == null) || (visible == false) || ((rights & MESHRIGHT_REMOTECONTROL) == 0)) { obj.close(); return; }
+        if ((rights != MESHRIGHT_ADMIN) && ((rights & MESHRIGHT_NOTERMINAL) != 0)) { obj.close(); return; }
+        node = parent.common.unEscapeLinksFieldName(node); // unEscape node data for rdp/ssh credentials
         obj.mtype = node.mtype; // Store the device group type
         obj.nodeid = node._id; // Store the NodeID
         obj.meshid = node.meshid; // Store the MeshID
@@ -1986,11 +1989,11 @@ module.exports.CreateSshFilesRelay = function (parent, db, ws, req, domain, user
     if ((user == null) || (req.query.nodeid == null)) { obj.close(); return; } // Invalid nodeid
     parent.GetNodeWithRights(domain, user, req.query.nodeid, function (node, rights, visible) {
         if (obj.ws == null) return; // obj has been cleaned up, just exit.
-        node = parent.common.unEscapeLinksFieldName(node); // unEscape node data for rdp/ssh credentials
 
         // Check permissions
-        if ((rights & 8) == 0) { obj.close(); return; } // No MESHRIGHT_REMOTECONTROL rights
-        if ((rights != 0xFFFFFFFF) && (rights & 0x00000200)) { obj.close(); return; } // MESHRIGHT_NOTERMINAL is set
+        if ((node == null) || (visible == false) || ((rights & MESHRIGHT_REMOTECONTROL) == 0)) { obj.close(); return; }
+        if ((rights != MESHRIGHT_ADMIN) && ((rights & MESHRIGHT_NOFILES) != 0)) { obj.close(); return; }
+        node = parent.common.unEscapeLinksFieldName(node); // unEscape node data for rdp/ssh credentials
         obj.mtype = node.mtype; // Store the device group type
         obj.nodeid = node._id; // Store the NodeID
         obj.meshid = node.meshid; // Store the MeshID
@@ -2107,6 +2110,7 @@ function mstscAuthorize(parent, domain, req, obj, creds, useServerCreds, func) {
         if (obj.ws == null) return; // obj has been cleaned up, just exit.
         if (!setRelaySessionDeadline(req, obj, obj.cookie)) return;
         if ((node == null) || (visible == false) || ((rights & MESHRIGHT_REMOTECONTROL) == 0) || ((rights != MESHRIGHT_ADMIN) && ((rights & MESHRIGHT_NOFILES) != 0))) { obj.close(); return; }
+        if ((rights != MESHRIGHT_ADMIN) && ((rights & MESHRIGHT_NODESKTOP) != 0)) { obj.close(); return; } // The No Desktop restriction also blocks Web-RDP
         if ((rights != MESHRIGHT_ADMIN) && ((rights & MESHRIGHT_REMOTEVIEWONLY) != 0)) { obj.viewonly = true; }
         if ((rights != MESHRIGHT_ADMIN) && ((rights & MESHRIGHT_DESKLIMITEDINPUT) != 0)) { obj.limitedinput = true; }
         obj.rights = rights;
