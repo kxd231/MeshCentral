@@ -45,7 +45,7 @@ control on the server. Details: [docs/kvm.md](docs/kvm.md).
 
 ### Windows x64 agent of this fork
 
-The default `MeshService64.exe` comes from the [h264-v2 release of kxd231/MeshAgent](https://github.com/kxd231/MeshAgent/releases/tag/h264-v2).
+The default `MeshService64.exe` comes from the [h264-v3 release of kxd231/MeshAgent](https://github.com/kxd231/MeshAgent/releases/tag/h264-v3).
 Computers that run the Windows x64 agent update to it like to any new default agent. Compared with the upstream
 agent it:
 
@@ -53,7 +53,7 @@ agent it:
 - compresses with libjpeg-turbo, lowers the quality of moving areas and sharpens them again when they stop;
 - respects the bandwidth limit of the viewer;
 - encodes H.264 on the graphics card when a short self test shows that the card's encoder works, and in software
-  otherwise. Tested on AMD and NVIDIA graphics; Intel graphics have not been tested yet.
+  otherwise. Tested on AMD, NVIDIA and Intel graphics.
 
 All other agents (Linux, macOS, 32-bit and ARM Windows) are the upstream ones. More about the agent: its
 [readme](https://github.com/kxd231/MeshAgent#readme).

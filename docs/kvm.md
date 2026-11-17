@@ -115,8 +115,8 @@ off by default until it has been measured; choosing H.264 turns it on for that s
 
 ## Windows agent of the fork
 
-The default Windows x64 agent (`MeshService64.exe`) comes from the `h264-v1` release of
-[kxd231/MeshAgent](https://github.com/kxd231/MeshAgent/releases/tag/h264-v1) (pinned with size and SHA-384 in
+The default Windows x64 agent (`MeshService64.exe`) comes from the `h264-v3` release of
+[kxd231/MeshAgent](https://github.com/kxd231/MeshAgent/releases/tag/h264-v3) (pinned with size and SHA-384 in
 `agents/agent-defaults.json`); all other agent files are the upstream ones. Windows x64 agents connected to the
 server update to it like to any new default agent. Compared with the upstream agent it:
 
@@ -127,7 +127,7 @@ server update to it like to any new default agent. Compared with the upstream ag
 - honours the viewer's bandwidth limit and frame intervals down to 10 ms;
 - sends moving areas as H.264 when the viewer asks for it (Media Foundation), on the graphics card when a self test in
   a separate process has shown that its encoder works, else in software; an encoder that fails in a session is
-  replaced by the software encoder at once and remembered. Tested on AMD and NVIDIA graphics, not yet on Intel;
+  replaced by the software encoder at once and remembered. Tested on AMD, NVIDIA and Intel graphics;
 - chooses the frame rate itself when the viewer selects Auto.
 
 Switches in the environment of the agent service (registry
