@@ -8,7 +8,6 @@ on:
 permissions:
   contents: read
   packages: write
-  actions: write
 
 jobs:
   prepare:
@@ -123,14 +122,3 @@ jobs:
             INCLUDE_MONGODB_TOOLS=${{ matrix.mongodb }}
             INCLUDE_POSTGRESQL_TOOLS=${{ matrix.postgresql }}
             INCLUDE_MARIADB_TOOLS=${{ matrix.mariadb }}
-  rerun-on-failure:
-    needs: build-images
-    if: failure() && fromJSON(github.run_attempt) < 3
-    runs-on: ubuntu-latest
-    steps:
-      - env:
-          GH_REPO: ${{ github.repository }}
-          GH_TOKEN: ${{ github.token }}
-          GH_DEBUG: api
-          REF: ${{ github.ref_name }}
-        run: gh workflow run rerun.yaml -r "$REF" -F run_id=${{ github.run_id }}
