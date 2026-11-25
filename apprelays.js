@@ -1090,7 +1090,7 @@ module.exports.CreateSshRelay = function (parent, db, ws, req, args, domain) {
 
     // Decode the authentication cookie
     obj.cookie = parent.parent.decodeCookie(req.query.auth, parent.parent.loginCookieEncryptionKey);
-    if ((obj.cookie == null) || (obj.cookie.userid == null) || (parent.users[obj.cookie.userid] == null)) { obj.ws.send(JSON.stringify({ action: 'sessionerror' })); obj.close(); return; }
+    if ((obj.cookie == null) || parent.isDeviceShareGuestCookie(obj.cookie) || (obj.cookie.userid == null) || (parent.users[obj.cookie.userid] == null)) { obj.ws.send(JSON.stringify({ action: 'sessionerror' })); obj.close(); return; }
     obj.userid = obj.cookie.userid;
     if (!setRelaySessionDeadline(req, obj, obj.cookie)) return obj;
 
@@ -2098,7 +2098,7 @@ function mstscAuthorize(parent, domain, req, obj, creds, useServerCreds, func) {
     } else {
         // Decode the authentication cookie
         obj.cookie = parent.parent.decodeCookie(obj.infos.ip, parent.parent.loginCookieEncryptionKey);
-        if ((obj.cookie == null) || (typeof obj.cookie.nodeid != 'string') || (typeof obj.cookie.userid != 'string')) { obj.close(); return; }
+        if ((obj.cookie == null) || parent.isDeviceShareGuestCookie(obj.cookie) || (typeof obj.cookie.nodeid != 'string') || (typeof obj.cookie.userid != 'string')) { obj.close(); return; }
         obj.nodeid = obj.cookie.nodeid;
         obj.userid = obj.cookie.userid;
     }

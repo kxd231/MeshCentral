@@ -11028,7 +11028,7 @@
             } else {
                 // Agent desktop
                 if (flags & 1)  { keyArray.push([desktop.m.KeyAction.DOWN,     16]); keyArray2.push([desktop.m.KeyAction.UP,     16]); } // Shift
-                if (flags & 2)  { keyArray.push([desktop.m.KeyAction.EXDOWN,   18]); keyArray2.push([desktop.m.KeyAction.EXUP,   18]); } // Left-alt
+                if (flags & 2)  { keyArray.push([desktop.m.KeyAction.DOWN,   18]); keyArray2.push([desktop.m.KeyAction.UP,   18]); } // Left-alt
                 if (flags & 8)  { keyArray.push([desktop.m.KeyAction.EXDOWN,   17]); keyArray2.push([desktop.m.KeyAction.EXUP,   17]); } // Ctrl
                 if (flags & 16) { keyArray.push([desktop.m.KeyAction.EXDOWN, 0x5B]); keyArray2.push([desktop.m.KeyAction.EXUP, 0x5B]); } // Windows key
                 if (key != 0) { keyArray.push([desktop.m.KeyAction.DOWN, key]); keyArray2.push([desktop.m.KeyAction.UP, key]); }
@@ -14503,7 +14503,7 @@
                     x += '<td style="text-align:center;padding:6px 8px;border:1px solid #eee">';
                     var userRights = GetNodeRights(currentNode);						
 					if (hasUninstall && (GetNodeRights(currentNode) == 0xFFFFFFFF)) {
-						x += '<input type="button" value="' + "Uninstall" + '" style="padding:2px 8px;cursor:pointer" onclick="uninstallDesktopApp(\'' + encodeURIComponent(app.uninstall) + '\')" />';
+						x += '<input type="button" value="' + "Uninstall" + '" style="padding:2px 8px;cursor:pointer" onclick="uninstallDesktopApp(\'' + encodeURIComponentEx(app.uninstall) + '\')" />';
 					} else {
 						x += '<span style="color:#999">-</span>';
 					}
@@ -21422,7 +21422,7 @@
             QV('uiMenu', false);
 
             // If "shift" is pressed, open a new tab.
-            if (event && ((event.shiftKey == true) || (event.which == 2) || (event.button == 1)) && (x != 15) && ('{{{currentNode}}}'.toLowerCase() == '')) {
+            if (event && ((event.shiftKey == true) || (event.which == 2) || (event.button == 1)) && (x != 15) && ('{{currentNode}}'.toLowerCase() == '')) {
                 // Open the device in a different tab
                 if ((x >= 9) && (x <= 19)) {
                     if (currentNode) { safeNewWindow(window.location.origin + '{{{domainurl}}}' + '?gotonode=' + currentNode._id.split('/')[2] + '&viewmode=' + x + '&hide=16' + ((urlargs.key)?('&key=' + urlargs.key):''), 'meshcentral:' + currentNode._id); }
@@ -22683,11 +22683,11 @@
         function getUserName(userid) {
             var useridsplit = userid.split('/'), userid2 = useridsplit[0] + '/' + useridsplit[1] + '/' + useridsplit[2], guestname = '';
             if ((useridsplit.length == 4) && (useridsplit[3].startsWith('guest:'))) { guestname = ' - ' + EscapeHtml(decode_utf8(atob(useridsplit[3].substring(6)))); }
-            if (users && users[userid2] != null) { if (users[userid2].realname != null) return (users[userid2].realname + guestname); else return (users[userid2].name + guestname); }
-            if (currentNode && currentNode.links && currentNode.links[userid] && currentNode.links[userid].name != null) { return (currentNode.links[userid].name + guestname); }
-            if (userid == userinfo._id) { return (userinfo.name + guestname); }
-            if (nodes) { for (var a in nodes) { if (nodes[a].links) { for (var b in nodes[a].links) { if (nodes[a].links[b].name && b == userid) return (nodes[a].links[b].name + guestname); } } } }
-            if (meshes) { for (var a in meshes) { if (meshes[a].links) { for (var b in meshes[a].links) { if (meshes[a].links[b].name && b == userid) return (meshes[a].links[b].name + guestname); } } } }
+            if (users && users[userid2] != null) { if (users[userid2].realname != null) return (EscapeHtml(users[userid2].realname) + guestname); else return (EscapeHtml(users[userid2].name) + guestname); }
+            if (currentNode && currentNode.links && currentNode.links[userid] && currentNode.links[userid].name != null) { return (EscapeHtml(currentNode.links[userid].name) + guestname); }
+            if (userid == userinfo._id) { return (EscapeHtml(userinfo.name) + guestname); }
+            if (nodes) { for (var a in nodes) { if (nodes[a].links) { for (var b in nodes[a].links) { if (nodes[a].links[b].name && b == userid) return (EscapeHtml(nodes[a].links[b].name) + guestname); } } } }
+            if (meshes) { for (var a in meshes) { if (meshes[a].links) { for (var b in meshes[a].links) { if (meshes[a].links[b].name && b == userid) return (EscapeHtml(meshes[a].links[b].name) + guestname); } } } }
             return (EscapeHtml(useridsplit[2]) + guestname);
         }
         function round(value, precision) { var multiplier = Math.pow(10, precision || 0); return Math.round(value * multiplier) / multiplier; }

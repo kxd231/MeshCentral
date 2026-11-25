@@ -691,7 +691,10 @@ function CreateMeshCentralServer(config, args) {
                 }
             }
         });
+        var partialOutput = [];
         childProcess.stdout.on('data', function (data) {
+            if (data[data.length - 1] != '\n') { partialOutput.push(data); return; } // Large output arrives in chunks (64k), wait for the end of the line
+            if (partialOutput.length > 0) { data = partialOutput.join('') + data; partialOutput = []; }
             if (data[data.length - 1] == '\n') { data = data.substring(0, data.length - 1); }
             if (data.indexOf('Updating settings folder...') >= 0) { childProcess.xrestart = 1; }
             else if (data.indexOf('Updating server certificates...') >= 0) { childProcess.xrestart = 1; }
@@ -725,7 +728,7 @@ function CreateMeshCentralServer(config, args) {
             if (data[data.length - 1] == '\n') { data = data.substring(0, data.length - 1); }
             obj.logError(data);
         });
-        childProcess.on('close', function (code) { if ((code != 0) && (code != 123)) { /* console.log("Exited with code " + code); */ } });
+        childProcess.on('close', function (code) { if (partialOutput.length > 0) { logFromChildProcess(partialOutput.join('')); } if ((code != 0) && (code != 123)) { /* console.log("Exited with code " + code); */ } });
     };
 
     obj.logError = function (err) {
@@ -1183,17 +1186,17 @@ function CreateMeshCentralServer(config, args) {
                     // See if any database operations needs to be completed
                     if (obj.args.deletedomain) { obj.db.DeleteDomain(obj.args.deletedomain, function () { console.log('Deleted domain ' + obj.args.deletedomain + '.'); process.exit(); }); return; }
                     if (obj.args.deletedefaultdomain) { obj.db.DeleteDomain('', function () { console.log('Deleted default domain.'); process.exit(); }); return; }
-                    if (obj.args.showall) { obj.db.GetAll(function (err, docs) { console.log(JSON.stringify(docs, null, 2)); process.exit(); }); return; }
-                    if (obj.args.showusers) { obj.db.GetAllType('user', function (err, docs) { console.log(JSON.stringify(docs, null, 2)); process.exit(); }); return; }
+                    if (obj.args.showall) { obj.db.GetAll(function (err, docs) { process.stdout.write(JSON.stringify(docs, null, 2) + '\n', function () { process.exit(); }); }); return; }
+                    if (obj.args.showusers) { obj.db.GetAllType('user', function (err, docs) { process.stdout.write(JSON.stringify(docs, null, 2) + '\n', function () { process.exit(); }); }); return; }
                     if (obj.args.showitem) { obj.db.Get(obj.args.showitem, function (err, docs) { console.log(JSON.stringify(docs, null, 2)); process.exit(); }); return; }
                     if (obj.args.listuserids) { obj.db.GetAllType('user', function (err, docs) { for (var i in docs) { console.log(docs[i]._id); } process.exit(); }); return; }
-                    if (obj.args.showusergroups) { obj.db.GetAllType('ugrp', function (err, docs) { console.log(JSON.stringify(docs, null, 2)); process.exit(); }); return; }
-                    if (obj.args.shownodes) { obj.db.GetAllType('node', function (err, docs) { console.log(JSON.stringify(docs, null, 2)); process.exit(); }); return; }
-                    if (obj.args.showallmeshes) { obj.db.GetAllType('mesh', function (err, docs) { console.log(JSON.stringify(docs, null, 2)); process.exit(); }); return; }
-                    if (obj.args.showmeshes) { obj.db.GetAllType('mesh', function (err, docs) { var x = []; for (var i in docs) { if (docs[i].deleted == null) { x.push(docs[i]); } } console.log(JSON.stringify(x, null, 2)); process.exit(); }); return; }
-                    if (obj.args.showevents) { obj.db.GetAllEvents(function (err, docs) { console.log(JSON.stringify(docs, null, 2)); process.exit(); }); return; }
-                    if (obj.args.showsmbios) { obj.db.GetAllSMBIOS(function (err, docs) { console.log(JSON.stringify(docs, null, 2)); process.exit(); }); return; }
-                    if (obj.args.showpower) { obj.db.getAllPower(function (err, docs) { console.log(JSON.stringify(docs, null, 2)); process.exit(); }); return; }
+                    if (obj.args.showusergroups) { obj.db.GetAllType('ugrp', function (err, docs) { process.stdout.write(JSON.stringify(docs, null, 2) + '\n', function () { process.exit(); }); }); return; }
+                    if (obj.args.shownodes) { obj.db.GetAllType('node', function (err, docs) { process.stdout.write(JSON.stringify(docs, null, 2) + '\n', function () { process.exit(); }); }); return; }
+                    if (obj.args.showallmeshes) { obj.db.GetAllType('mesh', function (err, docs) { process.stdout.write(JSON.stringify(docs, null, 2) + '\n', function () { process.exit(); }); }); return; }
+                    if (obj.args.showmeshes) { obj.db.GetAllType('mesh', function (err, docs) { var x = []; for (var i in docs) { if (docs[i].deleted == null) { x.push(docs[i]); } } process.stdout.write(JSON.stringify(x, null, 2) + '\n', function () { process.exit(); }); }); return; }
+                    if (obj.args.showevents) { obj.db.GetAllEvents(function (err, docs) { process.stdout.write(JSON.stringify(docs, null, 2) + '\n', function () { process.exit(); }); }); return; }
+                    if (obj.args.showsmbios) { obj.db.GetAllSMBIOS(function (err, docs) { process.stdout.write(JSON.stringify(docs, null, 2) + '\n', function () { process.exit(); }); }); return; }
+                    if (obj.args.showpower) { obj.db.getAllPower(function (err, docs) { process.stdout.write(JSON.stringify(docs, null, 2) + '\n', function () { process.exit(); }); }); return; }
                     if (obj.args.clearpower) { obj.db.removeAllPowerEvents(function () { process.exit(); }); return; }
                     if (obj.args.showiplocations) { obj.db.GetAllType('iploc', function (err, docs) { console.log(docs); process.exit(); }); return; }
                     if (obj.args.logintoken) { obj.getLoginToken(obj.args.logintoken, function (r) { console.log(r); process.exit(); }); return; }
@@ -3547,7 +3550,7 @@ function CreateMeshCentralServer(config, args) {
         if (obj.config.settings.agentsignlock) { signUrl += '?ServerID=' + obj.certificateOperations.getPublicKeyHash(obj.certificates.agent.cert).toUpperCase(); }
 
         // Setup the time server
-        var timeStampUrl = 'http://timestamp.comodoca.com/authenticode';
+        var timeStampUrl = 'http://timestamp.sectigo.com';
         if (obj.args.agenttimestampserver === false) { timeStampUrl = null; }
         else if (typeof obj.args.agenttimestampserver == 'string') { timeStampUrl = obj.args.agenttimestampserver; }
 
@@ -4256,6 +4259,9 @@ function CreateMeshCentralServer(config, args) {
                 // Use a fixed cookie expire time
                 if (timeout == null) { timeout = 2; }
                 if ((o.dtime > (timeout * 60000)) || (o.dtime < -30000)) { obj.debug('cookie', 'ERR: Bad cookie due to timeout'); return null; } // The cookie is only valid 120 seconds, or 30 seconds back in time (in case other server's clock is not quite right)
+            } else if (o.r === 8) {
+                // Device share guest cookies carry the share's end as an absolute time in milliseconds.
+                if ((o.expire <= Date.now()) || (o.dtime < -30000)) { obj.debug('cookie', 'ERR: Bad cookie due to share expiration'); return null; }
             } else {
                 // An expire time is included in the cookie (in minutes), use this.
                 if ((o.expire !== 0) && ((o.dtime > (o.expire * 60000)) || (o.dtime < -30000))) { obj.debug('cookie', 'ERR: Bad cookie due to timeout'); return null; } // The cookie is only valid 120 seconds, or 30 seconds back in time (in case other server's clock is not quite right)
@@ -4285,6 +4291,9 @@ function CreateMeshCentralServer(config, args) {
                 // Use a fixed cookie expire time
                 if (timeout == null) { timeout = 2; }
                 if ((o.dtime > (timeout * 60000)) || (o.dtime < -30000)) { obj.debug('cookie', 'ERR: Bad cookie due to timeout'); return null; } // The cookie is only valid 120 seconds, or 30 seconds back in time (in case other server's clock is not quite right)
+            } else if (o.r === 8) {
+                // Device share guest cookies carry the share's end as an absolute time in milliseconds.
+                if ((o.expire <= Date.now()) || (o.dtime < -30000)) { obj.debug('cookie', 'ERR: Bad cookie due to share expiration'); return null; }
             } else {
                 // An expire time is included in the cookie (in minutes), use this.
                 if ((o.expire !== 0) && ((o.dtime > (o.expire * 60000)) || (o.dtime < -30000))) { obj.debug('cookie', 'ERR: Bad cookie due to timeout'); return null; } // The cookie is only valid 120 seconds, or 30 seconds back in time (in case other server's clock is not quite right)
@@ -4627,8 +4636,8 @@ var meshserver = null;
 var childProcess = null;
 var previouslyInstalledModules = {};
 function mainStart() {
-    // Check the NodeJS is version 22.21.1 or better.
-    if (!common.versionAtLeast(process.versions.node, '22.21.1')) { console.log("MeshCentral requires Node v22.21.1 or above, current version is " + process.version + "."); return; }
+    // Check the NodeJS is version 22.21.1 or better. If it is not, warn but still try to run.
+    if (!common.versionAtLeast(process.versions.node, '22.21.1')) { console.log("MeshCentral requires Node v22.21.1 or above, current version is " + process.version + ". MeshCentral may not work correctly."); }
 
     // If running within the node_modules folder, move working directory to the parent of the node_modules folder.
     if (__dirname.endsWith('\\node_modules\\meshcentral') || __dirname.endsWith('/node_modules/meshcentral')) { process.chdir(require('path').join(__dirname, '..', '..')); }
