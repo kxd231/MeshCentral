@@ -413,10 +413,12 @@
             for (const o of ppss) {
                 if (o.spsId !== next.id) { throw new CodecError('UNSUPPORTED', 'PPS refers to an SPS that is not the active one'); }
             }
-            // The picture must cover destRect and not exceed it by more than macroblock padding
+            // The picture must cover destRect. It may be larger than destRect: a server lays the picture out for the whole surface, which it aligns
+            // (GNOME Remote Desktop: to 64, so a 2560x1440 monitor is a 2560x1472 surface and picture, with a destRect of 1440 rows), and only the
+            // destRect and the regions are painted. It must still fit the surface, rounded up to whole macroblocks (and SURFACE_MAX_DIM, in parseSps).
             if ((next.visibleWidth < d.width) || (next.visibleHeight < d.height) ||
-                (next.codedWidth > roundUp16(d.width)) || (next.codedHeight > roundUp16(d.height))) {
-                throw new CodecError('INVALID', 'H.264 picture size does not fit destRect');
+                (next.codedWidth > roundUp16(ctx.surfaceWidth)) || (next.codedHeight > roundUp16(ctx.surfaceHeight))) {
+                throw new CodecError('INVALID', 'H.264 picture size does not fit the surface or destRect');
             }
             const reconfigure = (this.vd === null) || (this.config === null) || ((spsInfo !== null) && (
                 (this.config.codec !== spsInfo.codec) || (this.config.codedWidth !== spsInfo.codedWidth) || (this.config.codedHeight !== spsInfo.codedHeight) || (this.config.id !== spsInfo.id)));
