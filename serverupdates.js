@@ -446,7 +446,7 @@ function readTgzPackageJson(file, limit) {
 
 // The lowest Node.js version a package asks for in engines.node, as [major, minor, patch], or null. Only a plain lower bound is read
 // (">=22.21.1", also followed by further terms such as "<26"). A missing field or any other form of range is not checked here: the new
-// version still checks Node.js itself when it starts.
+// version only warns when it starts on a Node.js older than it asks for, it does not check it.
 function requiredNodeVersion(pkg) {
     const range = (pkg != null) && (pkg.engines != null) && (typeof pkg.engines === 'object') ? pkg.engines.node : null;
     if ((typeof range !== 'string') || (range.length > 64) || (range.indexOf('||') >= 0)) { return null; }
@@ -464,7 +464,7 @@ function nodeVersionMeets(running, required) {
 
 // What engines.node of a package means for the Node.js that runs the server: { range, required, status }.
 // status: 'none' (no engines.node), 'ok', 'too-old' (a plain lower bound that the running Node.js does not meet), 'unchecked' (a form of range that is not
-// a plain lower bound: the update does not check it and the new version checks Node.js itself when it starts). range is the text as the package writes it,
+// a plain lower bound: the update does not check it). range is the text as the package writes it,
 // cut to 64 characters without control characters.
 function nodeRequirement(pkg, running) {
     const raw = (pkg != null) && (pkg.engines != null) && (typeof pkg.engines === 'object') ? pkg.engines.node : null;
@@ -1393,7 +1393,7 @@ function createServerUpdater(options) {
                 if ((again.pin == null) || (again.pin.size !== pin.size) || (again.pin.sha384 !== pin.sha384)) { throw new Error('The pin of ' + release.version + ' does not count any more' + (again.reason || '') + '; nothing was installed.'); }
                 // Last, the package must run on this Node.js: a server that installs it on an older one does not start again
                 const needNode = requiredNodeVersion(inner);
-                if (nodeRequirement(inner, nodeVersion).status === 'unchecked') { log('WARNING: Release ' + release.version + ' has engines.node "' + nodeRequirement(inner, nodeVersion).range + '", which is not a plain lower bound like ">=22.21.1". Only a lower bound in it is checked here; the new version checks Node.js itself when it starts.'); }
+                if (nodeRequirement(inner, nodeVersion).status === 'unchecked') { log('WARNING: Release ' + release.version + ' has engines.node "' + nodeRequirement(inner, nodeVersion).range + '", which is not a plain lower bound like ">=22.21.1". Only a lower bound in it is checked here; any other part is not checked, and the new version only warns at start when Node.js is older than it asks for.'); }
                 if ((needNode != null) && !nodeVersionMeets(nodeVersion, needNode)) { throw new Error('Release ' + release.version + ' needs Node.js ' + needNode.join('.') + ' or newer, this server runs Node.js ' + String(nodeVersion).substring(0, 20) + '. Update Node.js first; nothing was installed.'); }
                 await fs.promises.chmod(temp, 0o600);
                 await fs.promises.rename(temp, target);
