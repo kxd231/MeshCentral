@@ -16611,7 +16611,7 @@
 						x += '<td style="text-align:center">';
 						var userRights = GetNodeRights(currentNode);
 						if (hasUninstall && (GetNodeRights(currentNode) == 0xFFFFFFFF)) {
-							x += '<button class="btn btn-sm btn-secondary" onclick="uninstallStoreApp(\'' + encodeURIComponent(app.name) + '\')">Remove</button>';
+							x += '<button class="btn btn-sm btn-secondary" onclick="uninstallStoreApp(\'' + encodeURIComponentEx(app.name) + '\')">Remove</button>';
 						} else {
 							x += '<span style="color:var(--bs-secondary)">-</span>';
 						}
