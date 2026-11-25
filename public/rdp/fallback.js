@@ -58,6 +58,27 @@
         try { storage.setItem(AVC444_MEMORY_KEY, String(now + AVC444_MEMORY_MS)); } catch (ex) { /* no storage: forgotten */ }
     }
 
+    // The same for H.264 as a whole: a session whose picture could not be decoded (or a server that insists on H.264) is retried as lossless GFX, not in classic
+    // bitmaps. The memory is kept like the AVC444 one, for the same time.
+    const H264_MEMORY_KEY = 'webrdpH264Failed';
+    const H264_MEMORY_MS = 12 * 60 * 60 * 1000;
+    function h264Remembered(storage, now) {
+        try {
+            const v = Number(storage.getItem(H264_MEMORY_KEY));
+            return Number.isFinite(v) && (v > 0) && (now < v);
+        } catch (ex) { return false; }
+    }
+    function rememberH264Failure(storage, now) {
+        try { storage.setItem(H264_MEMORY_KEY, String(now + H264_MEMORY_MS)); } catch (ex) { /* no storage: forgotten */ }
+    }
+    // gfx: the caps the server confirmed (rdp-connect.gfx) → H.264 can be in the stream (10.4, or 8.1 with AVC420_ENABLED)
+    function isH264Caps(gfx) {
+        if ((gfx == null) || (typeof gfx !== 'object')) { return false; }
+        return (gfx.capsVersion === 0x000A0400) || ((gfx.capsVersion === 0x00080105) && ((gfx.flags & 0x10) !== 0));
+    }
+    const H264_CODES = ['RDP_ERROR_CLIENT_DECODE', 'RDP_ERROR_H264_REQUIRED'];
+    function isH264Failure(info) { return (info != null) && (typeof info === 'object') && (H264_CODES.indexOf(info.code) >= 0); }
+
     // info: { code, hint }. Generic error codes carry no channel provenance; trust the engine's explicit hint.
     function isGfxFailure(info) {
         if ((info == null) || (typeof info !== 'object')) { return false; }
@@ -69,7 +90,7 @@
     //   attempt(mode)         a connection attempt starts with this requested mode ('legacy' | 'gfx' | 'h264'); fallback attempts pass fallback=true
     //   connected(mode)       rdp-connect arrived with this mode
     //   firstFrame()          the first desktop frame of the session was rendered
-    //   failure(info, usedAvc444) → 'retry-no-avc444' | 'retry-legacy' | 'offer-legacy' | 'error'. A GFX failure of a session that
+    //   failure(info, usedAvc444, usedH264) → 'retry-no-avc444' | 'retry-no-h264' | 'retry-legacy' | 'offer-legacy' | 'error'. A GFX failure of a session that
     //     confirmed the AVC444 set D, before its first frame, is retried once WITHOUT D (set B + A, Progressive on Windows); that retry does not use the legacy retry
     class GraphicsFallback {
         constructor(enabled) {
@@ -80,6 +101,7 @@
             this.frame = false;           // first frame of the current attempt rendered
             this.isFallback = false;      // the current attempt is the automatic legacy retry
             this.usedNoAvc444 = false;    // the one retry without AVC444 was taken
+            this.usedNoH264 = false;      // the one retry without H.264 (lossless GFX) was taken
         }
 
         attempt(mode, fallback) {
@@ -89,9 +111,11 @@
         firstFrame() { this.frame = true; }
         get gfxRequested() { return (this.requested !== null) && (this.requested !== 'legacy'); }
 
-        failure(info, usedAvc444) {
+        failure(info, usedAvc444, usedH264) {
             if (!this.gfxRequested || this.isFallback || !isGfxFailure(info)) { return 'error'; }
             if ((usedAvc444 === true) && !this.frame && this.enabled && !this.usedNoAvc444) { this.usedNoAvc444 = true; return 'retry-no-avc444'; }
+            // H.264 that the browser cannot decode: the server has GFX, so the retry is GFX without H.264 (as the user's "Lossless"), never classic bitmaps
+            if ((usedH264 === true) && !this.frame && this.enabled && !this.usedNoH264 && isH264Failure(info)) { this.usedNoH264 = true; return 'retry-no-h264'; }
             if (!this.frame) {
                 if (!this.enabled || this.used) { return 'error'; }
                 this.used = true;
@@ -103,6 +127,7 @@
 
     return Object.freeze({
         normalizePolicy: normalizePolicy, normalizePreference: normalizePreference, wantedMode: wantedMode,
+        h264Remembered: h264Remembered, rememberH264Failure: rememberH264Failure, isH264Caps: isH264Caps, isH264Failure: isH264Failure, H264_MEMORY_KEY: H264_MEMORY_KEY, H264_MEMORY_MS: H264_MEMORY_MS,
         avc444Remembered: avc444Remembered, rememberAvc444Failure: rememberAvc444Failure, AVC444_MEMORY_KEY: AVC444_MEMORY_KEY, AVC444_MEMORY_MS: AVC444_MEMORY_MS,
         isGfxFailure: isGfxFailure, GraphicsFallback: GraphicsFallback
     });

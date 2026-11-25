@@ -225,7 +225,24 @@
     function gfxAck(frameId, queueDepth) {
         return (isInt(frameId, 0, 0xFFFFFFFF) && isInt(queueDepth, 0, 0xFFFFFFFE)) ? ['gfx-ack', frameId, queueDepth] : null;
     }
-    function clientError(code) { return (CLIENT_ERROR_CODES.indexOf(code) >= 0) ? ['client-error', code] : ['client-error', 'INTERNAL']; }
+    // The diagnosis the worker adds to a client-error: only these members, numbers within range, strings of printable ASCII (no image data ever).
+    // The server applies the same rules (rdp/browser-messages.js) and writes the result to its relay debug log.
+    const DIAG_NUMBERS = ['profile', 'constraints', 'level', 'codedWidth', 'codedHeight', 'visibleWidth', 'visibleHeight', 'destWidth', 'destHeight', 'surfaceWidth', 'surfaceHeight', 'regions', 'key', 'picture'];
+    const DIAG_STRINGS = ['why', 'codec', 'decoder', 'decoderMessage'];
+    const DIAG_STRING_MAX = 100;
+    function sanitizeDiag(d) {
+        if ((d == null) || (typeof d !== 'object') || Array.isArray(d)) { return null; }
+        const out = {};
+        for (const k of DIAG_NUMBERS) { if (Number.isSafeInteger(d[k]) && (d[k] >= 0) && (d[k] <= 1000000)) { out[k] = d[k]; } }
+        for (const k of DIAG_STRINGS) { if (typeof d[k] === 'string') { const v = d[k].replace(/[^\x20-\x7e]/g, '?').substring(0, DIAG_STRING_MAX); if (v.length > 0) { out[k] = v; } } }
+        return (Object.keys(out).length > 0) ? out : null;
+    }
+    function clientError(code, diag) {
+        const m = (CLIENT_ERROR_CODES.indexOf(code) >= 0) ? ['client-error', code] : ['client-error', 'INTERNAL'];
+        const d = sanitizeDiag(diag);
+        if (d !== null) { m.push(d); }
+        return m;
+    }
 
     // ---- server → browser ------------------------------------------------------------------------
 
@@ -318,7 +335,7 @@
         relayUrl: relayUrl, basePathOfPage: basePathOfPage, normalizeLocale: normalizeLocale, browserCaps: browserCaps,
         buildInfos: buildInfos, mouseButton: mouseButton, mousePoint: mousePoint, mouse: mouse, wheel: wheel,
         WheelAccumulator: WheelAccumulator, normalizeWheel: normalizeWheel, scancode: scancode, unicode: unicode, utype: utype, sync: sync,
-        clipboard: clipboard, resize: resize, visibility: visibility, ack: ack, gfxAck: gfxAck, clientError: clientError,
+        clipboard: clipboard, resize: resize, visibility: visibility, ack: ack, gfxAck: gfxAck, clientError: clientError, sanitizeDiag: sanitizeDiag,
         parseServerMessage: parseServerMessage, sanitizeError: sanitizeError, describeError: describeError
     });
 });

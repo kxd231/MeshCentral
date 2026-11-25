@@ -55,6 +55,8 @@ var CreateRDPDesktop = function (canvasid, domainUrl) {
             onError: function (info) {
                 obj.consoleMessageTimeout = info.offerLegacy ? 60 : 10; // Seconds
                 obj.consoleMessage = (typeof webRdpErrorText === 'function') ? webRdpErrorText(info) : info.message; // Plain text, the page escapes it
+                // What failed first, when automatic retries followed (H.264 could not be decoded, then GNOME refused classic bitmaps): the final error alone hides it
+                if (info.earlier) { obj.consoleMessage += '\nFirst attempt: ' + info.earlier.code + (info.earlier.detail ? ' (' + info.earlier.detail + ')' : ''); }
                 obj.consoleMessageId = null;
                 delete obj.consoleMessageArgs;
                 // GFX failed after the desktop was shown: the page offers a reconnect in legacy mode (no automatic retry)

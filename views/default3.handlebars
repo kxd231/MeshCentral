@@ -11254,6 +11254,7 @@
         // Used to translate incoming agent console messages
         var agentConsoleMessages = ['', "Waiting for user to grant access...", "Denied", "Failed to start remote terminal session, {0} ({1})", "Timeout", "Received invalid network data", "Unable to capture display", "Protocol negotiation failed ({0})", "NLA not supported", "SSL required by server", "SSL not allowed by server", "SSL certificate not on server", "Inconsistent flags", "Hybrid required by server", "SSL with user auth required by server"];
         agentConsoleMessages['legacy-fallback'] = "Simplified graphics (classic bitmaps): {0}";
+        agentConsoleMessages['h264-fallback'] = "Lossless graphics, H.264 could not be used: {0}";
         agentConsoleMessages['reconnect-legacy'] = "Reconnect with classic bitmaps";
         agentConsoleMessages['accept-cert'] = "Accept the new certificate and reconnect";
         agentConsoleMessages['rec-limit-warn'] = "The recording of this session has reached {0}% of its size limit, {1} MB of {2} MB are left. The session ends when the limit is reached; connecting again starts a new recording.";
@@ -11262,7 +11263,7 @@
             var r;
             if (msgargs == null) { msgargs = []; }
             while (msgargs.length < 3) { msgargs.push(''); } // We need to call the format function in a way that works with older browsers and minifier, can't use apply() or ...
-            if (msgid && ((msgid < agentConsoleMessages.length) || (msgid == 'legacy-fallback') || (msgid == 'rec-limit-warn') || (msgid == 'rec-limit-end'))) { r = EscapeHtml(format(agentConsoleMessages[msgid], (msgargs[0]), (msgargs[1]), (msgargs[2]))); } else { r = EscapeHtml(msg); }
+            if (msgid && ((msgid < agentConsoleMessages.length) || (msgid == 'legacy-fallback') || (msgid == 'h264-fallback') || (msgid == 'rec-limit-warn') || (msgid == 'rec-limit-end'))) { r = EscapeHtml(format(agentConsoleMessages[msgid], (msgargs[0]), (msgargs[1]), (msgargs[2]))); } else { r = EscapeHtml(msg); }
             return r.split('\n').join('<br />') + '<br /><br />';
         }
 

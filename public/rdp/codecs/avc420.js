@@ -184,20 +184,24 @@
         const count = dv.getUint32(0, true);
         if (count > Math.floor((src.length - 4) / REGION_BYTES)) { throw new CodecError('TRUNCATED', 'metablock regions'); }
         if (count > MAX_REGIONS) { throw new CodecError('LIMIT', 'metablock regions'); }
-        const regions = new Array(count), quality = new Array(count);
+        const regions = [], quality = [], keep = [];
         let pos = 4;
         for (let i = 0; i < count; i++, pos += 8) {
             const left = dv.getUint16(pos, true), top = dv.getUint16(pos + 2, true), right = dv.getUint16(pos + 4, true), bottom = dv.getUint16(pos + 6, true);
             if ((right <= left) || (bottom <= top)) { throw new CodecError('INVALID', 'empty region'); }
-            if ((left < d.x) || (top < d.y) || (right > d.x + d.width) || (bottom > d.y + d.height)) { throw new CodecError('INVALID', 'region outside destRect'); }
-            regions[i] = { x: left, y: top, width: right - left, height: bottom - top };
+            // An encoder works in whole macroblocks: a server may round the rectangles of the changed area up to 16 pixels, beyond the destination
+            // rectangle (a 1440x900 desktop is 56.25 macroblocks high). What lies outside is no part of the picture: the rectangle is clipped to destRect,
+            // one that is entirely outside is dropped. (The stream is decoded either way: it carries the reference pictures.)
+            const x0 = Math.max(left, d.x), y0 = Math.max(top, d.y), x1 = Math.min(right, d.x + d.width), y1 = Math.min(bottom, d.y + d.height);
+            keep.push((x1 > x0) && (y1 > y0));
+            if (keep[i]) { regions.push({ x: x0, y: y0, width: x1 - x0, height: y1 - y0 }); }
         }
         for (let i = 0; i < count; i++, pos += 2) {
             const b = src[pos];
-            quality[i] = { qp: b & 0x3F, qualityVal: src[pos + 1], progressive: ((b & 0x80) !== 0) };
+            if (keep[i]) { quality.push({ qp: b & 0x3F, qualityVal: src[pos + 1], progressive: ((b & 0x80) !== 0) }); }
         }
         if (src.length - pos < 5) { throw new CodecError('TRUNCATED', 'bitstream'); }
-        return { regions: regions, quality: quality, streamOffset: pos };
+        return { regions: regions, quality: quality, streamOffset: pos, regionsSent: count };
     }
 
     function roundUp16(v) { return (v + 15) & ~15; }
@@ -223,6 +227,26 @@
             g.drawImage(frame, vx + rect.x, vy + rect.y, rect.width, rect.height, 0, 0, rect.width, rect.height);
             return g.getImageData(0, 0, rect.width, rect.height).data;
         }
+    }
+
+    // What the browser tells the server when a picture cannot be decoded (rdp/WIRE.md "client-error"): sizes, profile and level of the stream, never a
+    // pixel or a byte of it. The decoder keeps the figures of its last submission and puts them, with the name and message of the browser's own
+    // decoder error, on the CodecError that ends the session (err.diag).
+    function pictureInfo(meta, sps, ctx, idr, pictures) {
+        return {
+            codec: sps.codec, profile: sps.profile, constraints: sps.constraints, level: sps.level,
+            codedWidth: sps.codedWidth, codedHeight: sps.codedHeight, visibleWidth: sps.visibleWidth, visibleHeight: sps.visibleHeight,
+            destWidth: ctx.destRect.width, destHeight: ctx.destRect.height, surfaceWidth: ctx.surfaceWidth, surfaceHeight: ctx.surfaceHeight,
+            regions: meta.regionsSent, key: idr ? 1 : 0, picture: pictures
+        };
+    }
+    function annotate(err, info, e) {
+        if (err instanceof CodecError) {
+            const d = Object.assign({}, info || {});
+            if (e != null) { d.decoder = String(e.name || '').substring(0, 60); d.decoderMessage = String(e.message || '').substring(0, 100); }
+            err.diag = d;
+        }
+        return err;
     }
 
     function mapDecoderError(e) {
@@ -256,6 +280,8 @@
             this.closed = false;
             this.failure = null;        // CodecError after a decoder error: the session is going down
             this.reclaimed = false;     // the browser took the decoder away while nothing was pending: an IDR picture restarts it
+            this.info = null;           // figures of the last submission, for the report of a failure (pictureInfo)
+            this.pictures = 0;
         }
 
         _release(entry) {
@@ -323,16 +349,19 @@
         }
 
         _onError(vd, e) {
-            this._fail(vd, mapDecoderError(e), (e != null) && (e.name === 'QuotaExceededError'));
+            this._fail(vd, annotate(mapDecoderError(e), this.info, e), (e != null) && (e.name === 'QuotaExceededError'));
         }
 
         // No output for a submitted picture within the deadline
         _onTimeout(vd) {
-            this._fail(vd, new CodecError('UNSUPPORTED', 'H.264 decoder produced no output'), false);
+            this._fail(vd, annotate(new CodecError('UNSUPPORTED', 'H.264 decoder produced no output'), this.info, { name: 'Timeout', message: 'no output within ' + this.decodeTimeoutMs + ' ms' }), false);
         }
 
-        // → Promise<null | { frame, regions, quality }>. Validation errors throw synchronously (CodecError).
+        // → Promise<null | { frame, regions, quality }>. Validation errors throw synchronously (CodecError, with err.diag).
         submit(src, ctx) {
+            try { return this._submit(src, ctx); } catch (ex) { throw annotate(ex, this.info, null); }
+        }
+        _submit(src, ctx) {
             if (this.closed) { throw new CodecError('INTERNAL', 'decoder closed'); }
             if (this.failure !== null) { throw this.failure; }
             if (this.outstanding >= limits.AVC_MAX_PENDING_FRAMES) { throw new CodecError('LIMIT', 'pending AVC frames'); }
@@ -376,6 +405,7 @@
             const d = ctx.destRect;
             let next = this.config;
             if (spsInfo !== null) { next = spsInfo; }
+            if (next !== null) { this.info = pictureInfo(meta, next, ctx, idr, ++this.pictures); }
             if (next === null) {
                 if (this.reclaimed) { throw new CodecError('UNSUPPORTED', 'H.264 decoder was reclaimed; an IDR picture must restart it'); }
                 throw new CodecError('INVALID', 'stream does not start with an SPS');

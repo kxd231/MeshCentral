@@ -23,7 +23,7 @@
 * Messages to the UI thread:
 *   { t: 'ready', codecs }                  worker loaded
 *   { t: 'ack', total }                     cumulative processed bytes, forwarded as ['ack', total]
-*   { t: 'client-error', code, message? }   CodecError code; the worker applies nothing after it (message: dev mode only)
+*   { t: 'client-error', code, message?, diag? }   CodecError code; the worker applies nothing after it (message: dev mode only; diag: figures of the failing stream, see messages.clientError)
 *   { t: 'probe-result', ok, decodeMs, avc444? } the H.264 probe (infos.options.browser.h264); avc444: { ok, decodeMs } when asked for (infos.options.browser.avc444)
 *   { t: 'caps-result', rfx }               the RemoteFX probe (infos.options.browser.rfx)
 *   { t: 'gfx-ack', frameId, queueDepth }   END_FRAME fully rendered, forwarded as ['gfx-ack', ...] before the ack that covers it
@@ -441,6 +441,9 @@ if ((typeof importScripts === 'function') && (typeof module === 'undefined')) {
             this.ack.reset();
             const m = { t: 'client-error', code: code };
             if (this.dev && (ex instanceof CodecError)) { m.message = ex.message; }
+            // Why the decoder gave up, for the server's debug log (rdp/WIRE.md "client-error"): the constant text of the CodecError, the figures of the
+            // stream (profile, level, sizes, region count) and the name and message of the browser's decoder error; never image data
+            if (ex instanceof CodecError) { m.diag = Object.assign({ why: ex.message }, (ex.diag != null) ? ex.diag : {}); }
             this.post(m);
         }
 

@@ -172,7 +172,7 @@
 
         function load() {
             if (name != '') { QH('computerName', EscapeHtml(name)); }
-            client = RdpClient.createStandalone(Q('myCanvas'), { onNotice: function (n) { if (n.id == 'legacy-fallback') { QH('graphicsNote', EscapeHtml(rdpErrorText(n))); QV('graphicsNote', true); console.info('Web-RDP: GFX failed (' + n.code + '), using legacy graphics'); } } });
+            client = RdpClient.createStandalone(Q('myCanvas'), { onNotice: function (n) { if (n.id == 'legacy-fallback') { QH('graphicsNote', EscapeHtml(rdpErrorText(n))); QV('graphicsNote', true); console.info('Web-RDP: GFX failed (' + n.code + '), using legacy graphics'); } else if (n.id == 'h264-fallback') { QH('graphicsNote', EscapeHtml(rdpErrorText(n))); QV('graphicsNote', true); console.info('Web-RDP: H.264 failed (' + n.code + '), using lossless graphics'); } } });
             // Graphics (Auto / Lossless / Classic bitmaps) only where the server allows GFX; the choice is remembered in this browser like the other RDP options
             if (((webRdpGfx == 'on') || (webRdpGfx == 'dev'))) {
                 QV('rowgraphics', true);
@@ -218,8 +218,8 @@
             client.connect(cookie, domain, username, password, options, function (err) {
                 QV('myCanvas', false);
                 QV('main', true);
-                if (!err) QV('graphicsNote', false);      // after a failed legacy retry the note names the failure that caused it (the final error alone hides the first one)
-                if (err) { QH('errorMessage', EscapeHtml(rdpErrorText(err))); QV('errorMessage', true); }
+                QV('graphicsNote', false);
+                if (err) { QH('errorMessage', EscapeHtml(rdpErrorText(err) + ((err.earlier != null) ? ' (first attempt: ' + err.earlier.code + (err.earlier.detail ? ' ' + err.earlier.detail : '') + ')' : ''))); QV('errorMessage', true); }
                 // GFX failed after the picture was shown: the form still holds the values of this connect; connect again with classic bitmaps
                 if (err && (err.offerLegacy === true)) { QV('legacyAction', true); }
             });
@@ -229,6 +229,7 @@
         // Readable text for errors from the JavaScript Web-RDP client.
         function rdpErrorText(err) {
             if (err && (err.id == 'legacy-fallback')) return "Simplified graphics (classic bitmaps)" + ': ' + err.code;
+            if (err && (err.id == 'h264-fallback')) return "Lossless graphics, H.264 could not be used" + ': ' + err.code;
             if ((err != null) && (typeof err == 'object') && (typeof err.text == 'string')) return webRdpErrorText(err);
             var name = ((err != null) && (typeof err == 'object')) ? err.code : err;
             var detail = ((err != null) && (typeof err == 'object')) ? err.detail : null;

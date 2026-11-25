@@ -80,6 +80,8 @@ function create(o) {
         visibility: function (v) { if (session) { session.visibility(v); } },
         ack: function (t) { if (session) { session.ack(t); } },
         gfxAck: function (f, q) { if (session) { session.gfxAck(f, q); } },
+        // the browser could not decode a picture: what it tells about the stream (profile, level, sizes, its decoder's error) goes to the relay debug log only
+        clientError: function (code, diag) { debug('client-error ' + code + ((diag != null) ? ' ' + bm.formatDiag(diag) : '')); },
         charge: function (delta) { return (session != null) ? session.charge(delta) : (delta <= 0); },
         ping: function () { relayControl(CTRL_PING); },
         pong: function () { relayControl(CTRL_PONG); },

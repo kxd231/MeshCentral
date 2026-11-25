@@ -35,6 +35,21 @@ function limitedScancodeAllowed(k) {
 }
 
 const CLIENT_ERROR_CODES = new Set(['TRUNCATED', 'INVALID', 'LIMIT', 'UNSUPPORTED', 'INTERNAL']);
+// The diagnosis a browser may add to a client-error: the same members and rules as public/rdp/messages.js sanitizeDiag (a unit test compares them)
+const DIAG_NUMBERS = ['profile', 'constraints', 'level', 'codedWidth', 'codedHeight', 'visibleWidth', 'visibleHeight', 'destWidth', 'destHeight', 'surfaceWidth', 'surfaceHeight', 'regions', 'key', 'picture'];
+const DIAG_STRINGS = ['why', 'codec', 'decoder', 'decoderMessage'];
+function sanitizeDiag(d) {
+    if ((d == null) || (typeof d !== 'object') || Array.isArray(d)) { return null; }
+    const out = {};
+    for (const k of DIAG_NUMBERS) { if (Number.isSafeInteger(d[k]) && (d[k] >= 0) && (d[k] <= 1000000)) { out[k] = d[k]; } }
+    for (const k of DIAG_STRINGS) { if (typeof d[k] === 'string') { const v = d[k].replace(/[^\x20-\x7e]/g, '?').substring(0, 100); if (v.length > 0) { out[k] = v; } } }
+    return (Object.keys(out).length > 0) ? out : null;
+}
+// One line for the relay debug log: member=value pairs, strings quoted (nothing but validated members)
+function formatDiag(d) {
+    if (d == null) { return ''; }
+    return Object.keys(d).map(function (k) { return k + '=' + ((typeof d[k] === 'string') ? JSON.stringify(d[k]) : d[k]); }).join(' ');
+}
 const GFX_MODES = new Set(['legacy', 'gfx', 'h264']);
 const LOCALE = /^[A-Za-z]{2,8}(-[A-Za-z0-9]{1,8}){0,3}$/;
 const INPUT_TYPES = new Set(['mouse', 'wheel', 'scancode', 'unicode', 'sync']);
@@ -200,8 +215,9 @@ function validateMessage(msg, bounds) {
             if ((n !== 2) || !isInt(a[1], 0, Number.MAX_SAFE_INTEGER)) { return null; }
             return { type: 'ack', args: [a[1]] };
         case 'client-error':
-            if ((n !== 2) || !CLIENT_ERROR_CODES.has(a[1])) { return null; }
-            return { type: 'client-error', args: [a[1]] };
+            if (((n !== 2) && (n !== 3)) || !CLIENT_ERROR_CODES.has(a[1])) { return null; }
+            // the diagnosis of the failing stream (public/rdp/messages.js sanitizeDiag): an invalid one is dropped, the error stands
+            return { type: 'client-error', args: [a[1], (n === 3) ? sanitizeDiag(a[2]) : null] };
         case 'ping': case 'pong': case 'disconnect':
             return (n === 1) ? { type: a[0], args: [] } : null;
     }
@@ -379,7 +395,7 @@ function BrowserProtocol(sink, clock) {
             case 'utype': return sink.typeText(m.args[0]);
             case 'ack': return sink.ack(m.args[0]);
             case 'gfx-ack': return sink.gfxAck(m.args[0], m.args[1]);
-            case 'client-error': { const s = state; self.close(); if (s !== STATE.CLOSING) { sink.fail(new RdpError(E.RDP_ERROR_CLIENT_DECODE, { detail: m.args[0], hint: (m.args[0] === 'UNSUPPORTED') ? errors.hints.USE_LEGACY : undefined })); } return; }
+            case 'client-error': { const s = state; if (typeof sink.clientError === 'function') { try { sink.clientError(m.args[0], m.args[1]); } catch (ex) { /* a log must not change the session */ } } self.close(); if (s !== STATE.CLOSING) { sink.fail(new RdpError(E.RDP_ERROR_CLIENT_DECODE, { detail: m.args[0], hint: (m.args[0] === 'UNSUPPORTED') ? errors.hints.USE_LEGACY : undefined })); } return; }
             case 'disconnect': self.close(); return sink.disconnect();
         }
     }
@@ -429,6 +445,8 @@ function toInputEvent(m) {
 }
 
 module.exports = {
+    sanitizeDiag: sanitizeDiag,
+    formatDiag: formatDiag,
     STATE: STATE,
     RIGHTS: RIGHTS,
     rightsLevel: rightsLevel,

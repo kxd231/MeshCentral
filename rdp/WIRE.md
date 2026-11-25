@@ -101,7 +101,7 @@ for a relay device). Enforced on the server; the browser hides controls only for
 | `['visibility', visible]` | bool | false → Suppress Output, true → allow + Refresh Rect |
 | `['gfx-ack', frameId, queueDepth]` | frameId: 0..0xFFFFFFFF; queueDepth: 0..0xFFFFFFFE (bytes) | rules in Flow control |
 | `['ack', total]` | 0..2^53−1, cumulative bytes | rules in Flow control |
-| `['client-error', code]` | one of `TRUNCATED`, `INVALID`, `LIMIT`, `UNSUPPORTED`, `INTERNAL` | session ends with `RDP_ERROR_CLIENT_DECODE` (detail = code) |
+| `['client-error', code]` or `['client-error', code, diag]` | one of `TRUNCATED`, `INVALID`, `LIMIT`, `UNSUPPORTED`, `INTERNAL`; `diag` optional | session ends with `RDP_ERROR_CLIENT_DECODE` (detail = code). `diag`: an object that tells the server why (it only goes to the relay debug log, `settings.debug` with `relay`): numbers `profile`, `constraints`, `level`, `codedWidth`, `codedHeight`, `visibleWidth`, `visibleHeight`, `destWidth`, `destHeight`, `surfaceWidth`, `surfaceHeight`, `regions`, `key` (1 = IDR), `picture` (0..1000000), strings `why` (the constant text of the decoder's error), `codec`, `decoder` and `decoderMessage` (the name and message of the browser's own decoder error), printable ASCII, 100 characters at most. Other members and invalid values are dropped; a `diag` that is not an object is ignored. Never image or stream data |
 | `['ping']`, `['pong']` | — | keep-alive through the agent control channel, as today |
 | `['disconnect']` | — | clean close |
 
