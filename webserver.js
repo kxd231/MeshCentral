@@ -5327,6 +5327,7 @@ module.exports.CreateWebServer = function (parent, db, args, certificates, doneF
             if ((fields != null) && (fields.auth != null) && (fields.auth.length == 1) && (typeof fields.auth[0] == 'string')) {
                 var loginCookie = obj.parent.decodeCookie(fields.auth[0], obj.parent.loginCookieEncryptionKey, 60); // 60 minute timeout
                 if ((loginCookie != null) && (checkAuthCookie(loginCookie, req) == false)) { loginCookie = null; } // Check cookie IP and session binding.
+                if ((loginCookie != null) && isDeviceShareGuestCookie(loginCookie)) { loginCookie = null; } // Device share guest cookies are for relay sessions only.
                 if ((loginCookie != null) && (domain.id == loginCookie.domainid)) { authUserid = loginCookie.userid; } // Use cookie authentication
             }
             if ((authUserid == null) || (obj.users[authUserid] == null)) { removeUploads(); res.sendStatus(401); return; }
