@@ -74,7 +74,7 @@
         let fb = new fallback.GraphicsFallback(false), retryParams = null, retryTimer = null, suppressAvc444 = false;
         const h264Allowed = (options.h264 !== false);   // settings.webRdp.h264 (page variable webRdpH264); the server enforces it too
         let firstFrameTimer = null, firstFrameRemaining = null, firstFrameStarted = null, fallbackCause = null, slotRetryUsed = false;
-        let suppressH264 = false, h264Cause = null, firstFailure = null;     // the retry as lossless GFX after H.264 could not be decoded; the first failure of this connect
+        let suppressH264 = false, h264Cause = null, firstFailure = null, lastDiag = null, h264Scope = '';     // the retry as lossless GFX after H.264 could not be decoded; the first failure of this connect
         let requestedGfx = 'legacy', gfxSession = false, probeTimer = null, probeDone = null, stats = null;
         let rfxReported = false, capsDone = null;      // RemoteFX reported in infos (dev switch, legacy mode, worker probe); the answer of the worker's 'caps'
         let ctx2d = null, styleEl = null, inputAttached = false, lifecycleAttached = false, offscreenMode = false;
@@ -192,9 +192,12 @@
             if (usedAvc444 && fallback.isGfxFailure(info)) { fallback.rememberAvc444Failure(deps.storage, deps.now()); }
             // H.264 in the stream: confirmed by the caps, or requested and the failure came before the caps
             const usedH264 = (client.gfx != null) ? fallback.isH264Caps(client.gfx) : (requestedGfx === 'h264');
-            const verdict = fb.failure(info, usedAvc444, usedH264);
-            // not when only AVC444 is blamed (the retry keeps AVC420): then H.264 itself has not failed yet
-            if (usedH264 && fallback.isH264Failure(info) && (verdict !== 'retry-no-avc444')) { fallback.rememberH264Failure(deps.storage, deps.now()); }
+            // It is an H.264 failure only when the decoder that failed was the AVC one (the worker's diagnosis names the codec of the failing picture): CLIENT_DECODE
+            // alone is also a Progressive, RemoteFX or ClearCodec error, a budget limit (LIMIT) or a stalled decoder, which say nothing about H.264
+            const avcFailure = fallback.isH264Failure(info) && (lastDiag !== null) && (typeof lastDiag.codec === 'string') && (info.detail !== 'LIMIT') && (lastDiag.decoder !== 'Timeout');
+            const verdict = fb.failure(info, usedAvc444, usedH264 && avcFailure);
+            // remembered for this device only, and not when only AVC444 is blamed (the retry keeps AVC420): then H.264 itself has not failed yet
+            if (usedH264 && avcFailure && (verdict !== 'retry-no-avc444')) { fallback.rememberH264Failure(deps.storage, deps.now(), h264Scope); }
             const cause = function () {
                 const c = { code: info.code };
                 if (['TRUNCATED', 'INVALID', 'LIMIT', 'UNSUPPORTED', 'INTERNAL'].indexOf(info.detail) >= 0) { c.detail = info.detail; }
@@ -245,6 +248,7 @@
         function reportClientError(code, diag) {
             if (clientErrorSent) { return; }
             clientErrorSent = true;
+            lastDiag = messages.sanitizeDiag(diag);
             send(messages.clientError(code, diag));
             // Stop feeding the worker; if the server does not answer, show the problem ourselves
             clientErrorTimer = deps.setTimeout(function () {
@@ -259,13 +263,13 @@
             if (client.state !== 0) { return false; }
             // One fallback budget per user-initiated connect; the automatic retry (beginAttempt with forceLegacy) never gets a new one
             fb = new fallback.GraphicsFallback(gfxPolicy === 'on' || options.gfxFallback === true);
-            fallbackCause = null; slotRetryUsed = false; suppressAvc444 = false; suppressH264 = false; h264Cause = null; firstFailure = null;
+            fallbackCause = null; slotRetryUsed = false; suppressAvc444 = false; suppressH264 = false; h264Cause = null; firstFailure = null; h264Scope = ((typeof p.ip === 'string') && /^node\/[^\s]{1,200}$/.test(p.ip)) ? p.ip : '';
             return beginAttempt(p, false);
         };
 
         // One connection attempt. forceLegacy: the automatic retry after a GFX failure.
         function beginAttempt(p, forceLegacy) {
-            errorShown = false; clientErrorSent = false; needSync = true; lastClip = null; gfxSession = false; client.gfx = null;
+            errorShown = false; clientErrorSent = false; lastDiag = null; needSync = true; lastClip = null; gfxSession = false; client.gfx = null;
             setState(1);
             const canvas = client.canvas;
             const offscreen = (canvas != null) && (typeof canvas.transferControlToOffscreen === 'function');
@@ -274,7 +278,7 @@
             let wanted = forceLegacy ? 'legacy' : fallback.wantedMode(gfxPolicy, preference, options.gfxMode);
             if (!h264Allowed && ((wanted === 'auto') || (wanted === 'h264'))) { wanted = 'gfx'; }     // no H.264 at all: lossless GFX, nothing to probe
             // H.264 could not be decoded by this browser a short time ago (or just now, in this connect): lossless GFX, no probe
-            if (((wanted === 'auto') || (wanted === 'h264')) && (suppressH264 || fallback.h264Remembered(deps.storage, deps.now()))) { wanted = 'gfx'; }
+            if (((wanted === 'auto') || (wanted === 'h264')) && (suppressH264 || fallback.h264Remembered(deps.storage, deps.now(), h264Scope))) { wanted = 'gfx'; }
             if (['legacy', 'gfx', 'h264', 'auto'].indexOf(wanted) < 0) { localError('Invalid graphics mode'); return false; }
             const build = function (gfx, h264, rfx, avc444) {
                 return messages.buildInfos(Object.assign({}, p, { offscreenCanvas: offscreen, h264: h264, avc444: avc444 || null, rfx: (rfx === true), options: Object.assign({}, p.options, { gfx: gfx }) }));
@@ -397,7 +401,7 @@
             }
             gfxSession = (m.mode === 'gfx');
             fb.connected(m.mode);
-            if (!gfxSession) { retryParams = null; }     // a legacy session never falls back
+            if (!gfxSession) { retryParams = null; firstFailure = null; }     // a legacy session never falls back; what failed before it connected is history
             if (gfxSession) {
                 firstFrameRemaining = FIRST_FRAME_WAIT_MS;
                 resumeFirstFrameTimer();
@@ -485,7 +489,7 @@
                     const g = messages.gfxAck(m.frameId, m.queueDepth);
                     if (g === null) { reportClientError('INTERNAL'); break; }
                     send(g);
-                    clearFirstFrameTimer(); firstFrameRemaining = null; fb.firstFrame(); retryParams = null;       // the desktop was shown: no automatic retry from here on
+                    clearFirstFrameTimer(); firstFrameRemaining = null; fb.firstFrame(); retryParams = null; firstFailure = null;      // the desktop was shown: no automatic retry from here on
                     if (stats !== null) { stats.gfxAcks++; }
                     break;
                 }

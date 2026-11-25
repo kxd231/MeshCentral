@@ -19,7 +19,6 @@
 
     // Codes that mean "this GFX session cannot work here" (rdp/protocol/errors.js, public/rdp/shared/errors.js):
     //   CAPABILITIES_REJECTED / hint use-legacy   the server refuses or never confirmed GFX (GFX_CONFIRM_TIMEOUT_MS), or this client cannot show the mode
-    //   H264_REQUIRED                              the server insists on H.264, which this browser cannot decode
     //   CLIENT_DECODE                              the server's answer to a client-error of the worker (decoder or WebCodecs failure, UNSUPPORTED codec)
     // Server-side GFX parser and budget failures carry use-legacy, including PROTOCOL and RESOURCE_LIMIT.
     const GFX_CODES = ['RDP_ERROR_CAPABILITIES_REJECTED', 'RDP_ERROR_H264_REQUIRED', 'RDP_ERROR_CLIENT_DECODE'];
@@ -60,24 +59,27 @@
 
     // The same for H.264 as a whole: a session whose picture could not be decoded (or a server that insists on H.264) is retried as lossless GFX, not in classic
     // bitmaps. The memory is kept like the AVC444 one, for the same time.
+    // The memory is kept per device (scope: the node id of the connect, or '' for a connect that does not know it): a browser that cannot decode the H.264
+    // of one server still gets H.264 from the others.
     const H264_MEMORY_KEY = 'webrdpH264Failed';
     const H264_MEMORY_MS = 12 * 60 * 60 * 1000;
-    function h264Remembered(storage, now) {
+    function h264Key(scope) { return (typeof scope === 'string' && scope.length > 0) ? (H264_MEMORY_KEY + ':' + scope) : H264_MEMORY_KEY; }
+    function h264Remembered(storage, now, scope) {
         try {
-            const v = Number(storage.getItem(H264_MEMORY_KEY));
+            const v = Number(storage.getItem(h264Key(scope)));
             return Number.isFinite(v) && (v > 0) && (now < v);
         } catch (ex) { return false; }
     }
-    function rememberH264Failure(storage, now) {
-        try { storage.setItem(H264_MEMORY_KEY, String(now + H264_MEMORY_MS)); } catch (ex) { /* no storage: forgotten */ }
+    function rememberH264Failure(storage, now, scope) {
+        try { storage.setItem(h264Key(scope), String(now + H264_MEMORY_MS)); } catch (ex) { /* no storage: forgotten */ }
     }
     // gfx: the caps the server confirmed (rdp-connect.gfx) → H.264 can be in the stream (10.4, or 8.1 with AVC420_ENABLED)
     function isH264Caps(gfx) {
         if ((gfx == null) || (typeof gfx !== 'object')) { return false; }
         return (gfx.capsVersion === 0x000A0400) || ((gfx.capsVersion === 0x00080105) && ((gfx.flags & 0x10) !== 0));
     }
-    const H264_CODES = ['RDP_ERROR_CLIENT_DECODE', 'RDP_ERROR_H264_REQUIRED'];
-    function isH264Failure(info) { return (info != null) && (typeof info === 'object') && (H264_CODES.indexOf(info.code) >= 0); }
+    // What counts as an H.264 failure is decided by the client from the worker's diagnosis (the decoder that failed was the AVC one): the code alone says CLIENT_DECODE for every codec
+    function isH264Failure(info) { return (info != null) && (typeof info === 'object') && (info.code === 'RDP_ERROR_CLIENT_DECODE'); }
 
     // info: { code, hint }. Generic error codes carry no channel provenance; trust the engine's explicit hint.
     function isGfxFailure(info) {

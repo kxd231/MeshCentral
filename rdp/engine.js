@@ -292,6 +292,7 @@ class Engine {
         this.netEnd = false;
         this.netBase = this.netIn;      // everything read so far belongs to the closed connection and is acknowledged
         this.transport = new RelayTransport(this);
+        this.armConnectTimer();         // the second connection gets its full time from its own start, whatever opening the relay took
         this.scheduleNetAck();
         this.connection = this.factory(this.io());
         this.connection.start();

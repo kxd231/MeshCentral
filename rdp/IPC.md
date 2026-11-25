@@ -229,7 +229,7 @@ device, a server that names none wants the same endpoint again). The sequence:
    dropped (counted as written).
 4. When the new relay is connected the main process posts `redirected`, the engine starts a new connection on a new transport with: the routing token in the
    X.224 Connection Request, the credentials of the packet instead of the user's (which were wiped after Client Info), and the certificate policy below. The
-   connection deadline of the engine starts again (`CONNECT_TIMEOUT_MS` for the new relay and the second connection).
+   connection deadline of the engine starts again at `redirected` (`CONNECT_TIMEOUT_MS` for the second connection; the main process allows the relay and the second connection together `CONNECT_TIMEOUT_MS + CONNECT_GRACE_MS` from the redirect).
 5. `connect` reports the **first** connection's certificate fingerprint and NLA flag (the endpoint of the device itself), so the main process pins and remembers
    what the next session meets first; the session daemon's certificate behind it is never pinned and the pin is never compared with it.
 

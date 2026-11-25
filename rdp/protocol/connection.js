@@ -100,6 +100,7 @@ class Connection {
         this.visibilityPending = false;
         this.lastRefreshAt = 0; this.refreshTimer = null;
         this.failed = false;
+        this.startedAt = 0;
         this.redirecting = false;       // a Server Redirection is being followed: this connection only waits to be closed by the engine
         this.dynamic = new DynamicChannels(
             budget, b => this.sendSvc('drdynvc', b),
@@ -190,6 +191,7 @@ class Connection {
     start() {
         if (this.started) bad();
         this.started = true;
+        this.startedAt = this.now();
         transport
             .connect(this.io.transport, {
                 ...this.config,
@@ -679,10 +681,13 @@ class Connection {
     armGfxConfirm(patient) {
         clearTimeout(this.gfxConfirmTimer);
         const started = this.now();
+        // The engine ends a session that is not connected CONNECT_TIMEOUT_MS after the connection started with a bare RDP_ERROR_TIMEOUT: the patient wait ends
+        // before that (GFX_CONFIRM_MARGIN_MS), so the user gets CAPABILITIES_REJECTED with the use-legacy retry instead
+        const until = Math.min(started + L.GFX_CONFIRM_SILENT_MS, ((this.startedAt > 0) ? this.startedAt : started) + L.CONNECT_TIMEOUT_MS - L.GFX_CONFIRM_MARGIN_MS);
         const wait = (ms) => {
             this.gfxConfirmTimer = setTimeout(() => {
                 const silent = patient && !this.graphics && this.earlyFrames.length === 0;
-                const left = L.GFX_CONFIRM_SILENT_MS - (this.now() - started);
+                const left = until - this.now();
                 if (silent && left > 0 && !this.closed && !this.redirecting) wait(Math.min(left, L.GFX_CONFIRM_TIMEOUT_MS));
                 else this.fail(this.missingGfx());
             }, ms);

@@ -258,13 +258,16 @@ class Graphics {
             this.avcStream(r, s, box);
         } else { r.need(1); r.skip(r.remaining); } // Planar stream, checked again by the browser decoder
     }
-    // RDPGFX_AVC420_BITMAP_STREAM: metablock (regions inside the destination rectangle) and an Annex B stream, decoded by the browser
+    // RDPGFX_AVC420_BITMAP_STREAM: metablock (regions, clipped to the destination rectangle by the browser) and an Annex B stream, decoded by the browser
     avcStream(r, s, box) {
         const count = r.u32le(); if (count > Math.floor(r.remaining / 10)) bad();
         if (count > AVC_REGIONS_MAX) limit();
         for (let i = 0; i < count; i++) {
-            const region = rect(r, s);
-            if (region.x < box.x || region.y < box.y || region.x + region.width > box.x + box.width || region.y + region.height > box.y + box.height) bad();
+            // An encoder works in whole macroblocks, so a server may round the rectangles of the changed area up beyond the destination rectangle (and the
+            // surface): a rectangle that is empty or upside down is malformed, one that reaches beyond the destination is clipped by the browser
+            // (public/rdp/codecs/avc420.js parseMetablock, the same policy), one entirely outside paints nothing. The PDU is forwarded as it is.
+            const left = r.u16le(), top = r.u16le(), right = r.u16le(), bottom = r.u16le();
+            if (right <= left || bottom <= top) bad();
         }
         r.skip(count * 2); r.need(4); r.skip(r.remaining);
     }

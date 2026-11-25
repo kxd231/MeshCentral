@@ -74,9 +74,9 @@ and the server allows it, otherwise lossless GFX. **Lossless** uses GFX without 
 **Classic bitmaps** uses plain bitmap updates. If a session that negotiated AVC444 fails
 before its first picture, the browser reconnects once without AVC444 (GFX with Progressive on
 Windows) and remembers the failure for 12 hours in this browser, so that following
-connects do not offer AVC444. If H.264 itself cannot be decoded (the browser reports a decoder
-error or the server insists on H.264) before the first picture, the browser reconnects once as
-**Lossless** GFX (a notice says so) and remembers that for 12 hours too; classic bitmaps come
+connects do not offer AVC444. If the H.264 decoder of the browser fails (AVC420 or AVC444, not another codec) before the first
+picture, the browser reconnects once as **Lossless** GFX (a notice says so) and remembers that for
+12 hours for that device; classic bitmaps come
 only when GFX itself fails (the server refuses it, or lossless GFX fails as well) and follow the rule
 below. A final error that follows such retries names the first failure too.
 
