@@ -287,6 +287,7 @@ class Engine {
         this.config = Object.freeze(Object.assign({}, this.config, {
             trust: Object.freeze({ fingerprint256: expected, nlaSeen: nlaSeen }), routingToken: plan.routingToken, redirected: true
         }));
+        for (const k of ['domain', 'username', 'password']) { this.credentials[k].fill(0); }      // the first connection's credentials: normally zero since its Client Info
         this.credentials = Object.freeze({ domain: plan.credentials.domain, username: plan.credentials.username, password: plan.credentials.password });
         this.netEnd = false;
         this.netBase = this.netIn;      // everything read so far belongs to the closed connection and is acknowledged

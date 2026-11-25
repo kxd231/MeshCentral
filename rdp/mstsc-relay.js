@@ -50,7 +50,7 @@ function setMaxPayload(ws, n) {
 //   reauthorize(func(ctx | null))
 //                              optional, apprelays: the rights of the user and the device are checked again exactly as in authorize (no stored credentials,
 //                              no trust record), and the relay URL is renewed. Used when the server redirects the session to the same device (Server
-//                              Redirection): a new relay is opened. ctx as above; null: no longer authorized (the session is closed)
+//                              Redirection): a new relay is opened. ctx as above; null: no longer authorized (the session ends with RDP_ERROR_ACCESS_DENIED)
 //   onStart(done(waitMs))      optional, apprelays: the session is admitted and nothing has been sent towards the target yet (audit line
 //                              for a SIEM). The agent relay is opened after done(); the engine, and with it the RDP logon, starts no
 //                              earlier than waitMs after done()
@@ -264,7 +264,7 @@ function create(o) {
         if (typeof o.reauthorize != 'function') { done(null); return; }
         o.reauthorize(function (ctx) {
             if (obj.closed || ended) { return; }
-            if (ctx == null) { close(null); return; }                      // not authorized any more: closed as an unauthorized session is
+            if (ctx == null) { close(new RdpError(E.RDP_ERROR_ACCESS_DENIED)); return; }      // not authorized any more: the user is told
             if (ctx.error != null) { close(ctx.error); return; }
             // the same rights and the same target as the session was admitted with: a change in between ends the session
             if ((ctx.rights !== level0) || (ctx.serverName !== serverName0)) { close(new RdpError(E.RDP_ERROR_ACCESS_DENIED)); return; }

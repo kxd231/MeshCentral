@@ -62,14 +62,18 @@ function ascii(r, max) {
     return s;
 }
 // UTF-16LE, NUL terminated -> dedicated copy without the terminator (user name, domain, text password: they stay UTF-16LE, the form the
-// credentials have everywhere in the engine). No NUL inside, no control character.
-function utf16Secret(r, max) {
+// credentials have everywhere in the engine). Neither the terminator missing nor a NUL or control character inside is a protocol error here: the
+// target decides first (a redirect to another host is reported as such), the field is then unusable and prepare() refuses to follow. A length
+// outside the limits is still a protocol error (field()).
+function utf16Secret(r, max, out) {
     const b = field(r, max, true);
-    if (b.length < 2 || b[b.length - 1] !== 0 || b[b.length - 2] !== 0) bad();
-    return unterminated(b);
+    const v = unterminated(b);
+    if (v === null) out.unusable = true;
+    return v;
 }
 function unterminated(b) {
-    for (let i = 0; i < b.length - 2; i += 2) if (b[i] === 0 && b[i + 1] === 0) bad();
+    if (b.length < 2 || b[b.length - 1] !== 0 || b[b.length - 2] !== 0) return null;
+    for (let i = 0; i < b.length - 2; i += 2) if (b[i + 1] === 0 && b[i] < 0x20) return null;      // NUL or control character
     return new Uint8Array(b.subarray(0, b.length - 2));
 }
 // UTF-16LE text, optional terminator, printable ASCII only (random binary data does not pass: a code unit has a 95 in 65536 chance) -> dedicated copy, or null
@@ -102,29 +106,45 @@ function isDerSequence(b) {
     return at + len === b.length;
 }
 
-// TargetCertificate (MS-RDPBCGR 2.2.13.1): the X.509 certificate of the target. Servers send it as DER or as the Base64 (or PEM) text of
-// it, in UTF-16LE or in single bytes, the DER possibly behind a 12 byte header with its length (GNOME Remote Desktop: Base64 text in UTF-16LE
-// of such a blob); all of these are accepted and the result is always the DER. Anything else is a protocol error.
+// TARGET_CERTIFICATE_CONTAINER (MS-RDPBCGR 2.2.13.1.2): elements of { ElementType u32, Encoding u32, ElementSize u32, ElementData }; the one
+// that counts is the certificate (type 0x20) in DER encoding (1); other elements are skipped. The container must be consumed exactly.
+const ELEMENT_CERTIFICATE = 0x20, ENCODING_DER = 1, MAX_ELEMENTS = 16;
+function u32(b, o) { return (b[o] | (b[o + 1] << 8) | (b[o + 2] << 16) | (b[o + 3] * 0x1000000)) >>> 0; }
+function fromContainer(b) {
+    let found = null, at = 0;
+    for (let n = 0; at < b.length; n++) {
+        if (n >= MAX_ELEMENTS || b.length - at < 12) return null;
+        const type = u32(b, at), enc = u32(b, at + 4), size = u32(b, at + 8);
+        at += 12;
+        if (size > b.length - at) return null;
+        if (found === null && type === ELEMENT_CERTIFICATE && enc === ENCODING_DER && isDerSequence(b.subarray(at, at + size))) found = new Uint8Array(b.subarray(at, at + size));
+        at += size;
+    }
+    return found;
+}
+
+// TargetCertificate (MS-RDPBCGR 2.2.13.1): the X.509 certificate of the target as the container above (GNOME Remote Desktop sends the Base64
+// text of it in UTF-16LE), or as plain DER, or as the Base64 / PEM text of DER; all are accepted and the result is the DER. null when it is
+// none of these: the field is then unusable (prepare() refuses to follow, a redirect to another host is still reported as such).
 function certificate(b) {
-    if (b.length === 0) bad();
+    if (b.length === 0) return null;
     if (isDerSequence(b)) return new Uint8Array(b);
     let text = '';
     const wide = (b.length >= 2) && (b.length % 2 === 0) && (b[1] === 0) && (b[b.length - 1] === 0);
     const step = wide ? 2 : 1;
+    let printable = true;
     for (let i = 0; i < b.length; i += step) {
-        if (wide && b[i + 1] !== 0) bad();
+        if (wide && b[i + 1] !== 0) { printable = false; break; }
         if (b[i] === 0 && i >= b.length - step) break;      // a terminator
-        if (b[i] < 0x09 || b[i] > 0x7e) bad();
+        if (b[i] < 0x09 || b[i] > 0x7e) { printable = false; break; }
         text += String.fromCharCode(b[i]);
     }
+    if (!printable) return fromContainer(b);              // binary: the container itself
     const pem = /-----BEGIN CERTIFICATE-----([^-]*)-----END CERTIFICATE-----/.exec(text);
     const base64 = (pem ? pem[1] : text).replace(/[\t\r\n ]/g, '');
-    if (!/^[A-Za-z0-9+/]+={0,2}$/.test(base64) || base64.length % 4 !== 0) bad();
+    if (!/^[A-Za-z0-9+/]+={0,2}$/.test(base64) || base64.length % 4 !== 0) return null;
     const der = new Uint8Array(Buffer.from(base64, 'base64'));
-    if (isDerSequence(der)) return der;
-    // GNOME Remote Desktop wraps the DER in 12 bytes: two words (0x20 and 1) and the length of the certificate
-    if (der.length > 12 && (der[8] | (der[9] << 8) | (der[10] << 16) | (der[11] * 0x1000000)) === der.length - 12 && isDerSequence(der.subarray(12))) return new Uint8Array(der.subarray(12));
-    bad();
+    return isDerSequence(der) ? der : fromContainer(der);
 }
 
 // body: the Share Control body after the pduSource (pad2Octets + TS_SERVER_REDIRECTION, MS-RDPBCGR 2.2.13.3.1).
@@ -142,19 +162,19 @@ function parse(bytes) {
     const out = {
         sessionId, flags, noRedirect: !!(flags & LB.NOREDIRECT), targetAddress: null, targetAddresses: [], fqdn: null, netbios: null,
         loadBalanceInfo: null, username: null, domain: null, passwordCookie: null, passwordText: null, passwordEncrypted: !!(flags & LB.PASSWORD_IS_PK_ENCRYPTED),
-        targetCertificate: null
+        targetCertificate: null, unusable: false      // unusable: a field the follow-up connection needs is present but cannot be used (prepare() refuses)
     };
     try {
         if (flags & LB.TARGET_NET_ADDRESS) out.targetAddress = host(r, MAX.ADDRESS);
         if (flags & LB.LOAD_BALANCE_INFO) out.loadBalanceInfo = new Uint8Array(field(r, MAX.LB_INFO));
-        if (flags & LB.USERNAME) out.username = utf16Secret(r, MAX.USERNAME);
-        if (flags & LB.DOMAIN) out.domain = utf16Secret(r, MAX.DOMAIN);
+        if (flags & LB.USERNAME) out.username = utf16Secret(r, MAX.USERNAME, out);
+        if (flags & LB.DOMAIN) out.domain = utf16Secret(r, MAX.DOMAIN, out);
         if (flags & LB.PASSWORD) {
             const b = field(r, MAX.PASSWORD);
             if (!(flags & LB.PASSWORD_IS_PK_ENCRYPTED)) {
                 // a text password must be UTF-16 and terminated (FreeRDP)
-                if (b.length & 1 || b.length < 2 || b[b.length - 1] !== 0 || b[b.length - 2] !== 0) bad();
-                out.passwordText = unterminated(b);
+                out.passwordText = ((b.length & 1) === 0) ? unterminated(b) : null;
+                if (out.passwordText === null) out.unusable = true;
             } else {
                 // A password cookie is opaque, and a truly encrypted one cannot be used. GNOME Remote Desktop sets the flag on a one-time password that
                 // is plain printable ASCII in UTF-16 (FreeRDP uses it as the password all the same): that form, and only that form, is taken as text.
@@ -166,7 +186,10 @@ function parse(bytes) {
         if (flags & LB.TARGET_NETBIOS_NAME) out.netbios = host(r, MAX.NETBIOS);
         if (flags & LB.CLIENT_TSV_URL) field(r, MAX.TSV_URL);
         if (flags & LB.REDIRECTION_GUID) field(r, MAX.GUID);
-        if (flags & LB.TARGET_CERTIFICATE) out.targetCertificate = certificate(field(r, MAX.CERT));
+        if (flags & LB.TARGET_CERTIFICATE) {
+            out.targetCertificate = certificate(field(r, MAX.CERT));
+            if (out.targetCertificate === null) out.unusable = true;
+        }
         if (flags & LB.TARGET_NET_ADDRESSES) {
             const total = r.u32le(), count = r.u32le();
             // TargetNetAddressesLength covers the count and the addresses (MS-RDPBCGR 2.2.13.1)
@@ -222,7 +245,7 @@ function fingerprint(der) {
 // the terminator, longer than the Connection Request holds, with a line break inside).
 function prepare(r, maxToken) {
     const max = (maxToken === undefined) ? limits.REDIRECT_TOKEN_MAX_BYTES : maxToken;
-    if (!r.username || r.username.length === 0 || !r.passwordText || r.passwordText.length === 0) return null;
+    if (r.unusable || !r.username || r.username.length === 0 || !r.passwordText || r.passwordText.length === 0) return null;
     let token = null;
     if (r.loadBalanceInfo) {
         let t = r.loadBalanceInfo;

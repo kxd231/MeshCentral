@@ -168,7 +168,7 @@ The browser shows the translated text for `code` (and `hint`); `detail` only in 
 | `RDP_ERROR_SERVER_DENIED` | `0x00000A01` | a redirect to the device that cannot be followed: no user name or text password in the packet (a public-key-encrypted password cookie), an unusable routing token, no way to open a new relay, or it came after the session was active |
 | `RDP_ERROR_SERVER_DENIED` | `0x00000A03` | more than `REDIRECTS_MAX` (2) redirects in one session |
 | `RDP_ERROR_TLS_FAILED` | `0x00000A02` | after a followed redirect the server presented another certificate than the one it announced (or than the redirected connection presented); refused before any credential was sent |
-| `RDP_ERROR_CAPABILITIES_REJECTED` | `GFX_REQUIRED` (hint `use-gfx`) | in classic bitmap mode the server closed the connection after licensing without a reason: it works only with the GFX graphics mode (GNOME Remote Desktop) |
+| `RDP_ERROR_CAPABILITIES_REJECTED` | `GFX_REQUIRED` (hint `use-gfx`) | in classic bitmap mode the server itself disconnected (Disconnect Request or Provider Ultimatum, not a lost relay or socket) after licensing without a reason: it works only with the GFX graphics mode (GNOME Remote Desktop) |
 
 ## Server → browser (binary)
 

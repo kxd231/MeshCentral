@@ -177,12 +177,14 @@ class Connection {
             }
         }
     }
-    // A server that closes the connection after licensing and before the first activation, without any reason, while we offered no
+    // A server that disconnects after licensing and before the first activation, without any reason, while we offered no
     // graphics pipeline (legacy mode): GNOME Remote Desktop does this ("Client did not advertise support for the Graphics Pipeline", before
     // it sends the Demand Active), as other servers that only run RDPGFX. The user is told to use the GFX mode instead of getting a bare lost connection.
     gfxRequired(err) {
         if (this.config.mode !== 'legacy' || this.everActive || (this.phase !== 'capabilities' && this.phase !== 'finalization')) return err;
-        if (!(err instanceof RdpError) || (err.code !== 'RDP_ERROR_CONNECTION_LOST' && err.code !== 'RDP_ERROR_SERVER_DISCONNECTED')) return err;
+        // Only what the server itself said (a Disconnect Request or Disconnect Provider Ultimatum): a lost relay, an offline agent or a closed socket
+        // is not evidence of a refusal and keeps its own error
+        if (!(err instanceof RdpError) || (err.code !== 'RDP_ERROR_SERVER_DISCONNECTED')) return err;
         return new RdpError('RDP_ERROR_CAPABILITIES_REJECTED', { detail: 'GFX_REQUIRED', phase: err.phase || this.phase, hint: 'use-gfx' });
     }
     start() {

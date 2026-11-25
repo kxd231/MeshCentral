@@ -224,8 +224,8 @@ device, a server that names none wants the same endpoint again). The sequence:
    `net-end`; the server dropping the old connection is expected.
 3. The main process counts the redirect as well (an engine that asks for more than `REDIRECTS_MAX` is broken: `RDP_ERROR_INTERNAL`), lets go of the old relay (no
    `net-end` for it, no deadline for its closing), restarts its connection deadline and calls `opts.reopenRelay(done)`. The owner of the session (apprelays.js
-   via rdp/mstsc-relay.js) checks the user's rights and the device **again exactly like for the first connection**, with the same rights level and the same target
-   as the session was admitted with (else the session is closed), and opens a new agent relay to the same node and port. Relay bytes the engine sent in between are
+   via rdp/mstsc-relay.js) checks the user's rights and the device **again exactly like for the first connection** (who and which device come from the first authorization; the login cookie is not decoded again), with the same rights level and the same target
+   as the session was admitted with (else the session ends with `RDP_ERROR_ACCESS_DENIED`), and opens a new agent relay to the same node and port. Relay bytes the engine sent in between are
    dropped (counted as written).
 4. When the new relay is connected the main process posts `redirected`, the engine starts a new connection on a new transport with: the routing token in the
    X.224 Connection Request, the credentials of the packet instead of the user's (which were wiped after Client Info), and the certificate policy below. The

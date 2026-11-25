@@ -2091,7 +2091,13 @@ function setRelaySessionDeadline(req, obj, cookie) {
 // on the relay device and load the server stored credentials into creds when useServerCreds is set.
 // func(node) is called only when authorized; otherwise obj.close() is called.
 function mstscAuthorize(parent, domain, req, obj, creds, useServerCreds, func) {
-    if (obj.infos.ip.startsWith('node/')) {
+    if (obj.reauthorizing != null) {
+        // Authorization again within a session (Server Redirection): who and which device come from the first authorization. The cookie of the page
+        // is not decoded a second time (it is valid for minutes only and the session was admitted with it); the rights are checked from scratch below.
+        obj.nodeid = obj.reauthorizing.nodeid;
+        obj.userid = obj.reauthorizing.userid;
+        obj.cookie = obj.reauthorizing.cookie;
+    } else if (obj.infos.ip.startsWith('node/')) {
         // Use the user session
         obj.nodeid = obj.infos.ip;
         obj.userid = req.session.userid;
@@ -2281,12 +2287,15 @@ function CreateMstscRelayJs(parent, db, ws, req, args, domain, settings) {
         },
         // The server redirected the session to the same device (Server Redirection): the user's rights, the device and the relay are checked
         // again like for the first connection, on a copy of the session's authorization state (the live session, its trust record, audit data and
-        // stored credentials stay as they are). The relay URL is renewed; a different user, device, relay or target ends the session.
+        // stored credentials stay as they are; the login cookie is not decoded again). The relay URL is renewed; a different user, device, relay or target ends the session.
         reauthorize: function (func) {
             if ((obj.ws == null) || (obj.originalIp == null)) { func(null); return; }
             let answered = false;
             const answer = function (ctx) { if (!answered) { answered = true; func(ctx); } };
-            const again = { ws: obj.ws, infos: { ip: obj.originalIp }, expire: obj.expire, expireCleanup: true, close: function () { clearTimeout(again.expireTimer); answer(null); } };
+            const again = {
+                ws: obj.ws, infos: { ip: obj.originalIp }, expire: obj.expire, expireCleanup: true, close: function () { clearTimeout(again.expireTimer); answer(null); },
+                reauthorizing: { nodeid: obj.nodeid, userid: obj.userid, cookie: (obj.cookie != null) ? Object.assign({}, obj.cookie) : null }     // the state of the first authorization
+            };
             try {
                 mstscAuthorize(parent, domain, req, again, {}, false, function (node) {
                     clearTimeout(again.expireTimer);

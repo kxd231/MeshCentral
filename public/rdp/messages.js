@@ -293,7 +293,7 @@
         'RDP_ERROR_SERVER_DENIED/0x00000A01': 'The server redirected the session in a way Web-RDP cannot follow (no usable credentials or routing information)',
         'RDP_ERROR_SERVER_DENIED/0x00000A03': 'The server redirected the session too many times',
         'RDP_ERROR_TLS_FAILED/0x00000A02': 'After a redirect the server presented another certificate than the one it announced, the session was refused before any credential was sent',
-        'RDP_ERROR_CAPABILITIES_REJECTED/GFX_REQUIRED': 'The server closed the connection without offering classic bitmaps: it works only with the GFX graphics mode, choose Auto or Lossless under Graphics'
+        'RDP_ERROR_CAPABILITIES_REJECTED/GFX_REQUIRED': 'The server disconnected without offering classic bitmaps: it works only with the GFX graphics mode, choose Auto or Lossless under Graphics'
     };
 
     // → { message, code, detail, hint } for display. `message` is plain text (the caller escapes it for HTML).
