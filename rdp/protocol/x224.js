@@ -41,14 +41,24 @@ function checkRequested(p) {
     }
 }
 
-// X.224 Connection Request with RDP_NEG_REQ → TPKT frame
-function encodeConnectionRequest(requestedProtocols) {
+// X.224 Connection Request with RDP_NEG_REQ → TPKT frame. routingToken (optional Uint8Array without its terminator, at most
+// REDIRECT_TOKEN_MAX_BYTES, no CR or LF): sent before the RDP_NEG_REQ followed by CR LF.
+function encodeConnectionRequest(requestedProtocols, routingToken) {
     const p = (requestedProtocols === undefined) ? DEFAULT_REQUESTED_PROTOCOLS : requestedProtocols;
     checkRequested(p);
-    return tpkt.encode(Uint8Array.of(
-        14, TPDU.CR, 0, 0, 0, 0, 0,                                     // LI, CR CDT, DST-REF, SRC-REF, class 0
-        NEG_TYPE.REQ, 0x00, 0x08, 0x00, p & 0xFF, (p >>> 8) & 0xFF, (p >>> 16) & 0xFF, p >>> 24
-    ));
+    let token = new Uint8Array(0);
+    if ((routingToken !== undefined) && (routingToken !== null)) {
+        if (!(routingToken instanceof Uint8Array) || (routingToken.length === 0) || (routingToken.length > limits.REDIRECT_TOKEN_MAX_BYTES) || routingToken.some((b) => (b === 0x0D) || (b === 0x0A))) {
+            throw new RdpError('RDP_ERROR_INTERNAL', { detail: 'INVALID', phase: PHASE.X224 });
+        }
+        token = new Uint8Array(routingToken.length + 2);
+        token.set(routingToken); token[routingToken.length] = 0x0D; token[routingToken.length + 1] = 0x0A;
+    }
+    const out = new Uint8Array(15 + token.length);
+    out.set([14 + token.length, TPDU.CR, 0, 0, 0, 0, 0]);                // LI, CR CDT, DST-REF, SRC-REF, class 0
+    out.set(token, 7);
+    out.set([NEG_TYPE.REQ, 0x00, 0x08, 0x00, p & 0xFF, (p >>> 8) & 0xFF, (p >>> 16) & 0xFF, p >>> 24], 7 + token.length);
+    return tpkt.encode(out);
 }
 
 // X.224 Connection Confirm (complete TPKT frame) → { selectedProtocol, flags }; throws RdpError

@@ -226,6 +226,22 @@ credentials may already have reached that session's endpoint, so investigate
 before retrying. Pins are not a substitute for network isolation or authenticated
 RDP endpoints.
 
+## Servers that redirect the session (GNOME Remote Desktop)
+
+Some servers accept the connection and then redirect the client to the same machine, with a routing token and a one-time user name and password
+(Server Redirection, MS-RDPBCGR 2.2.13.1). GNOME Remote Desktop in its remote login mode does this for every connection (the system daemon takes
+the connection, the daemon of the session takes over after the redirect; this is the "Remote Login" option of the desktop settings on Ubuntu). Web-RDP follows such a redirect when it leads **back to the same device and port**: it opens a second relay through the same agent, checks
+your rights again exactly as for the first connection, and logs on with the one-time credentials of the redirect. At most two redirects are followed per session. A redirect to another computer is refused.
+
+What this means for trust: the first connection is checked against the pinned certificate as always. The second connection must present the certificate the
+redirecting server announced in the redirect (or, if it announced none, the same certificate as the first one); another certificate ends the session
+before any credential is sent (`RDP_ERROR_TLS_FAILED` `0x00000A02`). The pin of the device stays the certificate of the first connection, the one every
+later session meets first; the certificate of the session daemon behind it is never pinned. The one-time credentials stay inside the engine, are wiped after
+use and are never saved, logged or sent to the browser. A device that did NLA is never followed by a TLS-only connection.
+
+GNOME Remote Desktop needs the GFX graphics mode: with Classic bitmaps it closes the connection and Web-RDP says so (`RDP_ERROR_CAPABILITIES_REJECTED`,
+`GFX_REQUIRED`). Choose Auto or Lossless under Graphics. The port of the user's desktop sharing (3390) does not redirect.
+
 ## Limits and deployment
 
 In addition to configured admission limits, a user may launch at most 10 engines
@@ -270,7 +286,7 @@ clipboard contents in diagnostics. Relay debug logging (`settings.debug` includi
 | `RDP_ERROR_CONNECT_FAILED` | RDP service, device port, target firewall and reachability from the agent. |
 | `RDP_ERROR_CONNECTION_LOST`, `RDP_ERROR_TIMEOUT` | Target, agent and proxy connectivity; suspend/resume and timeouts. TLS-only xrdp can close after RDP activation when account login fails: also check target authentication logs. |
 | `RDP_ERROR_STANDARD_SECURITY_UNSUPPORTED` | Enable TLS or NLA on the target; RC4-only RDP is unsupported. |
-| `RDP_ERROR_SECURITY_NEGOTIATION`, `RDP_ERROR_TLS_FAILED` | Target security policy and TLS compatibility; `requireNla: true` intentionally refuses TLS-only servers. |
+| `RDP_ERROR_SECURITY_NEGOTIATION`, `RDP_ERROR_TLS_FAILED` | Target security policy and TLS compatibility; `requireNla: true` intentionally refuses TLS-only servers. TLS_FAILED with detail `0x00000A02`: after a redirect the server presented another certificate than it announced, check the network path to the target. |
 | `RDP_ERROR_CERT_CHANGED` | Independently verify both fingerprints and approve rotation in the main UI. |
 | `RDP_ERROR_NLA_DOWNGRADE` | Restore NLA on the target; investigate unexpected security changes before any reset. |
 | `RDP_ERROR_TRUST_RACE` | Investigate competing pins/endpoints; credentials may have been sent. |
@@ -278,8 +294,8 @@ clipboard contents in diagnostics. Relay debug logging (`settings.debug` includi
 | `RDP_ERROR_PASSWORD_EXPIRED`, `RDP_ERROR_PASSWORD_MUST_CHANGE` | Change the target password through an approved account management path. |
 | `RDP_ERROR_ACCOUNT_LOCKED`, `RDP_ERROR_ACCOUNT_DISABLED`, `RDP_ERROR_ACCOUNT_RESTRICTION` | Target account status, expiry, workstation and logon-hour restrictions. |
 | `RDP_ERROR_LOGON_TYPE_NOT_GRANTED`, `RDP_ERROR_ACCESS_DENIED` | Remote Desktop logon rights and target policy. |
-| `RDP_ERROR_LICENSING`, `RDP_ERROR_SERVER_DENIED`, `RDP_ERROR_SERVER_DISCONNECTED` | RDP host/license configuration and server logs; a disconnect alone does not prove bad credentials. |
-| `RDP_ERROR_CAPABILITIES_REJECTED`, `RDP_ERROR_H264_REQUIRED` | Follow `use-gfx`, `use-legacy` (Classic bitmaps) or `enable-h264` hints; use a browser with a working H.264 decoder if the target requires it. |
+| `RDP_ERROR_LICENSING`, `RDP_ERROR_SERVER_DENIED`, `RDP_ERROR_SERVER_DISCONNECTED` | RDP host/license configuration and server logs; a disconnect alone does not prove bad credentials. `SERVER_DENIED` with detail `0x00000A00`..`0x00000A03`: the server redirected the session, see "Servers that redirect the session": `A00` to another computer (not followed), `A01` a redirect that cannot be followed (no usable credentials in it), `A03` more than two redirects. |
+| `RDP_ERROR_CAPABILITIES_REJECTED`, `RDP_ERROR_H264_REQUIRED` | Follow `use-gfx`, `use-legacy` (Classic bitmaps) or `enable-h264` hints; use a browser with a working H.264 decoder if the target requires it. Detail `GFX_REQUIRED`: the server (GNOME Remote Desktop) works only with GFX, choose Auto or Lossless under Graphics. |
 | `RDP_ERROR_TOO_MANY_SESSIONS` | Close sessions, wait for launch budget recovery, or adjust admission limits after checking server logs and memory. |
 | `RDP_ERROR_RESOURCE_LIMIT`, `RDP_ERROR_CLIENT_STALLED` | Memory/queue limits, huge desktops, blocked background tabs or a slow/disconnected browser. |
 | `RDP_ERROR_PROTOCOL`, `RDP_ERROR_CLIENT_DECODE`, `RDP_ERROR_CLIENT_PROTOCOL` | Invalid target/browser data or unsupported graphics; try Classic bitmaps for a graphics error, reproduce with the same target/browser and retain the code. |

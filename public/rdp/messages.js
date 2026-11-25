@@ -287,6 +287,15 @@
     HINT_TEXT[errors.hints.ENABLE_H264] = 'The server needs H.264, which this browser cannot decode.';
     HINT_TEXT[errors.hints.CHECK_CREDENTIALS] = 'Check the username, password and domain.';
 
+    // Sentences for details that need one (code + '/' + detail). Server Redirection (rdp/protocol/redirect.js) and the GFX-only servers
+    const DETAIL_TEXT = {
+        'RDP_ERROR_SERVER_DENIED/0x00000A00': 'The server redirected the session to another computer, which Web-RDP does not follow',
+        'RDP_ERROR_SERVER_DENIED/0x00000A01': 'The server redirected the session in a way Web-RDP cannot follow (no usable credentials or routing information)',
+        'RDP_ERROR_SERVER_DENIED/0x00000A03': 'The server redirected the session too many times',
+        'RDP_ERROR_TLS_FAILED/0x00000A02': 'After a redirect the server presented another certificate than the one it announced, the session was refused before any credential was sent',
+        'RDP_ERROR_CAPABILITIES_REJECTED/GFX_REQUIRED': 'The server closed the connection without offering classic bitmaps: it works only with the GFX graphics mode, choose Auto or Lossless under Graphics'
+    };
+
     // → { message, code, detail, hint } for display. `message` is plain text (the caller escapes it for HTML).
     function describeError(err) {
         const e = sanitizeError((err != null && typeof err === 'object') ? err : {});
@@ -299,6 +308,7 @@
             message += '. If the remote desktop did not open, check the username, password, domain and Remote Desktop logon permissions for the account on the remote computer.';
         }
         if (e.cert) { message += '. Pinned certificate SHA-256: ' + (e.cert.expected || 'none') + '. Certificate presented now: ' + e.cert.actual + '. Ask an administrator of the device to accept the new certificate.'; }
+        if (e.detail && DETAIL_TEXT[e.code + '/' + e.detail]) { message += '. ' + DETAIL_TEXT[e.code + '/' + e.detail]; }
         if (e.detail) { message += ' (' + e.detail + ')'; }
         return { message: message, code: e.code, detail: e.detail, phase: e.phase, hint: e.hint, cert: e.cert };
     }

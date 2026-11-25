@@ -25,6 +25,10 @@ const session = require('./rdp/client.js').createSession({
   credentials,     // { domain, username, password } strings; encoded once, references dropped
   relay,           // connected ws WebSocket to the agent relay (opened by apprelays.js as today, with
                    //   maxPayload = RELAY_MSG_MAX_BYTES), paused; client.js resumes it after 'start'
+  reopenRelay,     // optional: function (done) the session calls when the server redirects it to the same device (see
+                   //   "Server Redirection"): checks the user's rights again, opens a new relay to the same node and port
+                   //   (paused, like `relay`) and calls done(relay), or done(null) when that is not possible. Without it a
+                   //   redirect ends the session with RDP_ERROR_SERVER_DENIED 0x00000A01
   sendJson,        // function (array): send a JSON message to the browser
   sendBinary,      // function (Uint8Array): send a binary frame to the browser
   bufferedAmount,  // function (): browser websocket bufferedAmount
@@ -122,6 +126,7 @@ is fatal.
 | `clipboard` | `text` | local clipboard text (coalesced: main keeps only the latest pending one) |
 | `resize` | `width`, `height` | validated, coalesced |
 | `visibility` | `visible` | Suppress Output / Refresh Rect |
+| `redirected` | — | the new relay of a Server Redirection is connected (and resumed by main): the engine starts the follow-up connection on it. Only valid after an engine `redirect` |
 | `quit` | — | close cleanly; main kills the engine after `ENGINE_QUIT_KILL_MS` |
 
 `start.config`:
@@ -184,6 +189,7 @@ is fatal.
 | `resize` | `width`, `height` | legacy reactivation with a new size, or a restarted GFX pipeline (after `desktop`); main sends `rdp-resize`. Both messages are posted after the `out` frames queued before them |
 | `out` | `data` (≤ `WIRE_FRAME_MAX_BYTES`) | one complete binary WIRE frame, forwarded unchanged |
 | `clipboard` | `text` (≤ `CLIPBOARD_MAX_BYTES`) | remote clipboard text; at most one not yet acknowledged by `clipboard-ack`, newer text replaces a pending one inside the engine |
+| `redirect` | — | the server redirected the session to this same device (see "Server Redirection"): the engine closed its connection and wants a new relay. No field: everything the packet carried stays in the engine |
 | `end` | `clean: bool`, `error` (`RdpError.toWire()`, when not clean), `cert` (`{ fingerprint256 }`, only with `RDP_ERROR_CERT_CHANGED`: the certificate the server presented) | session over; exactly once, then the engine waits for `quit` |
 | `log` | `level` (`debug` / `warn`), `msg` (≤ 1 KiB) | only when `config.debug`; at most 50 per second, the engine drops the excess |
 
@@ -196,6 +202,47 @@ messages are small and event driven. The main process also counts every engine m
 and deserialized it (Node's IPC channel has no maximum message size and is not replaced); "bounded" holds in full only for a
 correct engine, a compromised one is contained by the process boundary, the engine RSS check (1 s sampling) and `oom_score_adj`. Log lines are built only from
 constants, numbers and `PHASE` names: never from received data, exception messages or credentials.
+
+## Server Redirection
+
+A server that redirects a session (MS-RDPBCGR 2.2.13.1, Server Redirection PDU) sends a routing token (load balance info) and, usually, the
+credentials of a one-time logon and the certificate of the target. GNOME Remote Desktop does this for every connection in its remote login
+mode (the system daemon accepts the client, then redirects it to the daemon of the session; Ubuntu uses it by default): the redirect carries
+`Cookie: msts=<id>`, a one-time user name and password (flagged `LB_PASSWORD_IS_PK_ENCRYPTED` although they are plain UTF-16 text) and a
+target certificate, and no target name. The packet arrives in the licensing phase or, as with GNOME Remote Desktop, right after activation, in
+every case before the session is reported to the browser (`connect`).
+
+Only a redirect to **this device and this port** is followed (rdp/protocol/redirect.js `decide`: every target the server names must be the
+device, a server that names none wants the same endpoint again). The sequence:
+
+1. The connection parses the packet (bounded, nothing logged), decides, builds the plan (routing token without CR LF, the credentials of the packet,
+   the SHA-256 fingerprint of the target certificate if there is one, the certificate and security of this connection) and calls `io.redirect(plan)`
+   (rdp/ENGINE-API.md). A plan it cannot build (no user name or password in text form, a token longer than a Connection Request holds or with a line
+   break) or a limit reached ends the session with `RDP_ERROR_SERVER_DENIED` (details in rdp/WIRE.md).
+2. The engine counts the redirect (`REDIRECTS_MAX` per session, then `0x00000A03`), registers the plan's buffers as secrets, and in the next turn closes the
+   connection and its transport and posts `redirect` (no fields). From then on it acknowledges and drops what the old relay still delivers and ignores its
+   `net-end`; the server dropping the old connection is expected.
+3. The main process counts the redirect as well (an engine that asks for more than `REDIRECTS_MAX` is broken: `RDP_ERROR_INTERNAL`), lets go of the old relay (no
+   `net-end` for it, no deadline for its closing), restarts its connection deadline and calls `opts.reopenRelay(done)`. The owner of the session (apprelays.js
+   via rdp/mstsc-relay.js) checks the user's rights and the device **again exactly like for the first connection**, with the same rights level and the same target
+   as the session was admitted with (else the session is closed), and opens a new agent relay to the same node and port. Relay bytes the engine sent in between are
+   dropped (counted as written).
+4. When the new relay is connected the main process posts `redirected`, the engine starts a new connection on a new transport with: the routing token in the
+   X.224 Connection Request, the credentials of the packet instead of the user's (which were wiped after Client Info), and the certificate policy below. The
+   connection deadline of the engine starts again (`CONNECT_TIMEOUT_MS` for the new relay and the second connection).
+5. `connect` reports the **first** connection's certificate fingerprint and NLA flag (the endpoint of the device itself), so the main process pins and remembers
+   what the next session meets first; the session daemon's certificate behind it is never pinned and the pin is never compared with it.
+
+Certificate policy of the follow-up connection (checked right after the TLS handshake, before any NTLM message or Client Info): it must present the certificate
+the redirecting server vouched for in the packet (`TargetCertificate`); when the packet has none, the same certificate as the redirected connection presented. A
+different one ends the session with `RDP_ERROR_TLS_FAILED` `0x00000A02` (not `RDP_ERROR_CERT_CHANGED`: the pin of the device is not what was compared). A device
+that needed NLA (the stored floor or the first connection) is never followed by a TLS-only connection (`RDP_ERROR_NLA_DOWNGRADE` before the handshake). The
+first connection is checked against the pin of the device as always. Because the redirect arrives over a connection that passed that check (or is a first use), and
+the one-time credentials of the packet are all the follow-up connection sends, a rogue endpoint at the follow-up address gets nothing it could use.
+
+The credentials of the packet live in the engine only: they are registered as secrets (zeroed after Client Info of the second connection, on `end`, `quit` and exit),
+never sent to the main process, never logged, never saved (`savepass` keeps what the user typed). Not followed: a redirect after `connect` (legacy graphics can be
+active before a late redirect: `0x00000A01`), a packet without usable credentials (LB info alone), a truly encrypted password cookie.
 
 ## Credentials
 
@@ -210,6 +257,7 @@ constants, numbers and `PHASE` names: never from received data, exception messag
   is called: after Client Info is sent (NLA and TLS-only), on `end`, on `quit`, in the
   `uncaughtException` handler and before exit. NLA keys are wiped when CredSSP completes.
 - Auto-reconnect uses the server's ARC cookie, never the password.
+- A followed Server Redirection brings its own one-time credentials (see "Server Redirection"); they are handled exactly like the above and never leave the engine.
 
 ## Flow control
 

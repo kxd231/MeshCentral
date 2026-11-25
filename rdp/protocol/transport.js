@@ -175,10 +175,10 @@ function utf16le(s) {
 }
 
 // X.224 negotiation on the raw stream → { selectedProtocol, flags }
-async function negotiate(duplex, requestedProtocols) {
+async function negotiate(duplex, requestedProtocols, routingToken) {
     const reader = new StreamReader(duplex, PHASE.X224);
     try {
-        duplex.write(x224.encodeConnectionRequest(requestedProtocols));
+        duplex.write(x224.encodeConnectionRequest(requestedProtocols, routingToken));
         const frame = await reader.next(tpktLength);
         const result = x224.parseConnectionConfirm(frame, requestedProtocols);
         // The server speaks next only after our TLS ClientHello
@@ -251,6 +251,10 @@ function checkEarlyAuth(bytes) {
 //   sni                  default false
 //   clientName           NTLM workstation name (string, default '')
 //   trust                { fingerprint256: 'AA:..' | null, nlaSeen: bool } (start.config.trust): pinned certificate and "CredSSP worked before"
+//   routingToken         Uint8Array: the load balance info of a Server Redirection, sent in the Connection Request (follow-up connection only)
+//   redirected           true on the follow-up connection of a Server Redirection: trust.fingerprint256 is then the certificate the redirecting
+//                        server vouched for (or the one it presented itself), and a different one ends with RDP_ERROR_TLS_FAILED 0x00000A02
+//                        instead of RDP_ERROR_CERT_CHANGED: the pin of the device is not what was compared and must not be touched
 //   signal               AbortSignal of the engine's connection deadline
 //   nlaTimeoutMs         default NLA_TIMEOUT_MS
 //   onPhase(phase)       progress callback (PHASE values)
@@ -293,7 +297,7 @@ async function connect(duplex, options) {
     }
     try {
         enter(PHASE.X224);
-        const neg = await race(negotiate(duplex, requested));
+        const neg = await race(negotiate(duplex, requested, o.routingToken));
         const nla = (neg.selectedProtocol !== x224.PROTOCOL.SSL);
         // CredSSP worked against this device before: a server that now selects TLS only is a downgrade (or a rogue endpoint)
         if (nlaSeen && !nla) { throw new RdpError('RDP_ERROR_NLA_DOWNGRADE', { phase: PHASE.X224 }); }
@@ -311,6 +315,7 @@ async function connect(duplex, options) {
         tlsSocket = t.socket;
         // Pinned certificate: compared before anything is written to the TLS socket (no NTLM message, no Client Info)
         if ((pinned !== null) && (t.fingerprint256 !== pinned)) {
+            if (o.redirected === true) { throw new RdpError('RDP_ERROR_TLS_FAILED', { detail: 0x00000A02, phase: PHASE.TLS }); }
             const mismatch = new RdpError('RDP_ERROR_CERT_CHANGED', { phase: PHASE.TLS });
             mismatch.certFingerprint = t.fingerprint256;
             throw mismatch;

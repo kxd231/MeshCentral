@@ -266,7 +266,7 @@ function createSession(opts) {
     if (config == null) { throw new TypeError('Invalid Web-RDP session config'); }
     const L = Object.assign({}, LIMITS.limits, opts.limits || {});
     const settings = opts.settings || LIMITS.resolveSettings(null);
-    const relay = opts.relay;
+    let relay = opts.relay;                     // replaced by the relay of a followed Server Redirection (opts.reopenRelay)
     const debugFn = (typeof opts.debug == 'function') ? opts.debug : null;
     const tap = (typeof opts.onIpc == 'function') ? opts.onIpc : null;
     const s = new EventEmitter();
@@ -296,6 +296,7 @@ function createSession(opts) {
     let startTime = 0, lastEngineMsg = launchTime;
     // relay → engine
     let netPosted = 0, netAcked = 0, relayPaused = true, relayClosed = false, netEndPending = false, drainDeadline = 0;
+    let redirects = 0, relayGap = false;        // Server Redirections followed; true while the engine waits for the new relay
     const preStart = [];
     // relay control messages forwarded to the browser (sliding second)
     const ctrlTimes = [];
@@ -341,9 +342,19 @@ function createSession(opts) {
     globalState.sessions.add(s);
     const tick = setInterval(onTick, TICK_MS);
     tick.unref();
-    relay.on('message', onRelayMessage);
-    relay.on('close', onRelayClosed);
-    relay.on('error', onRelayClosed);
+    attachRelay(relay);
+
+    function attachRelay(r) {
+        r.on('message', onRelayMessage);
+        r.on('close', onRelayClosed);
+        r.on('error', onRelayClosed);
+    }
+    function dropRelay(r) {
+        if (r == null) { return; }
+        r.removeListener('message', onRelayMessage); r.removeListener('close', onRelayClosed); r.removeListener('error', onRelayClosed);
+        r.on('error', function () { });         // an error after the session let go of the relay is nobody's business
+        try { if (typeof r.terminate == 'function') { r.terminate(); } else { r.close(); } } catch (ex) { }
+    }
 
     function post(msg) {
         if (!engineAlive) { return; }
@@ -383,7 +394,7 @@ function createSession(opts) {
     }
 
     function updateRelayPause() {
-        if (ended || relayClosed) { return; }
+        if (ended || relayClosed || (relay == null)) { return; }
         const full = !started || ((netPosted - netAcked) >= L.ENGINE_INPUT_QUEUE_BYTES);
         if (full && !relayPaused) { relayPaused = true; try { relay.pause(); } catch (ex) { } }
         else if (!full && relayPaused) { relayPaused = false; try { relay.resume(); } catch (ex) { } }
@@ -452,6 +463,7 @@ function createSession(opts) {
                 debug('RDP: phase ' + phase);
                 return;
             case 'connect': return onEngineConnect(m);
+            case 'redirect': return onEngineRedirect();
             case 'desktop':
                 if (!connected || !isDim(m.width) || !isDim(m.height)) { return fatal(); }
                 s.emit('desktop', { width: m.width, height: m.height });
@@ -518,8 +530,33 @@ function createSession(opts) {
             netOutWritten += n;
             scheduleAcks();
         };
-        if (relayClosed) { written(); return; }
+        if (relayClosed || relayGap) { written(); return; }      // no relay (closed, or being replaced after a Server Redirection): the bytes are dropped
         relaySend(d, written);
+    }
+
+    // Server Redirection to the same device (rdp/IPC.md "Server Redirection"): the engine closed its connection and asks for a new relay. The
+    // old relay is dropped, the owner of the session (opts.reopenRelay) checks the user's rights again and opens a new relay to the same node and
+    // port, and the engine continues with it. A limit counted here as well: the engine is not trusted with it.
+    function onEngineRedirect() {
+        if (!started || connected || relayGap || (redirects >= L.REDIRECTS_MAX)) { return fatal(); }
+        redirects++;
+        debug('RDP: Server Redirection ' + redirects);
+        dropRelay(relay);
+        relay = null; relayGap = true; relayPaused = true; relayClosed = false; netEndPending = false; drainDeadline = 0;
+        startTime = Date.now();         // the new relay and the second connection get a full connection time
+        phase = errors.PHASE.RELAY;
+        if (typeof opts.reopenRelay != 'function') { return fail(new RdpError(E.RDP_ERROR_SERVER_DENIED, { detail: 0x00000A01, phase: phase }), false); }
+        let answered = false;
+        opts.reopenRelay(function (next) {
+            if (answered) { return; }
+            answered = true;
+            if (ended) { dropRelay(next); return; }
+            if (next == null) { fail(new RdpError(E.RDP_ERROR_RELAY_FAILED, { phase: errors.PHASE.RELAY }), false); return; }
+            relay = next; relayGap = false;
+            attachRelay(relay);
+            post({ t: 'redirected' });
+            updateRelayPause();
+        });
     }
 
     function onEngineConnect(m) {
@@ -772,7 +809,7 @@ function createSession(opts) {
             if (killNow) { engine.kill(); } else { killTimer = setTimeout(function () { killTimer = null; engine.kill(); }, L.ENGINE_QUIT_KILL_MS); killTimer.unref(); }
         }
         // the relay socket is destroyed, so its buffers are gone with it
-        if (!relayClosed) { try { if (typeof relay.terminate == 'function') { relay.terminate(); } else { relay.close(); } } catch (ex) { } }
+        if (!relayClosed && (relay != null)) { try { if (typeof relay.terminate == 'function') { relay.terminate(); } else { relay.close(); } } catch (ex) { } }
         globalRelease(s, s.charged - wsCharged);
         extraCharge = 0;
         s.emit('end', result);

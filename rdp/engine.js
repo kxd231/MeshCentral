@@ -125,7 +125,11 @@ class Engine {
         this.credentials = null;
         this.secrets = new Set();
         this.connection = null;
+        this.factory = null;            // creates the connection (once per leg: the first connection and each followed Server Redirection)
         this.transport = null;
+        // Server Redirection (rdp/IPC.md "Server Redirection"): redirects followed so far, the plan waiting for the new relay, and what the
+        // first connection presented (the device's own endpoint: what the main process pins), net counters of bytes read before the current transport
+        this.redirects = 0; this.redirecting = false; this.pendingRedirect = null; this.entry = null; this.netBase = 0;
         this.timers = { heartbeat: null, connect: null, nla: null, ack: null, rate: null };
         // token bucket for posted WIRE frames (ENGINE_OUT_FRAMES_PER_SECOND): a hostile server cannot turn tiny frames into main thread load
         this.frameTokens = this.L.ENGINE_OUT_FRAME_BURST; this.frameTokensAt = null;
@@ -171,7 +175,12 @@ class Engine {
             switch (m.t) {
                 case 'start': return this.onStart(m);
                 case 'net': return this.onNet(m);
-                case 'net-end': if (this.netEnd) { return this.fatal(); } this.netEnd = true; this.transport.feedEnd(); return;
+                case 'net-end':
+                    // the relay of a connection that is being replaced closed (the server drops it after a redirect): nothing to deliver
+                    if (this.redirecting) { return; }
+                    if (this.netEnd) { return this.fatal(); }
+                    this.netEnd = true; this.transport.feedEnd(); return;
+                case 'redirected': return this.onRedirected();
                 case 'net-out-ack': return this.onNetOutAck(m);
                 case 'clipboard-ack': return this.onClipboardAck(m);
                 case 'out-ack': return this.onOutAck(m);
@@ -215,25 +224,94 @@ class Engine {
         this.config = Object.freeze(config);
         this.credentials = Object.freeze({ domain: c.domain, username: c.username, password: c.password });
         this.transport = new RelayTransport(this);
-        const self = this;
-        this.timers.connect = setTimeout(function () { const err = new RdpError(E.RDP_ERROR_TIMEOUT, { phase: self.phase }); self.abort.abort(err); self.end(err); }, this.L.CONNECT_TIMEOUT_MS);
+        this.armConnectTimer();
         let factory = this.createConnection;
         if (factory == null) {
             try { factory = require('./protocol/connection.js').createConnection; } catch (ex) { factory = null; }
             if (typeof factory != 'function') { return this.end(new RdpError(E.RDP_ERROR_INTERNAL)); }
         }
+        this.factory = factory;
         this.connection = factory(this.io());
         this.connection.start();
     }
 
+    // ---- Server Redirection (rdp/IPC.md "Server Redirection") ----
+    // Called by the connection (io.redirect) while it parses the redirect packet: the server names this very device and the packet carries
+    // what the second connection needs. plan: { routingToken | null, credentials: { domain, username, password }, certificate | null, current: { fingerprint256, nla } }
+    // (rdp/ENGINE-API.md). The engine takes the buffers over (registered as secrets, zeroed with the credentials). The connection is closed
+    // and the main process asked for a new relay in a following turn: the caller is still inside the connection's parser.
+    redirect(plan) {
+        const denied = (detail) => new RdpError(E.RDP_ERROR_SERVER_DENIED, { detail: detail, phase: this.phase });
+        if (this.ended || this.connected || this.redirecting || (plan == null) || (typeof plan != 'object')) { throw new RdpError(E.RDP_ERROR_INTERNAL); }
+        const c = plan.credentials, cur = plan.current, max = 2 * this.L.CREDENTIAL_FIELD_MAX_CHARS;
+        const okToken = (plan.routingToken == null) || ((plan.routingToken instanceof Uint8Array) && (plan.routingToken.length > 0) && (plan.routingToken.length <= this.L.REDIRECT_TOKEN_MAX_BYTES));
+        if ((c == null) || (cur == null) || !okToken || !((plan.certificate == null) || ((typeof plan.certificate == 'string') && FINGERPRINT.test(plan.certificate))) ||
+            (typeof cur.fingerprint256 != 'string') || !FINGERPRINT.test(cur.fingerprint256) || (typeof cur.nla != 'boolean')) { throw new RdpError(E.RDP_ERROR_INTERNAL); }
+        for (const k of ['domain', 'username', 'password']) { if (!(c[k] instanceof Uint8Array) || ((c[k].length & 1) !== 0)) { throw new RdpError(E.RDP_ERROR_INTERNAL); } }
+        if ((c.username.length === 0) || (c.password.length === 0) || (c.domain.length > max) || (c.username.length > max) || (c.password.length > max)) { throw denied(0x00000A01); }
+        if (this.redirects >= this.L.REDIRECTS_MAX) { throw denied(0x00000A03); }
+        this.redirects++;
+        this.redirecting = true;
+        this.pendingRedirect = plan;
+        for (const k of ['domain', 'username', 'password']) { this.secrets.add(c[k]); }
+        if (plan.routingToken != null) { this.secrets.add(plan.routingToken); }
+        this.log('debug', 'Server Redirection ' + this.redirects + ' of ' + this.L.REDIRECTS_MAX + ' followed');
+        const self = this;
+        setImmediate(function () { self.beginRedirect(); });
+    }
+
+    // The connection of this leg is closed, its relay is given up: the main process opens a new relay to the same device and answers 'redirected'
+    beginRedirect() {
+        if (this.ended || this.exiting || !this.redirecting) { return; }
+        this.closeConnection();
+        this.transport = null;
+        this.inputQueue.length = 0;
+        clearTimeout(this.timers.nla); this.timers.nla = null;
+        this.armConnectTimer();         // the new relay and the second connection get a full connection time
+        this.send({ t: 'redirect' });
+    }
+
+    onRedirected() {
+        if (this.ended) { return; }      // the session ended while the main process was opening the new relay
+        if (!this.redirecting || (this.pendingRedirect == null)) { return this.fatal(); }
+        const plan = this.pendingRedirect;
+        this.pendingRedirect = null;
+        this.redirecting = false;
+        // The first connection decides what the main process pins and remembers (the device's own endpoint, not the session daemon behind it)
+        if (this.entry == null) { this.entry = { fingerprint256: plan.current.fingerprint256, nla: plan.current.nla }; }
+        // Certificate policy (the decision is in the design notes of the redirect): the connection must present the certificate the redirecting server
+        // vouched for (TargetCertificate); without one, the same certificate the redirecting connection presented. Never less, and a
+        // connection that did NLA is never followed by one that does not. The pin of the device is not touched by the follow-up connection.
+        const expected = (plan.certificate != null) ? plan.certificate : plan.current.fingerprint256;
+        const nlaSeen = (this.config.trust.nlaSeen === true) || (plan.current.nla === true);
+        this.config = Object.freeze(Object.assign({}, this.config, {
+            trust: Object.freeze({ fingerprint256: expected, nlaSeen: nlaSeen }), routingToken: plan.routingToken, redirected: true
+        }));
+        this.credentials = Object.freeze({ domain: plan.credentials.domain, username: plan.credentials.username, password: plan.credentials.password });
+        this.netEnd = false;
+        this.netBase = this.netIn;      // everything read so far belongs to the closed connection and is acknowledged
+        this.transport = new RelayTransport(this);
+        this.scheduleNetAck();
+        this.connection = this.factory(this.io());
+        this.connection.start();
+    }
+
+    armConnectTimer() {
+        clearTimeout(this.timers.connect);
+        const self = this;
+        this.timers.connect = setTimeout(function () { const err = new RdpError(E.RDP_ERROR_TIMEOUT, { phase: self.phase }); self.abort.abort(err); self.end(err); }, this.L.CONNECT_TIMEOUT_MS);
+    }
+
     onNet(m) {
         const d = m.data;
-        if (!(d instanceof Uint8Array) || (d.length === 0) || (d.length > this.L.IPC_CHUNK_MAX_BYTES) || this.netEnd) { return this.fatal(); }
+        if (!(d instanceof Uint8Array) || (d.length === 0) || (d.length > this.L.IPC_CHUNK_MAX_BYTES) || (this.netEnd && !this.redirecting)) { return this.fatal(); }
         this.netIn += d.length;
         // main sends while in flight < ENGINE_INPUT_QUEUE_BYTES; one relay message may follow in chunks, and the messages the websocket
         // receiver still holds from the chunk it was parsing when the relay was paused (one socket chunk of slack)
         if ((this.netIn - this.netInAcked) > (this.L.ENGINE_INPUT_QUEUE_BYTES + this.L.RELAY_MSG_MAX_BYTES + this.L.IPC_CHUNK_MAX_BYTES)) { return this.fatal(); }
         if (this.ended) { this.netInAcked = this.netIn; return; }
+        // bytes of the connection that is being replaced: dropped, acknowledged
+        if (this.redirecting) { this.scheduleNetAck(); return; }
         this.transport.feed(d);
     }
 
@@ -327,8 +405,8 @@ class Engine {
     postAcks() {
         if (this.exiting) { return; }
         if (this.ctlHandled > this.ctlAckPosted) { this.ctlAckPosted = this.ctlHandled; this.send({ t: 'ctl-ack', total: this.ctlHandled }); }
-        if ((this.transport != null) && this.netAckOpen()) {
-            const d = this.ended ? this.netIn : this.transport.delivered();
+        if (((this.transport != null) || this.redirecting) && this.netAckOpen()) {
+            const d = (this.ended || this.redirecting) ? this.netIn : (this.netBase + this.transport.delivered());
             if (d > this.netInAcked) { this.netInAcked = d; this.send({ t: 'net-ack', total: d }); }
         }
     }
@@ -506,6 +584,8 @@ class Engine {
             transport: this.transport,
             signal: this.abort.signal,
             limits: Object.freeze(Object.assign({}, this.L)),
+            redirects: this.redirects,
+            redirect: function (plan) { self.redirect(plan); },
             phase: function (p) { self.setPhase(p); },
             connected: function (info) { self.onConnected(info); },
             // legacy reactivation with a new size: the browser gets rdp-resize
@@ -551,7 +631,10 @@ class Engine {
         if (this.ended) { return; }
         this.connected = true;
         clearTimeout(this.timers.connect); this.timers.connect = null;
-        this.send({ t: 'connect', width: info.width, height: info.height, mode: info.mode, gfx: gfx, tls: { fingerprint256: fp }, nla: info.nla === true });
+        // After a Server Redirection the main process learns the endpoint of the device itself (the first connection), which is what the next
+        // session meets first: pinning the certificate of the session behind it would make every later connection look like a changed certificate
+        const e = this.entry;
+        this.send({ t: 'connect', width: info.width, height: info.height, mode: info.mode, gfx: gfx, tls: { fingerprint256: (e != null) ? e.fingerprint256 : fp }, nla: (e != null) ? (e.nla === true) : (info.nla === true) });
     }
 
     // Debug only (config.debug): one 'gfxperf' log line per second that says where the frame rate of a GFX session is held. Per frame (END_FRAME):

@@ -47,6 +47,10 @@ function setMaxPayload(ws, n) {
 //                              done(true): another session pinned a different certificate meanwhile, the session is ended
 //   onCertChanged(cert)        apprelays: the engine refused the session because of a changed certificate ({ expected, actual }), for the
 //                              administrator's accept action and the audit log
+//   reauthorize(func(ctx | null))
+//                              optional, apprelays: the rights of the user and the device are checked again exactly as in authorize (no stored credentials,
+//                              no trust record), and the relay URL is renewed. Used when the server redirects the session to the same device (Server
+//                              Redirection): a new relay is opened. ctx as above; null: no longer authorized (the session is closed)
 //   onStart(done(waitMs))      optional, apprelays: the session is admitted and nothing has been sent towards the target yet (audit line
 //                              for a SIEM). The agent relay is opened after done(); the engine, and with it the RDP logon, starts no
 //                              earlier than waitMs after done()
@@ -62,8 +66,10 @@ function create(o) {
     const debug = (typeof o.debug == 'function') ? o.debug : function () { };
     const L = Object.assign({}, LIMITS.limits, o.limits || testHooks.limits || {});
     const obj = { closed: false };
-    let session = null, relay = null, releaseSlot = null, relayTimer = null, connected = false, ended = false;
+    let session = null, relay = null, relayHeld = false, releaseSlot = null, relayTimer = null, connected = false, ended = false;
     let infosTimer = null, pingTimer = null, lastPong = Date.now(), lastPingAt = Date.now(), startTimer = null;
+    let level0 = null, serverName0 = null;       // rights level and target of the authorized session: a new relay (Server Redirection) must match them
+    const spent = { in: 0, out: 0 };             // bytes of relays that were replaced
 
     const proto = new bm.BrowserProtocol({
         infos: onInfos,
@@ -122,6 +128,7 @@ function create(o) {
             if (ctx == null) { close(null); return; }                      // not authorized: closed as today
             if (ctx.error != null) { close(ctx.error); return; }
             const level = ctx.rights;
+            level0 = level; serverName0 = ctx.serverName;
             proto.setRights(level);
             // the large message size (clipboard, utype) is granted only to an authorized peer (it stays at INFOS_MSG_MAX_BYTES until now)
             if (!setMaxPayload(ws, L.CLIENT_MSG_MAX_BYTES)) { close(new RdpError(E.RDP_ERROR_INTERNAL)); return; }
@@ -203,7 +210,7 @@ function create(o) {
         let saved = infos.options.savepass ? { domain: credentials.domain, username: credentials.username, password: credentials.password } : null;
         try {
             session = client.createSession({
-                config: config, credentials: credentials, relay: relay, settings: o.settings, slot: releaseSlot,
+                config: config, credentials: credentials, relay: relay, reopenRelay: reopenRelay, settings: o.settings, slot: releaseSlot,
                 sendText: sendText,
                 sendJson: sendJson,
                 sendBinary: function (u8) { ws.send(u8, { binary: true }); },
@@ -219,6 +226,7 @@ function create(o) {
             return;
         }
         releaseSlot = null;                                     // owned by the session until the engine exits
+        relayHeld = true;                                       // and so is the relay
         session.on('connect', function (info) {
             connected = true;
             const activate = function () {
@@ -250,6 +258,22 @@ function create(o) {
         });
     }
 
+    // The server redirected the session to this same device (rdp/IPC.md "Server Redirection"): the user's rights and the device are checked
+    // again and a new relay is opened to the same node and port. done(relay) once the agent is connected, nothing when the session ended meanwhile.
+    function reopenRelay(done) {
+        if (typeof o.reauthorize != 'function') { done(null); return; }
+        o.reauthorize(function (ctx) {
+            if (obj.closed || ended) { return; }
+            if (ctx == null) { close(null); return; }                      // not authorized any more: closed as an unauthorized session is
+            if (ctx.error != null) { close(ctx.error); return; }
+            // the same rights and the same target as the session was admitted with: a change in between ends the session
+            if ((ctx.rights !== level0) || (ctx.serverName !== serverName0)) { close(new RdpError(E.RDP_ERROR_ACCESS_DENIED)); return; }
+            try { spent.in += relay._socket.bytesRead; spent.out += relay._socket.bytesWritten; } catch (ex) { }
+            relayHeld = false;          // the session has let go of the old relay; the new one is ours until the agent has connected it
+            openRelay(ctx.relayUrl, function () { relayHeld = true; done(relay); });
+        });
+    }
+
     function relayControl(text) { if ((relay != null) && (relay.readyState === 1)) { try { relay.send(text); } catch (ex) { } } }
 
     // err: RdpError to report (the session sends it when there is one), null for a plain close.
@@ -269,9 +293,9 @@ function create(o) {
         if (relayTimer != null) { clearTimeout(relayTimer); relayTimer = null; }
         if (startTimer != null) { clearTimeout(startTimer); startTimer = null; }
         if ((err != null) && !browserGone && (session == null)) { sendJson(['rdp-error', errors.toRdpError(err).toWire()]); }
-        let bytesIn = 0, bytesOut = 0;
-        try { bytesIn = ws._socket.bytesRead; bytesOut = ws._socket.bytesWritten; if (relay != null) { bytesIn += relay._socket.bytesRead; bytesOut += relay._socket.bytesWritten; } } catch (ex) { }
-        if ((relay != null) && (session == null)) { try { relay.close(); } catch (ex) { } }
+        let bytesIn = spent.in, bytesOut = spent.out;
+        try { bytesIn += ws._socket.bytesRead; bytesOut += ws._socket.bytesWritten; if (relay != null) { bytesIn += relay._socket.bytesRead; bytesOut += relay._socket.bytesWritten; } } catch (ex) { }
+        if ((relay != null) && !relayHeld) { try { relay.close(); } catch (ex) { } }     // not (yet) handed to a session: the first relay before the engine, or a new one still being connected
         if (releaseSlot != null) { releaseSlot(); releaseSlot = null; }   // failures before the engine was launched
         if (connected) { try { o.onEnd(bytesIn, bytesOut); } catch (ex) { } }
         if (!browserGone) { try { ws.close(); } catch (ex) { } }

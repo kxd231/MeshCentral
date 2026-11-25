@@ -49,6 +49,8 @@ const server = {
     // Message sizes per path (rdp/IPC.md)
     RELAY_MSG_MAX_BYTES: 1 * MiB,               // one websocket message from the agent relay (ws maxPayload)
     IPC_CHUNK_MAX_BYTES: 256 * KiB,             // one 'net' message in either direction
+    REDIRECTS_MAX: 2,                           // Server Redirections followed per session (same device and port only, rdp/IPC.md "Server Redirection")
+    REDIRECT_TOKEN_MAX_BYTES: 238,              // routing token in the X.224 Connection Request: the one-byte length indicator (254) minus header, CR LF and RDP_NEG_REQ
 
     // Timeouts
     CONNECT_TIMEOUT_MS: 30000,                  // from 'start' to 'connect' (engine), +CONNECT_GRACE_MS in the main process

@@ -2242,6 +2242,7 @@ function CreateMstscRelayJs(parent, db, ws, req, args, domain, settings) {
         onClosed: function () { clearTimeout(obj.expireTimer); delete obj.expireTimer; delete obj.ws; },
         authorize: function (infos, creds, func) {
             obj.infos = { ip: infos.ip };
+            obj.originalIp = infos.ip;      // what the browser sent (a cookie or the device id): reauthorize starts from it again
             obj.close = function () { if (obj.ws != null) { delete obj.ws; func(null); } };
             try {
                 mstscAuthorize(parent, domain, req, obj, creds, infos.options.useServerCreds, function (node) {
@@ -2277,6 +2278,22 @@ function CreateMstscRelayJs(parent, db, ws, req, args, domain, settings) {
                     });
                 });
             } catch (ex) { obj.close(); }
+        },
+        // The server redirected the session to the same device (Server Redirection): the user's rights, the device and the relay are checked
+        // again like for the first connection, on a copy of the session's authorization state (the live session, its trust record, audit data and
+        // stored credentials stay as they are). The relay URL is renewed; a different user, device, relay or target ends the session.
+        reauthorize: function (func) {
+            if ((obj.ws == null) || (obj.originalIp == null)) { func(null); return; }
+            let answered = false;
+            const answer = function (ctx) { if (!answered) { answered = true; func(ctx); } };
+            const again = { ws: obj.ws, infos: { ip: obj.originalIp }, expire: obj.expire, expireCleanup: true, close: function () { clearTimeout(again.expireTimer); answer(null); } };
+            try {
+                mstscAuthorize(parent, domain, req, again, {}, false, function (node) {
+                    clearTimeout(again.expireTimer);
+                    if ((again.nodeid !== obj.nodeid) || (again.userid !== obj.userid) || (again.relaynodeid !== obj.relaynodeid) || (again.tcpaddr !== obj.tcpaddr) || (again.tcpport !== obj.tcpport)) { answer(null); return; }
+                    answer({ rights: require('./rdp/browser-messages.js').rightsLevel(again.rights), relayUrl: mstscRelayUrl(args, domain, again), serverName: (again.relaynodeid != null) ? again.tcpaddr : node.name });
+                });
+            } catch (ex) { clearTimeout(again.expireTimer); answer(null); }
         },
         // settings.webRdp.auditLog: one JSON line per session, in the file before the agent is told to connect. The SIEM pairs it with
         // the logon on the target (docs/webrdp.md "SIEM / Wazuh"). A line that cannot be written does not stop the session: the

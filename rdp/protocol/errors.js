@@ -29,7 +29,7 @@ const HINTS = new Set(Object.values(shared.hints));
 // the protocol tables below, the decoder error codes and the standard JavaScript error classes;
 // DETAIL_NAMES is completed after the tables are defined. Any other string is dropped.
 const DETAIL_HEX = /^0x[0-9A-F]{8}$/;
-const DETAIL_NAMES = new Set(['TRUNCATED', 'INVALID', 'LIMIT', 'UNSUPPORTED', 'INTERNAL']);
+const DETAIL_NAMES = new Set(['TRUNCATED', 'INVALID', 'LIMIT', 'UNSUPPORTED', 'INTERNAL', 'GFX_REQUIRED']);
 const ERROR_CLASSES = ['Error', 'RangeError', 'TypeError', 'SyntaxError', 'ReferenceError', 'EvalError', 'URIError', 'AggregateError'];
 for (const c of ERROR_CLASSES) { DETAIL_NAMES.add(c.toUpperCase()); }
 function cleanDetail(d) {

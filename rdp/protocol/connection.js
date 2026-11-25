@@ -100,6 +100,7 @@ class Connection {
         this.visibilityPending = false;
         this.lastRefreshAt = 0; this.refreshTimer = null;
         this.failed = false;
+        this.redirecting = false;       // a Server Redirection is being followed: this connection only waits to be closed by the engine
         this.dynamic = new DynamicChannels(
             budget, b => this.sendSvc('drdynvc', b),
             this.config.mode === 'gfx' ? send => {
@@ -152,6 +153,8 @@ class Connection {
         this.io.phase(phase);
     }
     fail(err) {
+        // The server drops the connection right after a Server Redirection (the client is to reconnect): not an end of the session
+        if (this.redirecting) return;
         if (!this.failed) {
             // defense in depth: once the session has failed nothing more is read or written, whatever io.end() does
             this.failed = true;
@@ -170,9 +173,17 @@ class Connection {
             ) {
                 this.io.end(this.reason.clean ? null : toRdpError(this.reason.error, this.phase));
             } else {
-                this.io.end(toRdpError(err, this.phase));
+                this.io.end(this.gfxRequired(toRdpError(err, this.phase)));
             }
         }
+    }
+    // A server that closes the connection after licensing and before the first activation, without any reason, while we offered no
+    // graphics pipeline (legacy mode): GNOME Remote Desktop does this ("Client did not advertise support for the Graphics Pipeline", before
+    // it sends the Demand Active), as other servers that only run RDPGFX. The user is told to use the GFX mode instead of getting a bare lost connection.
+    gfxRequired(err) {
+        if (this.config.mode !== 'legacy' || this.everActive || (this.phase !== 'capabilities' && this.phase !== 'finalization')) return err;
+        if (!(err instanceof RdpError) || (err.code !== 'RDP_ERROR_CONNECTION_LOST' && err.code !== 'RDP_ERROR_SERVER_DISCONNECTED')) return err;
+        return new RdpError('RDP_ERROR_CAPABILITIES_REJECTED', { detail: 'GFX_REQUIRED', phase: err.phase || this.phase, hint: 'use-gfx' });
     }
     start() {
         if (this.started) bad();
@@ -278,10 +289,10 @@ class Connection {
         return this.txBlocked || this.io.outputBlocked();
     }
     pump() {
-        if (this.closed || this.failed || this.pumping || !this.socket) return;
+        if (this.closed || this.failed || this.redirecting || this.pumping || !this.socket) return;
         this.pumping = true;
         try {
-            while (!this.closed && !this.blocked()) {
+            while (!this.closed && !this.redirecting && !this.blocked()) {
                 if (this.reportedConnect && this.earlyFrames.length) {
                     const frame = this.earlyFrames.shift();
                     this.earlyFrameBytes -= frame.length;
@@ -434,7 +445,7 @@ class Connection {
             // with SEC_REDIRECTION_PKT, the 2 bytes after it play the part of pad2Octets. Only valid in this phase.
             if (flags === redirect.SEC_REDIRECTION_PKT) {
                 this.redirect(sec.rest());
-                return;
+                return;     // followed (the engine takes over) or ignored (LB_NOREDIRECT): either way this packet holds nothing more
             }
             if (flags === 0x80 || flags === 0x280) {
                 sec.skip(2);
@@ -474,6 +485,7 @@ class Connection {
             }
             if (p.type === 10) {
                 this.redirect(p.body);      // Enhanced Security Server Redirection PDU (Share Control type 0xA)
+                if (this.redirecting) return;
                 continue;
             }
             if (p.type !== 7) bad('UNSUPPORTED');
@@ -558,23 +570,36 @@ class Connection {
             }
         }
     }
-    // Server Redirection: parsed safely (bounded, ASCII hosts only), checked against the target policy of rdp/protocol/redirect.js
-    // and ended with a clear RDP_ERROR_SERVER_DENIED. Following a redirect (a new relay and a new connection to the same
-    // device with the load balance info) is not implemented. LB_NOREDIRECT is informational.
+    // Server Redirection (MS-RDPBCGR 2.2.13.1): parsed safely (bounded, ASCII host names only), checked against the target policy of
+    // rdp/protocol/redirect.js, and followed only when it leads back to this device: the engine opens a new connection through a new
+    // relay to the same node and port, with the load balance info as routing token and the credentials of the packet (io.redirect, rdp/ENGINE-API.md).
+    // Anything else ends the session with RDP_ERROR_SERVER_DENIED. LB_NOREDIRECT is informational. Everything from the packet is wiped
+    // here or handed over to the engine, which wipes it after its use; nothing of it is logged.
     redirect(body) {
-        let r = null;
+        let r = null, plan = null, handed = false;
         try {
             r = redirect.parse(body);
             const d = redirect.decide(r, { host: this.config.serverName || '' });
             this.io.log('debug', 'Server Redirection: ' + d.action + (d.reason ? ' (' + d.reason + ')' : ''));
             if (d.action === 'ignore') return;
-            throw new RdpError('RDP_ERROR_SERVER_DENIED', {
-                detail: d.action === 'refuse' ? redirect.DETAIL.OTHER_TARGET : redirect.DETAIL.RECONNECT_UNSUPPORTED,
-                phase: this.phase,
-            });
+            const denied = (detail) => new RdpError('RDP_ERROR_SERVER_DENIED', { detail, phase: this.phase });
+            if (d.action === 'refuse') throw denied(redirect.DETAIL.OTHER_TARGET);
+            // after the session was reported to the browser (legacy graphics can be active before the server redirects) there is nothing to start over
+            if (this.reportedConnect || typeof this.io.redirect !== 'function') throw denied(redirect.DETAIL.RECONNECT_UNSUPPORTED);
+            const lim = this.io.limits || L;
+            if ((this.io.redirects || 0) >= lim.REDIRECTS_MAX) throw denied(redirect.DETAIL.LIMIT);
+            plan = redirect.prepare(r, lim.REDIRECT_TOKEN_MAX_BYTES);
+            if (plan === null) throw denied(redirect.DETAIL.RECONNECT_UNSUPPORTED);
+            plan.current = { fingerprint256: this.tls.fingerprint256, nla: this.nla === true };
+            this.redirecting = true;
+            try { this.io.redirect(plan); handed = true; } catch (e) { this.redirecting = false; throw e; }
         } finally {
+            if (plan && !handed) {
+                plan.credentials.domain.fill(0); plan.credentials.username.fill(0); plan.credentials.password.fill(0);
+                if (plan.routingToken) plan.routingToken.fill(0);
+            }
             if (r) redirect.wipe(r);
-            body.fill(0);       // load balance info and password cookies
+            body.fill(0);       // load balance info, user name, password and target certificate
         }
     }
     armActivation() {
