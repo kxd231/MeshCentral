@@ -655,7 +655,7 @@ class Connection {
             // A legacy-only peer may activate successfully without opening/confirming GFX.
             // Bound this wait independently of reactivation and give an actionable fallback.
             if (this.config.mode === 'gfx' && (!this.graphics || !this.graphics.caps)) {
-                this.gfxConfirmTimer = setTimeout(() => this.fail(this.missingGfx()), L.GFX_CONFIRM_TIMEOUT_MS);
+                this.armGfxConfirm(true);
             }
             this.reportConnected();
         } else if (
@@ -671,6 +671,23 @@ class Connection {
         if (this.config.mode !== 'gfx') this.settled();
         if (!this.visible || this.visibilityPending) this.visibility(this.visible);
         if (this.config.mode === 'gfx') this.flushResize();
+    }
+    // The server activated the session and no graphics pipeline was confirmed: after GFX_CONFIRM_TIMEOUT_MS this is a server without GFX
+    // (CAPABILITIES_REJECTED, use-legacy). A server that is completely silent meanwhile (no picture, no graphics channel) may just be busy:
+    // GNOME Remote Desktop activates the session and redirects only when the daemon of the user's session is up, which takes seconds on a slow
+    // machine. Such a server gets GFX_CONFIRM_SILENT_MS from the activation; a redirect ends the wait (close() clears the timer).
+    armGfxConfirm(patient) {
+        clearTimeout(this.gfxConfirmTimer);
+        const started = this.now();
+        const wait = (ms) => {
+            this.gfxConfirmTimer = setTimeout(() => {
+                const silent = patient && !this.graphics && this.earlyFrames.length === 0;
+                const left = L.GFX_CONFIRM_SILENT_MS - (this.now() - started);
+                if (silent && left > 0 && !this.closed && !this.redirecting) wait(Math.min(left, L.GFX_CONFIRM_TIMEOUT_MS));
+                else this.fail(this.missingGfx());
+            }, ms);
+        };
+        wait(L.GFX_CONFIRM_TIMEOUT_MS);
     }
     missingGfx() {
         return new RdpError('RDP_ERROR_CAPABILITIES_REJECTED', { detail: 'UNSUPPORTED', phase: 'capabilities', hint: 'use-legacy' });
@@ -753,8 +770,7 @@ class Connection {
         this.restartUsed = true;
         this.gfxRestarted = true;
         this.graphics = null;
-        clearTimeout(this.gfxConfirmTimer);
-        this.gfxConfirmTimer = setTimeout(() => this.fail(this.missingGfx()), L.GFX_CONFIRM_TIMEOUT_MS);
+        this.armGfxConfirm(false);     // the pipeline was there before: the server's answer is due
         this.io.log('debug', 'Graphics pipeline closed by the server, waiting for a new one');
         return true;
     }

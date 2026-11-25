@@ -218,7 +218,7 @@
             client.connect(cookie, domain, username, password, options, function (err) {
                 QV('myCanvas', false);
                 QV('main', true);
-                QV('graphicsNote', false);
+                if (!err) QV('graphicsNote', false);      // after a failed legacy retry the note names the failure that caused it (the final error alone hides the first one)
                 if (err) { QH('errorMessage', EscapeHtml(rdpErrorText(err))); QV('errorMessage', true); }
                 // GFX failed after the picture was shown: the form still holds the values of this connect; connect again with classic bitmaps
                 if (err && (err.offerLegacy === true)) { QV('legacyAction', true); }

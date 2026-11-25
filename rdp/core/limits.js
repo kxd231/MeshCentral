@@ -56,6 +56,7 @@ const server = {
     CONNECT_TIMEOUT_MS: 30000,                  // from 'start' to 'connect' (engine), +CONNECT_GRACE_MS in the main process
     CONNECT_GRACE_MS: 5000,
     GFX_CONFIRM_TIMEOUT_MS: 5000,               // first activation to GFX CapsConfirm; then use-legacy (CAPABILITIES_REJECTED)
+    GFX_CONFIRM_SILENT_MS: 25000,               // ... but a server that sent no picture and opened no graphics channel gets this long (a redirect may be on its way)
     NLA_TIMEOUT_MS: 20000,                      // CredSSP exchange (engine)
     ENGINE_START_TIMEOUT_MS: 10000,             // 'hello' after launch
     ENGINE_HEARTBEAT_MS: 1000,                  // engine sends 'heartbeat' this often
