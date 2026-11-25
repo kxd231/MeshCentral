@@ -5011,7 +5011,7 @@
         }
         // A setting saved while the probe is still running keeps a saved H.264 (the list cannot show it yet and would turn it into JPEG)
         function h264Saved(value) { return ((!h264Page.known) && (parseInt(desktopsettings.agentencoding) == 264) && (parseInt(value) == 1)) ? 264 : value; }
-        function h264Say(text) { QH('DeskVideoNote', text); QV('DeskVideoNote', text != ''); }
+        function h264Say(text) { Q('DeskVideoNote').textContent = text; Q('DeskVideoNote').title = text; QV('DeskVideoNote', text != ''); } // text only: never HTML
         function h264Option() {
             var sel = Q('d7encoding'), o = null, i, want = h264Usable() && !h264Page.multi;
             for (i = 0; i < sel.options.length; i++) { if (sel.options[i].value == '264') { o = sel.options[i]; } }
@@ -5041,7 +5041,13 @@
         };
         function h264Status(m, st) {
             if ((desktop == null) || (desktop.m !== m)) return;
-            h264Say((st.state == 'fallback') ? format("Using JPEG instead of H.264: {0}", h264WhyText[st.why] || st.why) : '');
+            h264Say((st.state == 'fallback') ? h264Note(st.why) : '');
+        }
+        // The note of a fallback; no openh264 library on a Linux device (reason 2) says how to install it (the text comes from constants of agent-desktop-h264.js, chosen by the system of the device)
+        function h264Note(why) {
+            var advice = null, n = (typeof desktopNode != 'undefined') ? desktopNode : null;
+            if ((why == 'r2') && (typeof AgentDesktopH264 == 'object') && AgentDesktopH264.openh264Advice) { advice = AgentDesktopH264.openh264Advice(n ? n.osdesc : null, (n && n.agent) ? n.agent.id : null); }
+            return (advice != null) ? advice : format("Using JPEG instead of H.264: {0}", h264WhyText[why] || why);
         }
 
         function applyDesktopSettings() {

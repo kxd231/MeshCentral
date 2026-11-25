@@ -1021,5 +1021,41 @@
         return p;
     }
 
-    return { create: create, createPresenter: createPresenter, PRES_SLOW_MS: PRES_SLOW_MS, PRES_LOOSE: PRES_LOOSE, PRES_TIGHT: PRES_TIGHT, PRES_HISTORY_MS: PRES_HISTORY_MS, detect: detect, available: available, sessionEncoding: sessionEncoding, applyEncoding: applyEncoding, splitRecordedCommand: splitRecordedCommand, feedDelay: feedDelay, seekSpan: seekSpan, replayBlocks: replayBlocks, ENCODING: ENCODING, parseFrame: parseFrame, validLevel: validLevel, analyse: analyse, parseSpsExtra: parseSpsExtra, decoderConfig: decoderConfig, PROFILES: PROFILES, WATCHDOG_MS: WATCHDOG_MS };
+
+    // ---- the note for an administrator: the agent has no openh264 library (242 reason 2) ----
+    // The agent cannot say which system it runs on in the 242 (16 bytes, every field is defined), so the page uses what the server already knows of the device: the description of its
+    // operating system (node.osdesc, as the agent read it from the os-release file) and the type of the agent. The text of the note is chosen from the constants below; the description
+    // is only compared with patterns, never copied into the note, so nothing that an agent sends can reach the page.
+    var LINUX_AGENTS = { 5: 1, 6: 1, 7: 1, 8: 1, 9: 1, 10: 1, 11: 1, 12: 1, 13: 1, 15: 1, 18: 1, 19: 1, 20: 1, 24: 1, 25: 1, 26: 1, 27: 1, 28: 1, 32: 1, 33: 1, 35: 1, 36: 1, 37: 1, 40: 1, 41: 1, 44: 1, 45: 1 };
+    var OSDESC_MAX = 200;
+    var NOTE_BASE = 'H.264 is not available: the openh264 library is missing on this device.';
+    var NOTE_ADVICE = {
+        apt8: ' Install: sudo apt-get install libopenh264-8',
+        apt7: ' Install: sudo apt-get install libopenh264-7',
+        aptAny: ' Install: sudo apt-get install libopenh264-8 (libopenh264-7 on an older release)',
+        dnf: ' Install: sudo dnf install openh264',
+        pacman: ' Install: sudo pacman -S openh264',
+        zypper: ' Install: sudo zypper install libopenh264-7',
+        rhel: ' It comes from the Cisco openh264 repository or from RPM Fusion (enable one of them, then install openh264).',
+        generic: " Install your distribution's openh264 package (libopenh264.so.7 or .8)."
+    };
+    function osMajor(d) { var m = /(\d{1,3})(?:\.\d{1,3})*/.exec(d.replace(/^[^\d]*/, '')); return (m == null) ? -1 : parseInt(m[1], 10); }
+    // The advice for a device whose agent answered "no encoder" (reason 2), or null when this is not about the openh264 library (not a Linux agent: the Windows agent says reason 2 when
+    // it has no Media Foundation). osdesc: what the server knows (any value: it is checked); agentId: the type of the agent of the device (or null).
+    function openh264Advice(osdesc, agentId) {
+        var d = ((typeof osdesc === 'string') && (osdesc.length <= OSDESC_MAX) && !/[\u0000-\u001f\u007f]/.test(osdesc)) ? osdesc.toLowerCase() : '', key, v;
+        var linuxAgent = (typeof agentId === 'number') && (LINUX_AGENTS[agentId] === 1);
+        if (/red hat|rhel|rocky|almalinux|alma linux|centos|oracle linux|scientific linux/.test(d)) { key = 'rhel'; }
+        else if (/fedora/.test(d)) { key = 'dnf'; }
+        else if (/arch|manjaro|cachyos|endeavour|garuda/.test(d)) { key = 'pacman'; }
+        else if (/suse|sles/.test(d)) { key = 'zypper'; }
+        else if (/ubuntu/.test(d)) { v = osMajor(d); key = (v >= 25) ? 'apt8' : ((v === 24) ? 'apt7' : 'aptAny'); }
+        else if (/debian/.test(d)) { v = osMajor(d); key = (v >= 13) ? 'apt8' : ((v === 12) ? 'apt7' : 'aptAny'); }
+        else if (/mint|pop!?_os|elementary|kali|raspbian|raspberry pi os|zorin|devuan|neon/.test(d)) { key = 'aptAny'; }
+        else if (linuxAgent || /linux/.test(d)) { key = 'generic'; }
+        else { return null; }
+        return NOTE_BASE + NOTE_ADVICE[key];
+    }
+
+    return { openh264Advice: openh264Advice, create: create, createPresenter: createPresenter, PRES_SLOW_MS: PRES_SLOW_MS, PRES_LOOSE: PRES_LOOSE, PRES_TIGHT: PRES_TIGHT, PRES_HISTORY_MS: PRES_HISTORY_MS, detect: detect, available: available, sessionEncoding: sessionEncoding, applyEncoding: applyEncoding, splitRecordedCommand: splitRecordedCommand, feedDelay: feedDelay, seekSpan: seekSpan, replayBlocks: replayBlocks, ENCODING: ENCODING, parseFrame: parseFrame, validLevel: validLevel, analyse: analyse, parseSpsExtra: parseSpsExtra, decoderConfig: decoderConfig, PROFILES: PROFILES, WATCHDOG_MS: WATCHDOG_MS };
 });
