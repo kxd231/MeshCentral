@@ -6,7 +6,7 @@ from [kxd231/MeshAgent](https://github.com/kxd231/MeshAgent).
 
 ## Supported versions
 
-Only the latest `1.3.1-custom.N` release gets fixes.
+Only the latest `<upstream version>-custom.N` release (now `1.3.2-custom.N`) gets fixes.
 
 ## Reporting a vulnerability
 
