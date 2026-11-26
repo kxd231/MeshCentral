@@ -55,8 +55,16 @@ agent it:
 - encodes H.264 on the graphics card when a short self test shows that the card's encoder works, and in software
   otherwise. Tested on AMD, NVIDIA and Intel graphics.
 
-All other agents (Linux, macOS, 32-bit and ARM Windows) are the upstream ones. More about the agent: its
-[readme](https://github.com/kxd231/MeshAgent#readme).
+### Linux x64 agent of this fork (experimental)
+
+The default `meshagent_x86-64` comes from the [h264-v4 release of kxd231/MeshAgent](https://github.com/kxd231/MeshAgent/releases/tag/h264-v4),
+built on AlmaLinux 8 (glibc 2.28: RHEL 8, Debian 10, Ubuntu 20.04 and newer). Work in progress: it acknowledges the
+pictures the viewer has drawn, like the Windows agent, and sends H.264 video when the openh264 library of the system
+is installed (2.3 to 2.7, loaded at run time; without it the desktop stays JPEG). The viewer says which package to
+install when the library is missing.
+
+All other agents (Linux other than x64, macOS, 32-bit and ARM Windows) are the upstream ones. More about the agent:
+its [readme](https://github.com/kxd231/MeshAgent#readme).
 
 ### A size limit for session recordings
 

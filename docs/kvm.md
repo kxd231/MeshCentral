@@ -42,7 +42,8 @@ Requirements:
 - A browser with WebCodecs and an H.264 decoder (tested with Chrome; other browsers show the option when their
   check passes). The option is not in the list when the browser cannot decode H.264; the check runs once per page.
 - An agent that supports it: the Windows x64 agent of this fork with Media Foundation (Windows 8 or newer; the
-  Windows N editions need the media feature pack). A Linux agent is planned. Other agents do not know the video commands: the
+  Windows N editions need the media feature pack), or the Linux x64 agent of this fork (experimental) with the openh264
+  library of the system (2.3 to 2.7; the footer says which package to install when it is missing). Other agents do not know the video commands: the
   session stays JPEG, the footer shows "Using JPEG instead of H.264: ..." with the reason, and nothing else
   changes. The same happens when the agent refuses (encoder failed, screen too large, another viewer).
 - One viewer: video is used only while a single viewer is connected to the device, and the picture of every viewer
@@ -117,7 +118,8 @@ off by default until it has been measured; choosing H.264 turns it on for that s
 
 The default Windows x64 agent (`MeshService64.exe`) comes from the `h264-v3` release of
 [kxd231/MeshAgent](https://github.com/kxd231/MeshAgent/releases/tag/h264-v3) (pinned with size and SHA-384 in
-`agents/agent-defaults.json`); all other agent files are the upstream ones. Windows x64 agents connected to the
+`agents/agent-defaults.json`); the Linux x64 agent (`meshagent_x86-64`) comes from the `h264-v4` release (experimental,
+built on AlmaLinux 8 / glibc 2.28); all other agent files are the upstream ones. Windows x64 agents connected to the
 server update to it like to any new default agent. Compared with the upstream agent it:
 
 - captures the screen with DXGI Desktop Duplication and encodes only the changed areas, with GDI as automatic

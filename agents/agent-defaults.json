@@ -144,12 +144,6 @@
           "sha384": "dc0be75515b02e16978ec7edd824c00462cefd18f78209e79f221e760aee366bb64d113077f768c59f66592f325ed7eb"
         },
         {
-          "filename": "meshagent_x86-64",
-          "asset": "meshagent_x86-64",
-          "size": 3757520,
-          "sha384": "1bf04d9ced5c4be006d1ed714da04048d26e8f3ffdd02f39b69a73b6d73da98682dda7401ef33f04c621549aff6c3a28"
-        },
-        {
           "filename": "meshagent_x86-64_nokvm",
           "asset": "meshagent_x86-64_nokvm",
           "size": 3458480,
@@ -172,6 +166,18 @@
           "asset": "MeshService64.exe",
           "size": 4294144,
           "sha384": "e1f050775a66e00ba90261bce09c2ad4001b39276c88a164e88be46ad2e3038c4ad43f53fa2c3d2db5cfed2d83d88e17"
+        }
+      ]
+    },
+    {
+      "repository": "kxd231/MeshAgent",
+      "tag": "h264-v4",
+      "files": [
+        {
+          "filename": "meshagent_x86-64",
+          "asset": "meshagent_x86-64",
+          "size": 4040448,
+          "sha384": "fa4488e9130407321b654c197392ed3c09aaab01cbe57a6f403e483f8eb528b6d50210b09581bb7a06c10e145d343c7d"
         }
       ]
     },
